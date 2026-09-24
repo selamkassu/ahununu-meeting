@@ -1,0 +1,181 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────
+   Ahununu Logistics — Brand Color System
+   Primary  : #0B7A6B  (teal-green)
+   Secondary: #AED580  (light-green)
+
+   These CSS custom properties are the single source of truth.
+   Tailwind classes (bg-brand, text-brand, etc.) are generated
+   from tailwind.config.js and should be used in components.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --color-brand:         #0B7A6B;
+  --color-brand-light:   #0D9A87;
+  --color-brand-dark:    #085E52;
+  --color-accent:        #AED580;
+  --color-accent-light:  #C5E8A0;
+  --color-accent-dark:   #7DAA50;
+
+  /* Semantic — do not replace with brand */
+  --color-success:       #1F9D63;
+  --color-danger:        #D64545;
+  --color-warning:       #D97706;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate2-50 text-slate2-800 font-body antialiased;
+}
+
+/* Manifest-code chip — signature tracking-code visual for every record. */
+.code-chip {
+  @apply inline-flex items-center gap-1 rounded border border-slate2-200 bg-white px-1.5 py-0.5 font-mono text-[11px] tracking-wide text-slate2-500;
+}
+
+/* Focus ring — uses primary brand color for all interactive elements */
+.focus-ring {
+  @apply outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-white;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Rich Text Editor & Formatted Content Styles
+   ───────────────────────────────────────────────────────────── */
+.prose-content h1, .rich-editor-content h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1E293B;
+  margin-top: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+.prose-content h2, .rich-editor-content h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #1E293B;
+  margin-top: 0.6rem;
+  margin-bottom: 0.3rem;
+}
+.prose-content h3, .rich-editor-content h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #1E293B;
+  margin-top: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+.prose-content pre, .rich-editor-content pre {
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.85rem;
+  font-family: monospace;
+  font-size: 0.85rem;
+  overflow-x: auto;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  color: #0F172A;
+}
+.prose-content code, .rich-editor-content code {
+  background-color: #F1F5F9;
+  border-radius: 0.25rem;
+  padding: 0.15rem 0.35rem;
+  font-family: monospace;
+  font-size: 0.85em;
+  color: #0F172A;
+}
+.prose-content hr, .rich-editor-content hr {
+  border: none;
+  border-top: 1px solid #E2E8F0;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+}
+.prose-content ul, .rich-editor-content ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-top: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+.prose-content ol, .rich-editor-content ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-top: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+.prose-content li, .rich-editor-content li {
+  margin-top: 0.15rem;
+  margin-bottom: 0.15rem;
+}
+.prose-content p, .rich-editor-content p {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+  line-height: 1.6;
+}
+.prose-content a, .rich-editor-content a {
+  color: var(--color-brand);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-content a:hover, .rich-editor-content a:hover {
+  color: var(--color-brand-dark);
+}
+.prose-content table, .rich-editor-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  border: 1px solid #E4E7EC;
+}
+.prose-content th, .rich-editor-content th {
+  background-color: #F6F7F9;
+  border: 1px solid #E4E7EC;
+  padding: 0.5rem 0.75rem;
+  font-weight: 600;
+  text-align: left;
+  color: #28394A;
+}
+.prose-content td, .rich-editor-content td {
+  border: 1px solid #E4E7EC;
+  padding: 0.5rem 0.75rem;
+  color: #3B5166;
+  min-width: 50px;
+}
+.prose-content blockquote, .rich-editor-content blockquote {
+  border-left: 3px solid var(--color-brand);
+  padding-left: 0.875rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-style: italic;
+  color: #5B6B7A;
+}
+.prose-content img, .rich-editor-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid #E4E7EC;
+}
+.rich-editor-placeholder:empty:before {
+  content: attr(data-placeholder);
+  color: #98A5B3;
+  pointer-events: none;
+  display: block;
+}
+
