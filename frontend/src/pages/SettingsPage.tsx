@@ -1,6 +1,7 @@
 import React from "react";
-import { Truck, Mail } from "lucide-react";
+import { Mail } from "lucide-react";
 import { Card, CardHeader, Field, inputClass, Button } from "../components/ui/Primitives";
+import { Logo } from "../components/ui/Logo";
 import { useAuth } from "../context/AuthContext";
 
 const BRAND_COLORS = [
@@ -55,21 +56,14 @@ export default function SettingsPage() {
       </Card>
 
       <Card>
-        <CardHeader title="Logo" subtitle="Swap the mark used across the sidebar, login page and reports" />
+        <CardHeader title="Official Logo" subtitle="The official mark used across the sidebar, login page and reports" />
         <div className="flex items-center gap-4 p-5">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-brand text-white">
-            <Truck size={26} />
-          </div>
+          <Logo size={56} />
           <div>
+            <p className="font-semibold text-sm text-slate2-800">Ahununu Logistics Official Mark</p>
             <p className="text-sm text-slate2-600">
-              Logo components are centralized — replacing the icon/image in one place updates the sidebar, login screen, header and
-              generated reports automatically.
+              Logo components are centralized — using the official circular Ahununu emblem across the sidebar, login screen, header and generated reports.
             </p>
-            {isAdmin && (
-              <Button variant="secondary" className="mt-2">
-                Upload new logo
-              </Button>
-            )}
           </div>
         </div>
       </Card>
@@ -79,8 +73,7 @@ export default function SettingsPage() {
         <div className="p-5">
           <div className="mx-auto max-w-md overflow-hidden rounded-xl border border-slate2-200">
             <div className="flex items-center gap-2 bg-brand-dark px-5 py-4 text-white">
-              <Truck size={18} />
-              <span className="font-display text-sm font-bold">Ahununu Logistics</span>
+              <Logo size={24} withText textVariant="light" subtitle="" />
             </div>
             <div className="space-y-3 bg-white px-5 py-5">
               <p className="flex items-center gap-1.5 text-xs text-slate2-400">

@@ -72,7 +72,7 @@ export function Header({
   const displayCount = unreadCount > 99 ? "99+" : unreadCount;
 
   return (
-    <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate2-200 bg-white/90 px-4 backdrop-blur lg:px-6">
+    <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate2-200 bg-white/90 px-4 backdrop-blur lg:px-6 no-print">
       {/* Left: menu toggle + page title */}
       <div className="flex items-center gap-3">
         <button

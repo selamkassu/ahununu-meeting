@@ -9,7 +9,6 @@ import {
   Bell,
   BarChart3,
   Settings,
-  Truck,
   ClipboardList,
   Gavel,
   NotebookText,
@@ -17,6 +16,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import { Logo } from "../ui/Logo";
 
 const nav = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, permission: "dashboard:view" },
@@ -40,20 +40,14 @@ export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "deskto
 
   const wrapperClass =
     variant === "desktop"
-      ? "fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-slate2-200 bg-white text-slate2-700 lg:flex"
-      : "flex h-full w-64 flex-col border-r border-slate2-200 bg-white text-slate2-700";
+      ? "fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-slate2-200 bg-white text-slate2-700 lg:flex no-print"
+      : "flex h-full w-64 flex-col border-r border-slate2-200 bg-white text-slate2-700 no-print";
 
   return (
     <aside className={wrapperClass}>
       {/* Brand logo header */}
-      <div className="flex items-center gap-3 border-b border-slate2-100 px-5 py-5">
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand text-white shadow-sm">
-          <Truck size={22} strokeWidth={2.2} />
-        </div>
-        <div>
-          <p className="font-display text-sm font-bold leading-tight text-slate2-800">Ahununu Logistics</p>
-          <p className="text-[11px] leading-tight text-slate2-400">Meeting Management Portal</p>
-        </div>
+      <div className="border-b border-slate2-100 px-5 py-4">
+        <Logo size={40} withText />
       </div>
 
       {/* Nav items list */}

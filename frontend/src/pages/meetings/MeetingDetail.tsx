@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
   MapPin,
@@ -30,10 +30,20 @@ import {
   ChevronDown,
   ChevronUp,
   Search,
+  Printer,
+  Download,
+  FileSpreadsheet,
 } from "lucide-react";
 import { api, ApiError, getToken } from "../../api/client";
 import { RichTextEditor } from "../../components/editor/RichTextEditor";
 import { RichTextRenderer } from "../../components/editor/RichTextRenderer";
+import { printMeetingMinutes } from "../../utils/printUtility";
+import {
+  exportMeetingMinutesToPdf,
+  exportMeetingMinutesToDoc,
+  exportMeetingMinutesToExcel,
+  exportMeetingMinutesToText,
+} from "../../utils/exportReport";
 import type {
   MeetingDetail as MeetingDetailType,
   MeetingMinutes,
@@ -204,7 +214,7 @@ export default function MeetingDetail() {
                 })}
               </span>
               <span className="flex items-center gap-1.5">
-                <Clock size={13} /> {meeting.startTime} â€“ {meeting.endTime}
+                <Clock size={13} /> {meeting.startTime} – {meeting.endTime}
               </span>
               {meeting.location && (
                 <span className="flex items-center gap-1.5">
@@ -231,12 +241,22 @@ export default function MeetingDetail() {
               <span className="font-medium text-slate2-700">
                 {meeting.organizer.name}
               </span>{" "}
-              Â· {meeting.department.name}
+              · {meeting.department.name}
             </div>
           </div>
 
           <div className="flex flex-col items-end gap-2">
             <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => printMeetingMinutes({ meeting })}
+                className="text-xs py-1.5 px-2.5 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50"
+                title="Print Meeting Minutes (Clean Corporate Letterhead)"
+              >
+                <Printer size={13} className="text-slate2-600" />
+                <span className="hidden sm:inline">Print Minutes</span>
+              </Button>
               {canApprove && (
                 <Button
                   variant="primary"
@@ -313,10 +333,10 @@ export default function MeetingDetail() {
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-semibold text-sm">
-                  Meeting {meeting.status === "APPROVED" ? "Approved" : meeting.status === "CANCELLED" ? "Cancelled" : "Completed"} â€” Read-Only Mode
+                  Meeting {meeting.status === "APPROVED" ? "Approved" : meeting.status === "CANCELLED" ? "Cancelled" : "Completed"} — {meeting.status === "COMPLETED" ? "Action Items Active" : "Read-Only Mode"}
                 </span>
                 <span className="rounded-full bg-white/80 border border-current px-2 py-0.5 text-[10px] font-bold tracking-wider">
-                  LOCKED
+                  {meeting.status === "COMPLETED" ? "COMPLETED" : "LOCKED"}
                 </span>
                 {isSuperAdmin && (
                   <span className="rounded-full bg-amber-100 border border-amber-300 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
@@ -327,10 +347,10 @@ export default function MeetingDetail() {
               <div className="mt-1 text-xs text-slate2-600 space-y-0.5">
                 <p>
                   {meeting.status === "APPROVED"
-                    ? "This meeting has been approved. Participant roster, attendance flags, agenda, and action items are locked from modification."
+                    ? "This meeting has been approved. Participant roster, attendance flags, and agenda are locked from modification."
                     : meeting.status === "CANCELLED"
-                    ? "This meeting was cancelled. Records are retained in read-only audit status."
-                    : "This meeting has been completed. All records are archived and locked."}
+                    ? "This meeting was cancelled. All records, including action item status, are locked from editing."
+                    : "This meeting has been completed. Meeting records are archived; action items run independently and their status can be updated."}
                 </p>
                 {meeting.status === "APPROVED" && meeting.approvedBy && meeting.approvedAt && (
                   <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-brand/15 mt-2">
@@ -396,7 +416,12 @@ export default function MeetingDetail() {
         />
       )}
       {tab === "actions" && (
-        <ActionsTab meeting={meeting} canManage={canManage && canEdit} onChange={load} />
+        <ActionsTab
+          meeting={meeting}
+          canCreate={canManage && (!isLocked || isSuperAdmin)}
+          isSuperAdmin={isSuperAdmin}
+          onChange={load}
+        />
       )}
       {tab === "participants" && (
         <ParticipantsTab
@@ -474,7 +499,7 @@ function OverviewTab({ meeting }: { meeting: MeetingDetailType }) {
               <span className="rounded-full bg-slate2-100 px-2.5 py-1 font-medium text-slate2-600">
                 {step}
               </span>
-              {i < arr.length - 1 && <span className="text-slate2-300">â†’</span>}
+              {i < arr.length - 1 && <span className="text-slate2-400 select-none font-normal">→</span>}
             </React.Fragment>
           ))}
         </div>
@@ -743,7 +768,7 @@ function AgendaTab({
                       ) : (
                         <span className="text-slate2-400 italic">No presenter assigned</span>
                       )}
-                      <span>Â·</span>
+                      <span>·</span>
                       <span className="text-slate2-500">{a.durationMin} min</span>
                     </div>
                   </div>
@@ -891,6 +916,42 @@ function MinutesTab({
   const [summaryContent, setSummaryContent] = useState("");
   const [savingSummary, setSavingSummary] = useState(false);
 
+  // Export dropdown state
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handlePrintMinutes = () => {
+    printMeetingMinutes({
+      meeting,
+      minutesContent: summaryContent || summaryMinute?.content || "",
+    });
+  };
+
+  const handleExportMinutes = (type: "pdf" | "doc" | "excel" | "text") => {
+    setExportMenuOpen(false);
+    const content = summaryContent || summaryMinute?.content || "";
+    if (type === "pdf") {
+      exportMeetingMinutesToPdf(meeting, content);
+    } else if (type === "doc") {
+      exportMeetingMinutesToDoc(meeting, content);
+    } else if (type === "excel") {
+      exportMeetingMinutesToExcel(meeting, content);
+    } else if (type === "text") {
+      exportMeetingMinutesToText(meeting, content);
+    }
+  };
+
   // Load existing saved summary into state
   useEffect(() => {
     if (!isEditing) {
@@ -1016,7 +1077,85 @@ function MinutesTab({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Print and Export Minutes Actions */}
+            {summaryMinute?.content && !isEditing && (
+              <div className="flex items-center gap-1.5 mr-1">
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={handlePrintMinutes}
+                  id="print-minutes-btn"
+                  className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 h-8 bg-white hover:bg-slate2-50"
+                  title="Print Meeting Minutes (Clean Corporate Letterhead)"
+                >
+                  <Printer size={13} className="text-slate2-600" />
+                  <span>Print Minutes</span>
+                </Button>
+
+                <div className="relative inline-flex" ref={exportMenuRef}>
+                  <Button
+                    variant="secondary"
+                    type="button"
+                    onClick={() => handleExportMinutes("pdf")}
+                    id="export-minutes-btn"
+                    className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 h-8 rounded-r-none border-r-0 bg-white hover:bg-slate2-50"
+                    title="Export Meeting Minutes to PDF (.pdf)"
+                  >
+                    <Download size={13} className="text-slate2-600" />
+                    <span>Export</span>
+                  </Button>
+                  <button
+                    type="button"
+                    id="export-minutes-options-btn"
+                    onClick={() => setExportMenuOpen(!exportMenuOpen)}
+                    className="focus-ring inline-flex h-8 items-center rounded-r-lg border border-slate2-200 bg-white px-2 text-slate2-600 hover:bg-slate2-50"
+                    title="Export format options"
+                    aria-label="Export format options"
+                  >
+                    <ChevronDown size={13} />
+                  </button>
+
+                  {exportMenuOpen && (
+                    <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-lg border border-slate2-200 bg-white py-1 shadow-lg">
+                      <button
+                        type="button"
+                        onClick={() => handleExportMinutes("pdf")}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                      >
+                        <FileText size={15} className="text-rose-600" />
+                        <span>PDF Document (.pdf)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportMinutes("doc")}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                      >
+                        <FileText size={15} className="text-blue-600" />
+                        <span>Word Document (.doc)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportMinutes("excel")}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                      >
+                        <FileSpreadsheet size={15} className="text-emerald-600" />
+                        <span>Excel Summary (.xlsx)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportMinutes("text")}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                      >
+                        <FileText size={15} className="text-slate2-500" />
+                        <span>Plain Text (.txt)</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {isCompleted && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
                 <Lock size={12} /> Meeting Completed (Read-only)
@@ -1251,13 +1390,16 @@ function DecisionsTab({
 
 function ActionsTab({
   meeting,
-  canManage,
+  canCreate,
+  isSuperAdmin,
   onChange,
 }: {
   meeting: MeetingDetailType;
-  canManage: boolean;
+  canCreate: boolean;
+  isSuperAdmin: boolean;
   onChange: () => void;
 }) {
+  const { user, hasPermission } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [title, setTitle] = useState("");
   const [assignedToId, setAssignedToId] = useState("");
@@ -1268,6 +1410,25 @@ function ActionsTab({
   useEffect(() => {
     api.get<User[]>("/users").then(setUsers);
   }, []);
+
+  const isMeetingCancelled = meeting.status === "CANCELLED";
+
+  // Check if current user can update status for a specific action item
+  const canUpdateItemStatus = (item: (typeof meeting.actionItems)[number]) => {
+    // If meeting is cancelled, everything is locked, even action item status
+    if (isMeetingCancelled) {
+      return false;
+    }
+    // If meeting is completed or active, action items run independently
+    return (
+      isSuperAdmin ||
+      hasPermission("meetings:edit") ||
+      hasPermission("action_items:edit") ||
+      hasPermission("action_items:update_own") ||
+      (user && user.id === item.assignedTo.id) ||
+      (user && user.id === meeting.organizer.id)
+    );
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1287,14 +1448,20 @@ function ActionsTab({
       setAssignedToId("");
       setDeadline("");
       onChange();
+    } catch (err: any) {
+      alert(err.message || "Failed to create action item.");
     } finally {
       setSubmitting(false);
     }
   };
 
   const updateStatus = async (id: string, status: string) => {
-    await api.put(`/action-items/${id}`, { status });
-    onChange();
+    try {
+      await api.put(`/action-items/${id}`, { status });
+      onChange();
+    } catch (err: any) {
+      alert(err.message || "Failed to update action item status.");
+    }
   };
 
   return (
@@ -1328,11 +1495,11 @@ function ActionsTab({
                     <CodeChip>{a.code}</CodeChip>
                   </div>
                   <p className="text-xs text-slate2-400">
-                    {a.assignedTo.name} Â· Due{" "}
+                    {a.assignedTo.name} · Due{" "}
                     {new Date(a.deadline).toLocaleDateString()}
                     {a.overdue && (
                       <span className="ml-1 font-medium text-danger">
-                        Â· Overdue
+                        · Overdue
                       </span>
                     )}
                   </p>
@@ -1352,8 +1519,17 @@ function ActionsTab({
                 <select
                   value={a.status}
                   onChange={(e) => updateStatus(a.id, e.target.value)}
-                  disabled={!canManage}
-                  className={`${inputClass} w-auto text-xs`}
+                  disabled={!canUpdateItemStatus(a)}
+                  title={
+                    isMeetingCancelled
+                      ? "Meeting is cancelled. Action items are locked from editing."
+                      : !canUpdateItemStatus(a)
+                      ? "You do not have permission to update this action item status."
+                      : undefined
+                  }
+                  className={`${inputClass} w-auto text-xs ${
+                    !canUpdateItemStatus(a) ? "opacity-60 cursor-not-allowed bg-slate2-100" : ""
+                  }`}
                 >
                   {["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"].map(
                     (s) => (
@@ -1368,7 +1544,7 @@ function ActionsTab({
           ))
         )}
       </div>
-      {canManage && (
+      {canCreate && (
         <form
           onSubmit={submit}
           className="space-y-2 border-t border-slate2-100 p-4"
@@ -1385,7 +1561,7 @@ function ActionsTab({
               onChange={(e) => setAssignedToId(e.target.value)}
               className={inputClass}
             >
-              <option value="">Assign toâ€¦</option>
+              <option value="">Assign to…</option>
               {users.map((u) => (
                 <option key={u.id} value={u.id}>
                   {u.name}
@@ -1408,7 +1584,7 @@ function ActionsTab({
               <option value="">Link to a decision (optional)</option>
               {meeting.decisions.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.code} â€” {d.title}
+                  {d.code} — {d.title}
                 </option>
               ))}
             </select>
@@ -1513,7 +1689,7 @@ function DocumentsTab({
                   {d.fileName}
                 </p>
                 <p className="text-xs text-slate2-400">
-                  {d.uploadedBy.name} Â· {(d.fileSize / 1024 / 1024).toFixed(2)}{" "}
+                  {d.uploadedBy.name} · {(d.fileSize / 1024 / 1024).toFixed(2)}{" "}
                   MB
                 </p>
               </div>
@@ -1548,7 +1724,7 @@ function DocumentsTab({
               className={`${inputClass} flex-1`}
             />
             <Button type="submit" disabled={!file || submitting}>
-              <Plus size={14} /> {submitting ? "Uploadingâ€¦" : "Upload"}
+              <Plus size={14} /> {submitting ? "Uploading…" : "Upload"}
             </Button>
           </div>
           <p className="mt-2 text-xs text-slate2-400">
@@ -1773,7 +1949,7 @@ function ParticipantsTab({
 
       <CardHeader
         title="Participants & Attendance"
-        subtitle={`${totalParticipants} invited Â· ${attendedCount} attended (${attendancePct}% attendance)`}
+        subtitle={`${totalParticipants} invited · ${attendedCount} attended (${attendancePct}% attendance)`}
         action={
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs text-slate2-500 font-medium">
@@ -1932,10 +2108,10 @@ function ParticipantsTab({
             disabled={addingParticipant}
             className={`${inputClass} flex-1`}
           >
-            <option value="">Select a user to inviteâ€¦</option>
+            <option value="">Select a user to invite…</option>
             {available.map((u) => (
               <option key={u.id} value={u.id}>
-                {u.name} â€” {u.department?.name || "Ahununu"}
+                {u.name} — {u.department?.name || "Ahununu"}
               </option>
             ))}
           </select>
@@ -2126,7 +2302,7 @@ function ParticipantsTab({
             <div className="flex items-center justify-between rounded-lg bg-slate2-50 p-3 text-xs">
               <span className="text-slate2-500 font-medium">Summary:</span>
               <strong className="text-slate2-800 font-semibold">
-                {totalParticipants} invited Â· {modalAttendedCount} attended (
+                {totalParticipants} invited · {modalAttendedCount} attended (
                 {modalPct}% attendance)
               </strong>
             </div>

@@ -29,10 +29,20 @@ html,
 body,
 #root {
   height: 100%;
+  font-family: 'Roboto', sans-serif;
 }
 
 body {
   @apply bg-slate2-50 text-slate2-800 font-body antialiased;
+  font-family: 'Roboto', sans-serif;
+}
+
+button,
+input,
+optgroup,
+select,
+textarea {
+  font-family: 'Roboto', sans-serif;
 }
 
 /* Manifest-code chip — signature tracking-code visual for every record. */
@@ -54,8 +64,165 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   Print Styles — A4 Layout & Department Performance
+   ───────────────────────────────────────────────────────────── */
+@media print {
+  body,
+  .print-report,
+  .department-performance-report,
+  table {
+    font-family: 'Roboto', Arial, sans-serif !important;
+  }
+
+  @page {
+    size: A4;
+    margin: 15mm;
+    @bottom-right {
+      content: "Page " counter(page);
+      font-family: 'Roboto', Arial, sans-serif !important;
+      font-size: 8.5pt;
+      color: #64748b;
+    }
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  html,
+  body,
+  #root {
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tbody {
+    display: table-row-group;
+  }
+
+  tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  th,
+  td {
+    page-break-inside: avoid;
+  }
+
+  /* Scoped print for Department Performance section only */
+  body.print-dept-only aside,
+  body.print-dept-only header,
+  body.print-dept-only .dept-no-print {
+    display: none !important;
+  }
+
+  body.print-dept-only .lg\:pl-64 {
+    padding-left: 0 !important;
+  }
+
+  body.print-dept-only main {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  body.print-dept-only .report-card {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+  }
+
+  body.print-dept-only .report-card-body {
+    padding: 0 !important;
+  }
+
+  body.print-dept-only .printable-table-container {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    border: 1px solid #e2e8f0 !important;
+    border-radius: 6px !important;
+  }
+
+  body.print-dept-only .dept-print-header {
+    display: block !important;
+  }
+
+  .dept-print-title {
+    font-family: 'Roboto', Arial, sans-serif !important;
+    font-weight: 700 !important;
+  }
+
+  .department-performance-report th {
+    font-family: 'Roboto', Arial, sans-serif !important;
+    font-weight: 700 !important;
+  }
+
+  .department-performance-report td {
+    font-family: 'Roboto', Arial, sans-serif !important;
+    font-weight: 400 !important;
+  }
+
+  .department-performance-report td.completion-rate-cell {
+    font-weight: 500 !important;
+  }
+
+  /* Scoped print for Meeting Minutes only */
+  body.print-minutes-only aside,
+  body.print-minutes-only header,
+  body.print-minutes-only .minutes-no-print,
+  body.print-minutes-only nav {
+    display: none !important;
+  }
+
+  body.print-minutes-only .lg\:pl-64 {
+    padding-left: 0 !important;
+  }
+
+  body.print-minutes-only main {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+}
+
+.dept-print-header {
+  display: none;
+}
+
+
+/* ─────────────────────────────────────────────────────────────
    Rich Text Editor & Formatted Content Styles
    ───────────────────────────────────────────────────────────── */
+.prose-content b, .rich-editor-content b,
+.prose-content strong, .rich-editor-content strong {
+  font-weight: 700 !important;
+}
+.prose-content i, .rich-editor-content i,
+.prose-content em, .rich-editor-content em {
+  font-style: italic !important;
+}
+.prose-content u, .rich-editor-content u {
+  text-decoration: underline !important;
+}
+.prose-content s, .rich-editor-content s,
+.prose-content strike, .rich-editor-content strike,
+.prose-content del, .rich-editor-content del {
+  text-decoration: line-through !important;
+}
+
 .prose-content h1, .rich-editor-content h1 {
   font-size: 1.4rem;
   font-weight: 700;

@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { useNavigate, useLocation, Navigate } from "react-router-dom";
-import { Truck, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { Button, Field, inputClass } from "../components/ui/Primitives";
+import { Logo } from "../components/ui/Logo";
 
 const DEMO_ACCOUNTS = [
   { label: "Super Admin", email: "dawit.bekele@ahununulogistics.com" },
@@ -48,14 +49,8 @@ export default function Login() {
         <div className="absolute -right-24 -top-24 h-96 w-96 rounded-full bg-brand-light/30 blur-3xl" />
         <div className="absolute -bottom-32 -left-16 h-96 w-96 rounded-full bg-accent/20 blur-3xl" />
 
-        <div className="relative flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-accent text-brand-dark">
-            <Truck size={24} strokeWidth={2.5} />
-          </div>
-          <div>
-            <p className="font-display text-lg font-bold">Ahununu Logistics</p>
-            <p className="text-xs text-white/50">Meeting Management Portal</p>
-          </div>
+        <div className="relative">
+          <Logo size={46} withText textVariant="light" />
         </div>
 
         <div className="relative max-w-md">
@@ -87,14 +82,8 @@ export default function Login() {
       {/* Right: form */}
       <div className="flex w-full flex-col justify-center bg-slate2-50 px-6 py-12 lg:w-1/2 lg:px-16">
         <div className="mx-auto w-full max-w-sm">
-          <div className="mb-8 flex items-center gap-2.5 lg:hidden">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand text-white">
-              <Truck size={18} />
-            </div>
-            <div>
-              <p className="font-display text-sm font-bold text-slate2-800">Ahununu Logistics</p>
-              <p className="text-[11px] text-slate2-400">Meeting Management Portal</p>
-            </div>
+          <div className="mb-8 lg:hidden">
+            <Logo size={40} withText textVariant="dark" />
           </div>
 
           <h2 className="font-display text-2xl font-semibold text-slate2-800">Sign in</h2>

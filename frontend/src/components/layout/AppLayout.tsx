@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
-import { X, Truck } from "lucide-react";
+import { X } from "lucide-react";
 import { Sidebar } from "./Sidebar";
 import { Header } from "./Header";
 import { useAuth } from "../../context/AuthContext";
+import { Logo } from "../ui/Logo";
 
 const titles: Record<string, string> = {
   "/": "Dashboard",
@@ -35,9 +36,9 @@ export function AppLayout() {
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center bg-slate2-50">
-        <div className="flex items-center gap-2 text-slate2-400">
-          <Truck size={18} className="animate-pulse" />
-          <span className="text-sm">Loading Ahununu Logistics Meeting Portal…</span>
+        <div className="flex flex-col items-center gap-3 text-slate2-500">
+          <Logo size={48} className="animate-pulse" />
+          <span className="text-sm font-medium text-slate2-600">Loading Ahununu Logistics Meeting Portal…</span>
         </div>
       </div>
     );
@@ -64,9 +65,9 @@ export function AppLayout() {
         </div>
       )}
 
-      <div className="lg:pl-64">
+      <div className="lg:pl-64 print:pl-0">
         <Header title={pageTitle(location.pathname)} onMenuClick={() => setMobileOpen(true)} />
-        <main className="px-4 py-6 lg:px-6">
+        <main className="px-4 py-6 lg:px-6 print:p-0">
           <Outlet />
         </main>
       </div>

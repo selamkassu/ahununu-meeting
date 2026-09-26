@@ -35,8 +35,9 @@ export default {
         warning: "#D97706",   // amber for warnings / pending
       },
       fontFamily: {
-        display: ["'Space Grotesk'", "sans-serif"],
-        body: ["'Inter'", "sans-serif"],
+        sans: ["'Roboto'", "sans-serif"],
+        display: ["'Roboto'", "sans-serif"],
+        body: ["'Roboto'", "sans-serif"],
         mono: ["'IBM Plex Mono'", "monospace"],
       },
       boxShadow: {

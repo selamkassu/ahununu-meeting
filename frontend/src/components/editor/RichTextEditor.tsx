@@ -18,7 +18,6 @@ import {
   Undo2,
   Redo2,
   X,
-  Check,
   Plus,
   Heading1,
   Heading2,
@@ -26,6 +25,7 @@ import {
   Quote,
   Code,
   Minus,
+  Unlink,
 } from "lucide-react";
 
 export interface RichTextEditorProps {
@@ -46,7 +46,7 @@ const EMOJI_CATEGORIES = [
     emojis: ["✅", "❌", "⚠️", "ℹ️", "🔔", "💡", "🎯", "🚀", "⏳", "🔒", "⭐", "🔥", "🤝", "👍", "👎", "👏"],
   },
   {
-    name: "Emotions",
+    name: "Emotions & Actions",
     emojis: ["😀", "😊", "🙂", "🤔", "🧐", "😎", "😇", "🎉", "🙌", "💬", "📝", "✍️", "💪", "💡", "✨", "☕"],
   },
 ];
@@ -61,12 +61,13 @@ export function RichTextEditor({
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const savedSelectionRef = useRef<Range | null>(null);
+  const savedRangeRef = useRef<Range | null>(null);
 
   // Popover modal states
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [linkUrl, setLinkUrl] = useState("");
   const [linkText, setLinkText] = useState("");
+  const [isEditingExistingLink, setIsEditingExistingLink] = useState(false);
 
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
@@ -84,6 +85,8 @@ export function RichTextEditor({
     italic: false,
     underline: false,
     strikeThrough: false,
+    code: false,
+    link: false,
     unorderedList: false,
     orderedList: false,
     alignLeft: false,
@@ -93,64 +96,159 @@ export function RichTextEditor({
     formatBlock: "",
   });
 
-  // Track initial hydration to avoid resetting cursor when typing
+  // Track internal typing to avoid resetting cursor
   const isInternalUpdate = useRef(false);
 
+  // Sync external value with editor innerHTML
   useEffect(() => {
     if (editorRef.current && !isInternalUpdate.current) {
-      if (editorRef.current.innerHTML !== value) {
+      if (editorRef.current.innerHTML !== (value || "")) {
         editorRef.current.innerHTML = value || "";
       }
     }
     isInternalUpdate.current = false;
   }, [value]);
 
-  const saveSelection = () => {
+  // Continuously save active range inside editor
+  const saveSelection = useCallback(() => {
     const sel = window.getSelection();
-    if (sel && sel.rangeCount > 0) {
-      savedSelectionRef.current = sel.getRangeAt(0).cloneRange();
-    }
-  };
+    if (!sel || sel.rangeCount === 0 || !editorRef.current) return;
+    try {
+      const range = sel.getRangeAt(0);
+      if (editorRef.current.contains(range.commonAncestorContainer)) {
+        savedRangeRef.current = range.cloneRange();
+      }
+    } catch {}
+  }, []);
 
-  const restoreSelection = () => {
+  // Restore saved range inside editor
+  const restoreSelection = useCallback(() => {
+    if (!savedRangeRef.current || !editorRef.current) return;
     const sel = window.getSelection();
-    if (sel && savedSelectionRef.current) {
+    if (!sel) return;
+    try {
       sel.removeAllRanges();
-      sel.addRange(savedSelectionRef.current);
-    }
-  };
+      sel.addRange(savedRangeRef.current);
+    } catch {}
+  }, []);
 
+  // Detect active formatting at cursor / selection
   const updateActiveStates = useCallback(() => {
     if (!editorRef.current || disabled) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+
     try {
-      let fb = "";
+      const range = sel.getRangeAt(0);
+      if (!editorRef.current.contains(range.commonAncestorContainer)) return;
+
+      let isBold = false;
+      let isItalic = false;
+      let isUnderline = false;
+      let isStrike = false;
+      let isCode = false;
+      let isLink = false;
+      let blockTag = "";
+      let isUl = false;
+      let isOl = false;
+      let align = "";
+
       try {
-        fb = (document.queryCommandValue("formatBlock") || "").toLowerCase().replace(/[<>]/g, "");
+        isBold = document.queryCommandState("bold");
+        isItalic = document.queryCommandState("italic");
+        isUnderline = document.queryCommandState("underline");
+        isStrike = document.queryCommandState("strikeThrough");
+        isUl = document.queryCommandState("insertUnorderedList");
+        isOl = document.queryCommandState("insertOrderedList");
       } catch {}
+
+      // Walk up the DOM tree from commonAncestorContainer to check node tags & styles
+      let curr: Node | null = range.commonAncestorContainer;
+      if (curr.nodeType === Node.TEXT_NODE) curr = curr.parentNode;
+
+      while (curr && curr !== editorRef.current) {
+        if (curr.nodeType === Node.ELEMENT_NODE) {
+          const el = curr as HTMLElement;
+          const tag = el.tagName.toLowerCase();
+
+          if (
+            tag === "b" ||
+            tag === "strong" ||
+            el.style.fontWeight === "bold" ||
+            parseInt(el.style.fontWeight, 10) >= 600
+          ) {
+            isBold = true;
+          }
+          if (tag === "i" || tag === "em" || el.style.fontStyle === "italic") {
+            isItalic = true;
+          }
+          if (tag === "u" || el.style.textDecoration?.includes("underline")) {
+            isUnderline = true;
+          }
+          if (
+            tag === "s" ||
+            tag === "strike" ||
+            tag === "del" ||
+            el.style.textDecoration?.includes("line-through")
+          ) {
+            isStrike = true;
+          }
+          if (tag === "code") {
+            isCode = true;
+          }
+          if (tag === "a") {
+            isLink = true;
+          }
+          if (["h1", "h2", "h3", "blockquote", "pre"].includes(tag) && !blockTag) {
+            blockTag = tag;
+          }
+          if (tag === "ul") isUl = true;
+          if (tag === "ol") isOl = true;
+
+          const textAlign = el.style.textAlign || el.getAttribute("align");
+          if (textAlign && !align) {
+            align = textAlign.toLowerCase();
+          }
+        }
+        curr = curr.parentNode;
+      }
+
       setActiveStates({
-        bold: document.queryCommandState("bold"),
-        italic: document.queryCommandState("italic"),
-        underline: document.queryCommandState("underline"),
-        strikeThrough: document.queryCommandState("strikeThrough"),
-        unorderedList: document.queryCommandState("insertUnorderedList"),
-        orderedList: document.queryCommandState("insertOrderedList"),
-        alignLeft: document.queryCommandState("justifyLeft"),
-        alignCenter: document.queryCommandState("justifyCenter"),
-        alignRight: document.queryCommandState("justifyRight"),
-        alignJustify: document.queryCommandState("justifyFull"),
-        formatBlock: fb,
+        bold: isBold,
+        italic: isItalic,
+        underline: isUnderline,
+        strikeThrough: isStrike,
+        code: isCode,
+        link: isLink,
+        unorderedList: isUl,
+        orderedList: isOl,
+        alignLeft: align === "left" || (!align && !isUl && !isOl),
+        alignCenter: align === "center",
+        alignRight: align === "right",
+        alignJustify: align === "justify",
+        formatBlock: blockTag,
       });
-    } catch {
-      // Ignore queryCommand errors if unsupported in current context
-    }
+    } catch {}
   }, [disabled]);
+
+  // Global selection listener so toolbar state updates as cursor moves
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      saveSelection();
+      updateActiveStates();
+    };
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+    };
+  }, [saveSelection, updateActiveStates]);
 
   const handleInput = () => {
     if (!editorRef.current) return;
     isInternalUpdate.current = true;
     const html = editorRef.current.innerHTML;
     // Normalize empty content
-    if (html === "<p><br></p>" || html === "<br>" || html === "<div><br></div>") {
+    if (html === "<p><br></p>" || html === "<br>" || html === "<div><br></div>" || html.trim() === "") {
       onChange("");
     } else {
       onChange(html);
@@ -158,38 +256,282 @@ export function RichTextEditor({
     updateActiveStates();
   };
 
+  // General formatting command executor
   const exec = (command: string, val: string | undefined = undefined) => {
-    if (disabled) return;
-    editorRef.current?.focus();
-    restoreSelection();
+    if (disabled || !editorRef.current) return;
+
+    // Check if editor currently holds selection
+    const sel = window.getSelection();
+    const isInside =
+      sel &&
+      sel.rangeCount > 0 &&
+      editorRef.current.contains(sel.getRangeAt(0).commonAncestorContainer);
+
+    if (!isInside && savedRangeRef.current) {
+      restoreSelection();
+    }
+
+    try {
+      document.execCommand("styleWithCSS", false, "false");
+    } catch {}
+
     document.execCommand(command, false, val);
     handleInput();
+    saveSelection();
     updateActiveStates();
   };
 
-  const toggleBlock = (tag: string) => {
-    if (disabled) return;
-    editorRef.current?.focus();
-    restoreSelection();
-    let current = "";
-    try {
-      current = (document.queryCommandValue("formatBlock") || "").toLowerCase().replace(/[<>]/g, "");
-    } catch {}
-    if (current === tag) {
-      document.execCommand("formatBlock", false, "<p>");
-    } else {
-      document.execCommand("formatBlock", false, `<${tag}>`);
+  // Block formatting toggle (H1, H2, H3, Blockquote)
+  // Operates ONLY on marked / selected text without affecting surrounding text
+  const toggleBlock = (tag: "h1" | "h2" | "h3" | "blockquote") => {
+    if (disabled || !editorRef.current) return;
+
+    const sel = window.getSelection();
+    const isInside =
+      sel &&
+      sel.rangeCount > 0 &&
+      editorRef.current.contains(sel.getRangeAt(0).commonAncestorContainer);
+
+    if (!isInside && savedRangeRef.current) {
+      restoreSelection();
     }
+
+    const currentSel = window.getSelection();
+    if (!currentSel || currentSel.rangeCount === 0) return;
+    const range = currentSel.getRangeAt(0);
+
+    // 1. Check if selection is already inside an existing heading or blockquote
+    let existingBlock: HTMLElement | null = null;
+    let node: Node | null = range.commonAncestorContainer;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+    while (node && node !== editorRef.current) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const t = (node as HTMLElement).tagName.toLowerCase();
+        if (["h1", "h2", "h3", "blockquote"].includes(t)) {
+          existingBlock = node as HTMLElement;
+          break;
+        }
+      }
+      node = node.parentNode;
+    }
+
+    if (existingBlock) {
+      const currentTag = existingBlock.tagName.toLowerCase();
+      const isFull =
+        range.collapsed ||
+        range.toString().trim() === existingBlock.textContent?.trim();
+
+      if (currentTag === tag) {
+        // Toggle OFF: convert back to normal paragraph or unwrap
+        if (isFull) {
+          const p = document.createElement("p");
+          while (existingBlock.firstChild) {
+            p.appendChild(existingBlock.firstChild);
+          }
+          existingBlock.parentNode?.replaceChild(p, existingBlock);
+          const newRange = document.createRange();
+          newRange.selectNodeContents(p);
+          currentSel.removeAllRanges();
+          currentSel.addRange(newRange);
+        } else {
+          // Partial selection inside heading: extract selected text into normal paragraph
+          const fragment = range.extractContents();
+          const p = document.createElement("p");
+          p.appendChild(fragment);
+          range.insertNode(p);
+          const newRange = document.createRange();
+          newRange.selectNodeContents(p);
+          currentSel.removeAllRanges();
+          currentSel.addRange(newRange);
+        }
+      } else {
+        // Switch heading tag (e.g. H1 -> H2, or H2 -> H3)
+        if (isFull) {
+          const newEl = document.createElement(tag);
+          while (existingBlock.firstChild) {
+            newEl.appendChild(existingBlock.firstChild);
+          }
+          existingBlock.parentNode?.replaceChild(newEl, existingBlock);
+          const newRange = document.createRange();
+          newRange.selectNodeContents(newEl);
+          currentSel.removeAllRanges();
+          currentSel.addRange(newRange);
+        } else {
+          const fragment = range.extractContents();
+          const newEl = document.createElement(tag);
+          newEl.appendChild(fragment);
+          range.insertNode(newEl);
+          const newRange = document.createRange();
+          newRange.selectNodeContents(newEl);
+          currentSel.removeAllRanges();
+          currentSel.addRange(newRange);
+        }
+      }
+    } else if (!range.collapsed) {
+      // 2. Marked / selected text only: format ONLY the selected text
+      // Check if the selection covers an entire parent block (<p> or <div>)
+      let parentBlock: HTMLElement | null = null;
+      let pNode: Node | null = range.commonAncestorContainer;
+      if (pNode.nodeType === Node.TEXT_NODE) pNode = pNode.parentNode;
+      while (pNode && pNode !== editorRef.current) {
+        if (pNode.nodeType === Node.ELEMENT_NODE) {
+          const t = (pNode as HTMLElement).tagName.toLowerCase();
+          if (["p", "div"].includes(t)) {
+            parentBlock = pNode as HTMLElement;
+            break;
+          }
+        }
+        pNode = pNode.parentNode;
+      }
+
+      if (
+        parentBlock &&
+        parentBlock !== editorRef.current &&
+        parentBlock.textContent?.trim() === range.toString().trim()
+      ) {
+        // Selection exactly covers that paragraph: replace the paragraph element with the heading
+        const newEl = document.createElement(tag);
+        while (parentBlock.firstChild) {
+          newEl.appendChild(parentBlock.firstChild);
+        }
+        parentBlock.parentNode?.replaceChild(newEl, parentBlock);
+        const newRange = document.createRange();
+        newRange.selectNodeContents(newEl);
+        currentSel.removeAllRanges();
+        currentSel.addRange(newRange);
+      } else {
+        // Selection is a specific marked subset of text: extract and wrap ONLY the selected text!
+        const fragment = range.extractContents();
+        const headingEl = document.createElement(tag);
+        headingEl.appendChild(fragment);
+
+        range.insertNode(headingEl);
+
+        const newRange = document.createRange();
+        newRange.selectNodeContents(headingEl);
+        currentSel.removeAllRanges();
+        currentSel.addRange(newRange);
+      }
+    } else {
+      // 3. Collapsed caret (no text selected):
+      let parentBlock: HTMLElement | null = null;
+      let curr: Node | null = range.startContainer;
+      if (curr.nodeType === Node.TEXT_NODE) curr = curr.parentNode;
+      while (curr && curr !== editorRef.current) {
+        if (curr.nodeType === Node.ELEMENT_NODE) {
+          const t = (curr as HTMLElement).tagName.toLowerCase();
+          if (["p", "div"].includes(t)) {
+            parentBlock = curr as HTMLElement;
+            break;
+          }
+        }
+        curr = curr.parentNode;
+      }
+
+      if (parentBlock && parentBlock !== editorRef.current) {
+        const newEl = document.createElement(tag);
+        while (parentBlock.firstChild) {
+          newEl.appendChild(parentBlock.firstChild);
+        }
+        parentBlock.parentNode?.replaceChild(newEl, parentBlock);
+        const newRange = document.createRange();
+        newRange.selectNodeContents(newEl);
+        newRange.collapse(false);
+        currentSel.removeAllRanges();
+        currentSel.addRange(newRange);
+      } else {
+        const newEl = document.createElement(tag);
+        newEl.innerHTML = "<br>";
+        range.insertNode(newEl);
+        const newRange = document.createRange();
+        newRange.setStart(newEl, 0);
+        newRange.collapse(true);
+        currentSel.removeAllRanges();
+        currentSel.addRange(newRange);
+      }
+    }
+
     handleInput();
+    saveSelection();
     updateActiveStates();
   };
 
+  // Inline code toggle (wraps selected text in <code>, toggles off if already inside <code>)
+  const toggleInlineCode = () => {
+    if (disabled || !editorRef.current) return;
+
+    const sel = window.getSelection();
+    const isInside =
+      sel &&
+      sel.rangeCount > 0 &&
+      editorRef.current.contains(sel.getRangeAt(0).commonAncestorContainer);
+
+    if (!isInside && savedRangeRef.current) {
+      restoreSelection();
+    }
+
+    const currentSel = window.getSelection();
+    if (!currentSel || currentSel.rangeCount === 0) return;
+    const range = currentSel.getRangeAt(0);
+
+    // Check if selection is inside a <code> tag
+    let node: Node | null = range.commonAncestorContainer;
+    let codeElement: HTMLElement | null = null;
+    while (node && node !== editorRef.current) {
+      if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).tagName.toLowerCase() === "code") {
+        codeElement = node as HTMLElement;
+        break;
+      }
+      node = node.parentNode;
+    }
+
+    if (codeElement) {
+      // Toggle off: unwrap <code>
+      const parent = codeElement.parentNode;
+      if (parent) {
+        while (codeElement.firstChild) {
+          parent.insertBefore(codeElement.firstChild, codeElement);
+        }
+        parent.removeChild(codeElement);
+      }
+    } else if (!range.collapsed) {
+      // Wrap selected text in <code>
+      try {
+        const text = range.toString();
+        const code = document.createElement("code");
+        code.textContent = text;
+        range.deleteContents();
+        range.insertNode(code);
+
+        range.selectNodeContents(code);
+        currentSel.removeAllRanges();
+        currentSel.addRange(range);
+      } catch {
+        document.execCommand("insertHTML", false, `<code>${range.toString()}</code>`);
+      }
+    }
+
+    handleInput();
+    saveSelection();
+    updateActiveStates();
+  };
+
+  // Horizontal Rule insertion
   const insertHorizontalRule = () => {
-    if (disabled) return;
-    editorRef.current?.focus();
-    restoreSelection();
+    if (disabled || !editorRef.current) return;
+    const sel = window.getSelection();
+    const isInside =
+      sel &&
+      sel.rangeCount > 0 &&
+      editorRef.current.contains(sel.getRangeAt(0).commonAncestorContainer);
+
+    if (!isInside && savedRangeRef.current) {
+      restoreSelection();
+    }
     document.execCommand("insertHorizontalRule", false, undefined);
     handleInput();
+    saveSelection();
+    updateActiveStates();
   };
 
   // 1. Link handling
@@ -198,7 +540,25 @@ export function RichTextEditor({
     const sel = window.getSelection();
     const text = sel ? sel.toString() : "";
     setLinkText(text);
-    setLinkUrl("");
+
+    // Check if already in an anchor tag
+    let existingUrl = "";
+    let isLink = false;
+    if (sel && sel.rangeCount > 0) {
+      let node: Node | null = sel.getRangeAt(0).commonAncestorContainer;
+      if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+      while (node && node !== editorRef.current) {
+        if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).tagName.toLowerCase() === "a") {
+          existingUrl = (node as HTMLAnchorElement).href;
+          isLink = true;
+          break;
+        }
+        node = node.parentNode;
+      }
+    }
+
+    setLinkUrl(existingUrl);
+    setIsEditingExistingLink(isLink);
     setShowLinkModal(true);
   };
 
@@ -208,45 +568,60 @@ export function RichTextEditor({
       setShowLinkModal(false);
       return;
     }
-    editorRef.current?.focus();
     restoreSelection();
 
-    const formattedUrl = linkUrl.startsWith("http://") || linkUrl.startsWith("https://") || linkUrl.startsWith("mailto:")
-      ? linkUrl.trim()
-      : `https://${linkUrl.trim()}`;
+    const formattedUrl =
+      linkUrl.startsWith("http://") ||
+      linkUrl.startsWith("https://") ||
+      linkUrl.startsWith("mailto:") ||
+      linkUrl.startsWith("tel:")
+        ? linkUrl.trim()
+        : `https://${linkUrl.trim()}`;
 
-    if (linkText.trim()) {
+    const textToDisplay = linkText.trim() || linkUrl.trim();
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0);
       const a = document.createElement("a");
       a.href = formattedUrl;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.textContent = linkText.trim();
+      a.textContent = textToDisplay;
       a.className = "text-brand underline hover:text-brand-dark";
-      
-      const sel = window.getSelection();
-      if (sel && sel.rangeCount > 0) {
-        const range = sel.getRangeAt(0);
-        range.deleteContents();
-        range.insertNode(a);
-        range.setStartAfter(a);
-        range.setEndAfter(a);
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
+
+      range.deleteContents();
+      range.insertNode(a);
+
+      range.setStartAfter(a);
+      range.setEndAfter(a);
+      sel.removeAllRanges();
+      sel.addRange(range);
     } else {
       document.execCommand("createLink", false, formattedUrl);
     }
 
     handleInput();
+    saveSelection();
+    updateActiveStates();
+    setShowLinkModal(false);
+  };
+
+  const removeLink = () => {
+    restoreSelection();
+    document.execCommand("unlink", false);
+    handleInput();
+    saveSelection();
+    updateActiveStates();
     setShowLinkModal(false);
   };
 
   // 2. Emoji handling
   const insertEmoji = (emoji: string) => {
-    editorRef.current?.focus();
     restoreSelection();
     document.execCommand("insertText", false, emoji);
     handleInput();
+    saveSelection();
+    updateActiveStates();
     setShowEmojiPicker(false);
   };
 
@@ -264,11 +639,14 @@ export function RichTextEditor({
       setShowImageModal(false);
       return;
     }
-    editorRef.current?.focus();
     restoreSelection();
-    const imgHtml = `<img src="${imageUrl.trim()}" alt="${imageAlt.trim() || "Image"}" style="max-width:100%; height:auto; border-radius:8px; margin:8px 0; border:1px solid #E4E7EC;" />`;
+    const imgHtml = `<img src="${imageUrl.trim()}" alt="${
+      imageAlt.trim() || "Image"
+    }" style="max-width:100%; height:auto; border-radius:8px; margin:8px 0; border:1px solid #E4E7EC;" />`;
     document.execCommand("insertHTML", false, imgHtml);
     handleInput();
+    saveSelection();
+    updateActiveStates();
     setShowImageModal(false);
   };
 
@@ -278,11 +656,12 @@ export function RichTextEditor({
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = reader.result as string;
-      editorRef.current?.focus();
       restoreSelection();
       const imgHtml = `<img src="${base64}" alt="${file.name}" style="max-width:100%; height:auto; border-radius:8px; margin:8px 0; border:1px solid #E4E7EC;" />`;
       document.execCommand("insertHTML", false, imgHtml);
       handleInput();
+      saveSelection();
+      updateActiveStates();
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -296,15 +675,17 @@ export function RichTextEditor({
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
-      const sizeStr = file.size > 1024 * 1024
-        ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
-        : `${Math.round(file.size / 1024)} KB`;
-      
-      editorRef.current?.focus();
+      const sizeStr =
+        file.size > 1024 * 1024
+          ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
+          : `${Math.round(file.size / 1024)} KB`;
+
       restoreSelection();
       const chipHtml = `<a href="${dataUrl}" download="${file.name}" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate2-200 bg-slate2-50 my-1 font-mono text-xs text-slate2-700 hover:bg-slate2-100 hover:text-brand transition-colors no-underline" contenteditable="false">📎 <span class="font-medium">${file.name}</span> <span class="text-slate2-400">(${sizeStr})</span></a>&nbsp;`;
       document.execCommand("insertHTML", false, chipHtml);
       handleInput();
+      saveSelection();
+      updateActiveStates();
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -318,7 +699,6 @@ export function RichTextEditor({
 
   const insertTable = (e: React.FormEvent) => {
     e.preventDefault();
-    editorRef.current?.focus();
     restoreSelection();
 
     const rows = Math.max(1, Math.min(10, tableRows));
@@ -340,22 +720,23 @@ export function RichTextEditor({
 
     document.execCommand("insertHTML", false, html);
     handleInput();
+    saveSelection();
+    updateActiveStates();
     setShowTableModal(false);
   };
 
   const isEditorEmpty = !value || value === "<p><br></p>" || value === "<br>" || value.trim() === "";
 
   return (
-    <div className={`relative rounded-xl border border-slate2-200 bg-white transition-all shadow-sm ${
-      disabled ? "opacity-75 bg-slate2-50 cursor-not-allowed" : "focus-within:border-brand focus-within:ring-1 focus-within:ring-brand"
-    }`}>
+    <div
+      className={`relative rounded-xl border border-slate2-200 bg-white transition-all shadow-sm ${
+        disabled
+          ? "opacity-75 bg-slate2-50 cursor-not-allowed"
+          : "focus-within:border-brand focus-within:ring-1 focus-within:ring-brand"
+      }`}
+    >
       {/* Hidden file inputs */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        className="hidden"
-        onChange={handleAttachmentUpload}
-      />
+      <input ref={fileInputRef} type="file" className="hidden" onChange={handleAttachmentUpload} />
       <input
         ref={imageInputRef}
         type="file"
@@ -372,7 +753,10 @@ export function RichTextEditor({
             type="button"
             title="Undo (Ctrl+Z)"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("undo"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("undo");
+            }}
             className="rounded p-1.5 text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800 disabled:opacity-40 transition-colors"
           >
             <Undo2 size={15} />
@@ -381,7 +765,10 @@ export function RichTextEditor({
             type="button"
             title="Redo (Ctrl+Y)"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("redo"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("redo");
+            }}
             className="rounded p-1.5 text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800 disabled:opacity-40 transition-colors"
           >
             <Redo2 size={15} />
@@ -394,7 +781,10 @@ export function RichTextEditor({
             type="button"
             title="Heading 1"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); toggleBlock("h1"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              toggleBlock("h1");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.formatBlock === "h1"
                 ? "bg-brand/15 text-brand font-bold"
@@ -407,7 +797,10 @@ export function RichTextEditor({
             type="button"
             title="Heading 2"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); toggleBlock("h2"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              toggleBlock("h2");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.formatBlock === "h2"
                 ? "bg-brand/15 text-brand font-bold"
@@ -420,7 +813,10 @@ export function RichTextEditor({
             type="button"
             title="Heading 3"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); toggleBlock("h3"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              toggleBlock("h3");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.formatBlock === "h3"
                 ? "bg-brand/15 text-brand font-bold"
@@ -437,7 +833,10 @@ export function RichTextEditor({
             type="button"
             title="Bold (Ctrl+B)"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("bold"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("bold");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.bold
                 ? "bg-brand/15 text-brand font-bold"
@@ -450,10 +849,13 @@ export function RichTextEditor({
             type="button"
             title="Italic (Ctrl+I)"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("italic"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("italic");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.italic
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -463,10 +865,13 @@ export function RichTextEditor({
             type="button"
             title="Underline (Ctrl+U)"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("underline"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("underline");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.underline
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -476,10 +881,13 @@ export function RichTextEditor({
             type="button"
             title="Strikethrough"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("strikeThrough"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("strikeThrough");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.strikeThrough
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -487,16 +895,19 @@ export function RichTextEditor({
           </button>
         </div>
 
-        {/* Lists (Bullet, Numbered) */}
+        {/* Lists (Bulleted, Numbered) */}
         <div className="flex items-center gap-0.5 px-1.5 border-r border-slate2-200">
           <button
             type="button"
-            title="Bullet list"
+            title="Bulleted list"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("insertUnorderedList"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("insertUnorderedList");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.unorderedList
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -506,10 +917,13 @@ export function RichTextEditor({
             type="button"
             title="Numbered list"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("insertOrderedList"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("insertOrderedList");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.orderedList
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -517,16 +931,19 @@ export function RichTextEditor({
           </button>
         </div>
 
-        {/* Quote, Code, Horizontal Line */}
+        {/* Blockquote, Inline Code, Horizontal Line */}
         <div className="flex items-center gap-0.5 px-1.5 border-r border-slate2-200">
           <button
             type="button"
-            title="Quote"
+            title="Blockquote"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); toggleBlock("blockquote"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              toggleBlock("blockquote");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.formatBlock === "blockquote"
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -534,12 +951,15 @@ export function RichTextEditor({
           </button>
           <button
             type="button"
-            title="Code formatting"
+            title="Inline code"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); toggleBlock("pre"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              toggleInlineCode();
+            }}
             className={`rounded p-1.5 transition-colors ${
-              activeStates.formatBlock === "pre"
-                ? "bg-brand/15 text-brand"
+              activeStates.code
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -549,7 +969,10 @@ export function RichTextEditor({
             type="button"
             title="Horizontal line"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); insertHorizontalRule(); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              insertHorizontalRule();
+            }}
             className="rounded p-1.5 text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800 disabled:opacity-40 transition-colors"
           >
             <Minus size={15} />
@@ -562,10 +985,13 @@ export function RichTextEditor({
             type="button"
             title="Align Left"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("justifyLeft"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("justifyLeft");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.alignLeft
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -575,10 +1001,13 @@ export function RichTextEditor({
             type="button"
             title="Align Center"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("justifyCenter"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("justifyCenter");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.alignCenter
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -588,10 +1017,13 @@ export function RichTextEditor({
             type="button"
             title="Align Right"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("justifyRight"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("justifyRight");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.alignRight
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -601,10 +1033,13 @@ export function RichTextEditor({
             type="button"
             title="Align Justify"
             disabled={disabled}
-            onMouseDown={(e) => { e.preventDefault(); exec("justifyFull"); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              exec("justifyFull");
+            }}
             className={`rounded p-1.5 transition-colors ${
               activeStates.alignJustify
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -618,10 +1053,13 @@ export function RichTextEditor({
             type="button"
             title="Insert link"
             disabled={disabled}
-            onClick={openLinkModal}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              openLinkModal();
+            }}
             className={`rounded p-1.5 transition-colors ${
-              showLinkModal
-                ? "bg-brand/15 text-brand"
+              activeStates.link || showLinkModal
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -631,13 +1069,14 @@ export function RichTextEditor({
             type="button"
             title="Insert Emoji"
             disabled={disabled}
-            onClick={() => {
+            onMouseDown={(e) => {
+              e.preventDefault();
               saveSelection();
               setShowEmojiPicker((v) => !v);
             }}
             className={`rounded p-1.5 transition-colors ${
               showEmojiPicker
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -647,7 +1086,8 @@ export function RichTextEditor({
             type="button"
             title="Attach file"
             disabled={disabled}
-            onClick={() => {
+            onMouseDown={(e) => {
+              e.preventDefault();
               saveSelection();
               fileInputRef.current?.click();
             }}
@@ -659,10 +1099,13 @@ export function RichTextEditor({
             type="button"
             title="Insert image"
             disabled={disabled}
-            onClick={openImageModal}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              openImageModal();
+            }}
             className={`rounded p-1.5 transition-colors ${
               showImageModal
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -672,10 +1115,13 @@ export function RichTextEditor({
             type="button"
             title="Insert table"
             disabled={disabled}
-            onClick={openTableModal}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              openTableModal();
+            }}
             className={`rounded p-1.5 transition-colors ${
               showTableModal
-                ? "bg-brand/15 text-brand"
+                ? "bg-brand/15 text-brand font-bold"
                 : "text-slate2-600 hover:bg-slate2-200/70 hover:text-slate2-800"
             }`}
           >
@@ -687,9 +1133,11 @@ export function RichTextEditor({
       {/* Popovers & Modals */}
       {/* 1. Insert Link Modal */}
       {showLinkModal && (
-        <div className="absolute top-12 left-4 z-30 w-80 rounded-xl border border-slate2-200 bg-white p-4 shadow-xl">
+        <div className="absolute top-12 left-4 z-30 w-84 rounded-xl border border-slate2-200 bg-white p-4 shadow-xl">
           <div className="flex items-center justify-between pb-2 border-b border-slate2-100">
-            <span className="text-xs font-semibold text-slate2-800">Insert Link</span>
+            <span className="text-xs font-semibold text-slate2-800">
+              {isEditingExistingLink ? "Edit Link" : "Insert Link"}
+            </span>
             <button
               type="button"
               onClick={() => setShowLinkModal(false)}
@@ -699,6 +1147,18 @@ export function RichTextEditor({
             </button>
           </div>
           <form onSubmit={insertLink} className="space-y-3 pt-3">
+            <div>
+              <label className="block text-[11px] font-medium text-slate2-600 mb-1">
+                Display Text (Selected text)
+              </label>
+              <input
+                type="text"
+                value={linkText}
+                onChange={(e) => setLinkText(e.target.value)}
+                placeholder="Link text"
+                className="w-full rounded-md border border-slate2-200 px-2.5 py-1.5 text-xs text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:border-brand"
+              />
+            </div>
             <div>
               <label className="block text-[11px] font-medium text-slate2-600 mb-1">
                 Link URL
@@ -712,33 +1172,34 @@ export function RichTextEditor({
                 className="w-full rounded-md border border-slate2-200 px-2.5 py-1.5 text-xs text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:border-brand"
               />
             </div>
-            <div>
-              <label className="block text-[11px] font-medium text-slate2-600 mb-1">
-                Display Text (optional)
-              </label>
-              <input
-                type="text"
-                value={linkText}
-                onChange={(e) => setLinkText(e.target.value)}
-                placeholder="Link title"
-                className="w-full rounded-md border border-slate2-200 px-2.5 py-1.5 text-xs text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:border-brand"
-              />
-            </div>
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setShowLinkModal(false)}
-                className="rounded-md px-2.5 py-1 text-xs text-slate2-600 hover:bg-slate2-100"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!linkUrl.trim()}
-                className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white hover:bg-brand-light disabled:opacity-50"
-              >
-                Insert Link
-              </button>
+            <div className="flex items-center justify-between pt-1">
+              <div>
+                {isEditingExistingLink && (
+                  <button
+                    type="button"
+                    onClick={removeLink}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-danger hover:bg-red-50"
+                  >
+                    <Unlink size={13} /> Remove Link
+                  </button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowLinkModal(false)}
+                  className="rounded-md px-2.5 py-1 text-xs text-slate2-600 hover:bg-slate2-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!linkUrl.trim()}
+                  className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white hover:bg-brand-light disabled:opacity-50"
+                >
+                  {isEditingExistingLink ? "Update Link" : "Apply Link"}
+                </button>
+              </div>
             </div>
           </form>
         </div>
@@ -768,7 +1229,10 @@ export function RichTextEditor({
                     <button
                       key={emoji}
                       type="button"
-                      onClick={() => insertEmoji(emoji)}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        insertEmoji(emoji);
+                      }}
                       className="flex h-7 w-7 items-center justify-center rounded hover:bg-slate2-100 text-sm transition-transform active:scale-125"
                     >
                       {emoji}
@@ -843,7 +1307,7 @@ export function RichTextEditor({
                 disabled={!imageUrl.trim()}
                 className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white hover:bg-brand-light disabled:opacity-50"
               >
-                Insert URL
+                Insert Image
               </button>
             </div>
           </form>
@@ -874,7 +1338,7 @@ export function RichTextEditor({
                   min={1}
                   max={10}
                   value={tableRows}
-                  onChange={(e) => setTableRows(parseInt(e.target.value) || 1)}
+                  onChange={(e) => setTableRows(parseInt(e.target.value, 10) || 1)}
                   className="w-full rounded-md border border-slate2-200 px-2.5 py-1.5 text-xs text-slate2-800 focus:outline-none focus:border-brand"
                 />
               </div>
@@ -887,7 +1351,7 @@ export function RichTextEditor({
                   min={1}
                   max={8}
                   value={tableCols}
-                  onChange={(e) => setTableCols(parseInt(e.target.value) || 1)}
+                  onChange={(e) => setTableCols(parseInt(e.target.value, 10) || 1)}
                   className="w-full rounded-md border border-slate2-200 px-2.5 py-1.5 text-xs text-slate2-800 focus:outline-none focus:border-brand"
                 />
               </div>
@@ -930,9 +1394,18 @@ export function RichTextEditor({
           ref={editorRef}
           contentEditable={!disabled}
           onInput={handleInput}
-          onKeyUp={updateActiveStates}
-          onMouseUp={updateActiveStates}
-          onFocus={updateActiveStates}
+          onKeyUp={() => {
+            saveSelection();
+            updateActiveStates();
+          }}
+          onMouseUp={() => {
+            saveSelection();
+            updateActiveStates();
+          }}
+          onFocus={() => {
+            saveSelection();
+            updateActiveStates();
+          }}
           onBlur={saveSelection}
           style={{ minHeight }}
           className={`rich-editor-content p-4 text-sm text-slate2-800 leading-relaxed focus:outline-none overflow-y-auto ${
@@ -944,3 +1417,5 @@ export function RichTextEditor({
     </div>
   );
 }
+
+export default RichTextEditor;
