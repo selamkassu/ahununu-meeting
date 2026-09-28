@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import {
   MapPin,
   Video,
@@ -19,7 +19,10 @@ import {
   X,
   Check,
   Lock,
+  Unlock,
+  XCircle,
   ShieldCheck,
+  ShieldAlert,
   AlertCircle,
   Loader2,
   AlertTriangle,
@@ -33,6 +36,10 @@ import {
   Printer,
   Download,
   FileSpreadsheet,
+  Eye,
+  ExternalLink,
+  PenTool,
+  Signature,
 } from "lucide-react";
 import { api, ApiError, getToken } from "../../api/client";
 import { RichTextEditor } from "../../components/editor/RichTextEditor";
@@ -53,6 +60,8 @@ import type {
   User,
   AgendaItem,
   AgendaStatus,
+  Decision,
+  DecisionStatus,
 } from "../../types";
 import { isLockedMeeting } from "../../types";
 import {
@@ -71,6 +80,8 @@ import { Modal } from "../../components/ui/Modal";
 import { Toast } from "../../components/ui/Toast";
 import { useAuth } from "../../context/AuthContext";
 import { MeetingApprovalModal } from "../../components/meetings/MeetingApprovalModal";
+import { ParticipantSigningModal } from "../../components/meetings/ParticipantSigningModal";
+import { SearchableUserSelect } from "../../components/ui/SearchableUserSelect";
 
 export function hasMeetingEnded(meeting: MeetingDetailType): boolean {
   if (meeting.status === "COMPLETED") return true;
@@ -111,30 +122,174 @@ type TabKey = (typeof TABS)[number]["key"];
 const MEETING_STATUSES: MeetingStatus[] = [
   "SCHEDULED",
   "IN_PROGRESS",
+  "PENDING_SIGNATURES",
+  "READY_FOR_APPROVAL",
   "APPROVED",
   "COMPLETED",
   "CANCELLED",
 ];
 
+const STATUS_CONFIG: Record<
+  MeetingStatus,
+  { bg: string; border: string; dot: string }
+> = {
+  SCHEDULED: {
+    bg: "bg-sky-50 text-sky-800",
+    border: "border-sky-200 hover:border-sky-300",
+    dot: "bg-sky-500",
+  },
+  IN_PROGRESS: {
+    bg: "bg-amber-50 text-amber-800",
+    border: "border-amber-200 hover:border-amber-300",
+    dot: "bg-amber-500 animate-pulse",
+  },
+  PENDING_SIGNATURES: {
+    bg: "bg-orange-50 text-orange-800",
+    border: "border-orange-200 hover:border-orange-300",
+    dot: "bg-orange-500 animate-pulse",
+  },
+  READY_FOR_APPROVAL: {
+    bg: "bg-teal-50 text-teal-800",
+    border: "border-teal-200 hover:border-teal-300",
+    dot: "bg-teal-500",
+  },
+  APPROVED: {
+    bg: "bg-brand/10 text-brand-dark",
+    border: "border-brand/30 hover:border-brand/40",
+    dot: "bg-brand",
+  },
+  COMPLETED: {
+    bg: "bg-emerald-50 text-emerald-800",
+    border: "border-emerald-200 hover:border-emerald-300",
+    dot: "bg-emerald-500",
+  },
+  CANCELLED: {
+    bg: "bg-rose-50 text-rose-800",
+    border: "border-rose-200 hover:border-rose-300",
+    dot: "bg-rose-500",
+  },
+};
+
 export default function MeetingDetail() {
   const { id } = useParams();
-  const { user, hasPermission } = useAuth();
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab") as TabKey | null;
+  const { user, hasPermission, hasAnyPermission } = useAuth();
   const [meeting, setMeeting] = useState<MeetingDetailType | null>(null);
-  const [tab, setTab] = useState<TabKey>("overview");
+  const [tab, setTab] = useState<TabKey>(tabParam || "overview");
+
+  useEffect(() => {
+    if (tabParam) {
+      setTab(tabParam);
+    }
+  }, [tabParam]);
   const [loading, setLoading] = useState(true);
 
   const isLocked = isLockedMeeting(meeting?.status);
   const isSuperAdmin = user?.role?.code === "SYSTEM_ADMIN";
   const canEdit = !isLocked || isSuperAdmin;
-  const canManage = hasPermission("meetings:edit");
   const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
+  const canManage = useMemo(() => {
+    if (isSuperAdmin) return true;
+    if (!meeting || !user) return false;
+    if (hasPermission("meetings:edit:all")) return true;
+    if (hasPermission("meetings:edit:dept") && user.department?.id === meeting.department?.id) return true;
+    if (hasPermission("meetings:edit:own") && isOrganizer) return true;
+    return false;
+  }, [isSuperAdmin, meeting, user, isOrganizer, hasPermission]);
+  const isApproverRole = user?.role?.code === "MEETING_APPROVER" || user?.role?.code === "CHAIRPERSON";
   const canApprove = !!(
     meeting &&
     !["APPROVED", "CANCELLED"].includes(meeting.status) &&
-    (isOrganizer || isSuperAdmin || hasPermission("meetings:approve"))
+    (isOrganizer || isSuperAdmin || isApproverRole || hasPermission("meetings:approve") || hasPermission("meetings:certify_lock"))
   );
 
   const [isApprovalModalOpen, setIsApprovalModalOpen] = useState(false);
+  const [isParticipantSignModalOpen, setIsParticipantSignModalOpen] = useState(false);
+  const [requestingSignatures, setRequestingSignatures] = useState(false);
+
+  // Super Admin Exclusive Unlock State
+  const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
+  const [unlockReason, setUnlockReason] = useState("");
+  const [unlockTargetStatus, setUnlockTargetStatus] = useState("IN_PROGRESS");
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+
+  const handleUnlockMeeting = async () => {
+    if (!meeting) return;
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      const updated = await api.post<MeetingDetailType>(`/meetings/${meeting.id}/unlock`, {
+        targetStatus: unlockTargetStatus,
+        reason: unlockReason.trim(),
+      });
+      setMeeting(updated);
+      setIsUnlockModalOpen(false);
+      setUnlockReason("");
+    } catch (err: any) {
+      setUnlockError(err.message || "Failed to unlock meeting.");
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  // Roster of all required signers: all confirmed participants + organizer/admin
+  const allRequiredSigners = useMemo(() => {
+    if (!meeting) return [];
+    const list: Array<{
+      id: string;
+      userId: string;
+      user: {
+        id: string;
+        name: string;
+        email?: string;
+        avatarColor?: string | null;
+        department?: { name: string } | null;
+        role?: { name: string; code: string } | null;
+      };
+      roleLabel: string;
+    }> = (meeting.participants || []).map((p) => ({
+      id: p.id,
+      userId: p.user.id,
+      user: p.user,
+      roleLabel: "Participant",
+    }));
+
+    if (meeting.organizer && !list.some((item) => item.userId === meeting.organizer.id)) {
+      list.unshift({
+        id: `organizer-${meeting.organizer.id}`,
+        userId: meeting.organizer.id,
+        user: {
+          id: meeting.organizer.id,
+          name: meeting.organizer.name,
+          email: meeting.organizer.email,
+          avatarColor: (meeting.organizer as any).avatarColor,
+          department: (meeting.organizer as any).department,
+          role: (meeting.organizer as any).role,
+        },
+        roleLabel: "Organizer / Admin",
+      });
+    }
+    return list;
+  }, [meeting]);
+
+  const totalSignersCount = allRequiredSigners.length;
+
+  const signedUserIds = useMemo(() => {
+    return new Set((meeting?.participantSignatures || []).map((s) => s.userId));
+  }, [meeting?.participantSignatures]);
+
+  const signedCount = useMemo(() => {
+    return allRequiredSigners.filter((s) => signedUserIds.has(s.userId)).length;
+  }, [allRequiredSigners, signedUserIds]);
+
+  const allSignersCompleted = totalSignersCount > 0 && signedCount >= totalSignersCount;
+
+  const isEligibleSigner = !!(
+    user && allRequiredSigners.some((s) => s.userId === user.id)
+  );
+  const hasUserSigned = !!(user && signedUserIds.has(user.id));
 
   const load = () => {
     if (!id) return;
@@ -146,10 +301,30 @@ export default function MeetingDetail() {
 
   useEffect(load, [id]);
 
+  const handleRequestSignatures = async () => {
+    if (!id || requestingSignatures) return;
+    setRequestingSignatures(true);
+    try {
+      const updated = await api.post<MeetingDetailType>(
+        `/meetings/${id}/request-signatures`,
+        {}
+      );
+      setMeeting(updated);
+    } catch (err: any) {
+      alert(err.message || "Failed to initiate participant signatures.");
+    } finally {
+      setRequestingSignatures(false);
+    }
+  };
+
   const updateStatus = async (status: MeetingStatus) => {
     if (!id) return;
     if (status === "APPROVED") {
       setIsApprovalModalOpen(true);
+      return;
+    }
+    if (status === "PENDING_SIGNATURES") {
+      handleRequestSignatures();
       return;
     }
     if (isLocked && !isSuperAdmin) {
@@ -189,36 +364,151 @@ export default function MeetingDetail() {
         <ArrowLeft size={14} /> Back to meetings
       </Link>
 
-      <Card className="p-5">
-        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="font-display text-xl font-semibold text-slate2-800">
-                {meeting.title}
-              </h2>
-              <CodeChip>{meeting.code}</CodeChip>
+      <Card className="overflow-hidden border border-slate2-200/80 shadow-sm bg-white">
+        {/* Top brand accent stripe */}
+        <div className="h-1 w-full bg-gradient-to-r from-brand via-brand-light to-accent" />
+
+        <div className="p-5 sm:p-6 space-y-4">
+          {/* Header Row: Title, Code on left; Badges, Actions on right */}
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-1.5 flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h2 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-slate2-800">
+                  {meeting.title}
+                </h2>
+              </div>
+              {meeting.description ? (
+                <p className="text-sm text-slate2-600 max-w-3xl leading-relaxed pt-0.5">
+                  {meeting.description}
+                </p>
+              ) : null}
             </div>
-            {meeting.description && (
-              <p className="mt-1.5 max-w-2xl text-sm text-slate2-500">
-                {meeting.description}
-              </p>
-            )}
-            <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate2-500">
-              <span className="flex items-center gap-1.5">
-                <CalendarDays size={13} />{" "}
-                {new Date(meeting.date).toLocaleDateString("en-US", {
-                  weekday: "short",
-                  month: "short",
-                  day: "numeric",
-                  year: "numeric",
-                })}
-              </span>
-              <span className="flex items-center gap-1.5">
-                <Clock size={13} /> {meeting.startTime} – {meeting.endTime}
-              </span>
+
+            {/* Action Hub & Status Controls */}
+            <div className="flex flex-wrap items-center gap-2 sm:self-end lg:self-start shrink-0">
+              <div className="flex flex-col gap-y-2">
+                <div className="flex flex-row gap-x-2 justify-end">
+                  {/* Print Minutes */}
+                  <Button
+                    variant="secondary"
+                    type="button"
+                    onClick={() => printMeetingMinutes({ meeting })}
+                    className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50 border border-slate2-200 font-medium text-slate2-700 shadow-2xs"
+                    title="Print Meeting Minutes (Clean Corporate Letterhead)"
+                  >
+                    <Printer size={13} className="text-slate2-600" />
+                    <span>Print Minutes</span>
+                  </Button>
+
+                  {/* Super Admin Unlock Meeting Button */}
+                  {isLocked && isSuperAdmin && (
+                    <Button
+                      variant="secondary"
+                      type="button"
+                      onClick={() => setIsUnlockModalOpen(true)}
+                      className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-300 font-semibold text-amber-900 shadow-2xs"
+                      title="Super Admin Exclusive: Unlock and reopen meeting for editing"
+                    >
+                      <Unlock size={13} className="text-amber-700" />
+                      <span>Unlock Meeting</span>
+                    </Button>
+                  )}
+
+                  {/* Approve Meeting */}
+                  {canApprove && (
+                    <Button
+                      variant="primary"
+                      onClick={() => setIsApprovalModalOpen(true)}
+                      className="bg-brand hover:bg-brand-dark text-white text-xs py-1.5 px-3.5 shadow-sm inline-flex items-center gap-1.5 font-medium transition-all"
+                    >
+                      <ShieldCheck size={14} />
+                      <span>Approve Meeting</span>
+                    </Button>
+                  )}
+                </div>
+                <div className="flex flex-row items-center gap-3 justify-end">
+                  {isLocked && isSuperAdmin && (
+                    <span className="rounded bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 border border-amber-200 shadow-2xs">
+                      Admin Override
+                    </span>
+                  )}
+                  {meeting.forceApproved && (
+                    <span
+                      className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300 shadow-2xs"
+                      title={meeting.bypassReason || "Approved with force submit override"}
+                    >
+                      Force Approved
+                    </span>
+                  )}
+                  <PriorityBadge priority={meeting.priority} />
+                  {canManage ? (
+                    <div
+                      className={`group relative inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border transition-all ${STATUS_CONFIG[meeting.status]?.bg || "bg-slate2-100 text-slate2-700"
+                        } ${STATUS_CONFIG[meeting.status]?.border || "border-slate2-200"
+                        } ${isLocked && !isSuperAdmin
+                          ? "opacity-75 cursor-not-allowed"
+                          : "cursor-pointer hover:shadow-xs shadow-2xs"
+                        }`}
+                    >
+                      <span
+                        className={`h-2 w-2 rounded-full shrink-0 ${STATUS_CONFIG[meeting.status]?.dot || "bg-slate2-400"
+                          }`}
+                      />
+                      <select
+                        value={meeting.status}
+                        onChange={(e) => updateStatus(e.target.value as MeetingStatus)}
+                        disabled={isLocked && !isSuperAdmin}
+                        title={
+                          isLocked && !isSuperAdmin
+                            ? "Meeting is locked. Only Super Admins can alter status."
+                            : "Click to change status"
+                        }
+                        className="bg-transparent text-inherit font-semibold text-xs border-0 outline-none p-0 pr-4 cursor-pointer disabled:cursor-not-allowed appearance-none focus:ring-0 select-none"
+                      >
+                        {MEETING_STATUSES.map((s) => (
+                          <option
+                            key={s}
+                            value={s}
+                            className="bg-white text-slate2-800 font-medium py-1"
+                          >
+                            {s.replace("_", " ")}
+                          </option>
+                        ))}
+                      </select>
+                      {isLocked && !isSuperAdmin ? (
+                        <Lock
+                          size={11}
+                          className="pointer-events-none absolute right-2 text-inherit opacity-70"
+                        />
+                      ) : (
+                        <ChevronDown
+                          size={12}
+                          className="pointer-events-none absolute right-2 text-inherit opacity-70 group-hover:opacity-100 transition-opacity"
+                        />
+                      )}
+                    </div>
+                  ) : (
+                    <StatusBadge status={meeting.status} />
+                  )}
+                </div>
+
+              </div>
+
+
+
+
+
+
+            </div>
+          </div>
+
+          {/* Location & Online Links */}
+          {(meeting.location || meeting.onlineLink || (meeting.participants && meeting.participants.length > 0)) && (
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
               {meeting.location && (
-                <span className="flex items-center gap-1.5">
-                  <MapPin size={13} /> {meeting.location}
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate2-50 px-2.5 py-1 text-slate2-700 border border-slate2-200/80 font-medium">
+                  <MapPin size={13} className="text-slate2-500" />
+                  <span>{meeting.location}</span>
                 </span>
               )}
               {meeting.onlineLink && (
@@ -226,101 +516,91 @@ export default function MeetingDetail() {
                   href={meeting.onlineLink}
                   target="_blank"
                   rel="noreferrer"
-                  className="flex items-center gap-1.5 text-brand hover:underline"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-brand/5 px-2.5 py-1 text-brand border border-brand/20 hover:bg-brand/10 transition-colors font-medium"
                 >
-                  <Video size={13} /> Join online
+                  <Video size={13} />
+                  <span>Join online</span>
                 </a>
               )}
+              {meeting.participants && meeting.participants.length > 0 && (
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate2-50 px-2.5 py-1 text-slate2-600 border border-slate2-200/80">
+                  <Users size={13} className="text-slate2-400" />
+                  <span>
+                    {meeting.participants.length}{" "}
+                    {meeting.participants.length === 1 ? "participant" : "participants"}
+                  </span>
+                </span>
+              )}
             </div>
-            <div className="mt-3 flex items-center gap-2 text-xs text-slate2-500">
-              <Avatar
+          )}
+
+          {/* Bottom Bar: Organizer on Left, Time/Date schedule on Right Bottom Corner */}
+          <div className="border-t border-slate2-100 pt-3.5 mt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            {/* Bottom Left: Organizer Info */}
+            <div className="flex items-center gap-2.5 text-xs text-slate2-600">
+              {/* <Avatar
                 name={meeting.organizer.name}
                 color={meeting.organizer.avatarColor}
-              />
-              Organized by{" "}
-              <span className="font-medium text-slate2-700">
-                {meeting.organizer.name}
-              </span>{" "}
-              · {meeting.department.name}
-            </div>
-          </div>
-
-          <div className="flex flex-col items-end gap-2">
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                type="button"
-                onClick={() => printMeetingMinutes({ meeting })}
-                className="text-xs py-1.5 px-2.5 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50"
-                title="Print Meeting Minutes (Clean Corporate Letterhead)"
-              >
-                <Printer size={13} className="text-slate2-600" />
-                <span className="hidden sm:inline">Print Minutes</span>
-              </Button>
-              {canApprove && (
-                <Button
-                  variant="primary"
-                  onClick={() => setIsApprovalModalOpen(true)}
-                  className="bg-brand hover:bg-brand-light text-white text-xs py-1.5 px-3 shadow-sm inline-flex items-center gap-1.5"
-                >
-                  <ShieldCheck size={14} /> Approve Meeting
-                </Button>
-              )}
-              <PriorityBadge priority={meeting.priority} />
-              <StatusBadge status={meeting.status} />
-            </div>
-            {canManage && (
-              <div className="flex items-center gap-1.5">
-                <select
-                  value={meeting.status}
-                  onChange={(e) => updateStatus(e.target.value as MeetingStatus)}
-                  disabled={isLocked && !isSuperAdmin}
-                  title={
-                    isLocked && !isSuperAdmin
-                      ? "Meeting is locked. Only Super Admins can alter status."
-                      : undefined
-                  }
-                  className={`${inputClass} w-auto text-xs ${
-                    isLocked && !isSuperAdmin ? "opacity-60 cursor-not-allowed bg-slate2-100" : ""
-                  }`}
-                >
-                  {MEETING_STATUSES.map((s) => (
-                    <option key={s} value={s}>
-                      Mark as {s.replace("_", " ")}
-                    </option>
-                  ))}
-                </select>
-                {isLocked && isSuperAdmin && (
-                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 border border-amber-200">
-                    Admin Override
-                  </span>
-                )}
+              /> */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate2-500">Organized by</span>
+                <span className="font-semibold text-slate2-800">
+                  {meeting.organizer.name}
+                </span>
+                <span className="text-slate2-400">·</span>
+                <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate2-100 text-slate2-700 font-medium text-[11px]">
+                  {meeting.department.name}
+                </span>
               </div>
-            )}
+            </div>
+
+            {/* Bottom Right Corner: Date & Time schedule */}
+            <div className="flex items-center gap-2.5 self-start sm:self-auto rounded-xl bg-slate2-50 border border-slate2-200/80 px-3.5 py-1.5 text-xs text-slate2-700 shadow-2xs">
+              <CodeChip>{meeting.code}</CodeChip>
+
+              <div className="flex items-center gap-1.5 font-medium text-slate2-700">
+                <CalendarDays size={14} className="text-brand" />
+                <span>
+                  {new Date(meeting.date).toLocaleDateString("en-US", {
+                    weekday: "short",
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  })}
+                </span>
+              </div>
+              <span className="h-3.5 w-px bg-slate2-200" />
+              <div className="flex items-center gap-1.5 font-semibold text-slate2-900">
+                <Clock size={14} className="text-brand" />
+                <span>
+                  {meeting.startTime} – {meeting.endTime}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       </Card>
 
-      {/* Read-Only Notification Banner */}
-      {isLocked && (
+
+
+      {/* Read-Only Notification Banner for Approved / Cancelled / Completed */}
+      {isLocked && meeting.status !== "PENDING_SIGNATURES" && meeting.status !== "READY_FOR_APPROVAL" && (
         <div
-          className={`rounded-xl border p-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
-            meeting.status === "APPROVED"
-              ? "bg-brand/5 border-brand/20 text-brand-dark"
-              : meeting.status === "CANCELLED"
+          className={`rounded-xl border p-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${meeting.status === "APPROVED"
+            ? "bg-brand/5 border-brand/20 text-brand-dark"
+            : meeting.status === "CANCELLED"
               ? "bg-rose-50/80 border-rose-200 text-rose-950"
               : "bg-slate-50 border-slate-200 text-slate-900"
-          }`}
+            }`}
         >
           <div className="flex items-start gap-3">
             <div
-              className={`mt-0.5 rounded-lg p-2 ${
-                meeting.status === "APPROVED"
-                  ? "bg-brand/10 text-brand"
-                  : meeting.status === "CANCELLED"
+              className={`mt-0.5 rounded-lg p-2 ${meeting.status === "APPROVED"
+                ? "bg-brand/10 text-brand"
+                : meeting.status === "CANCELLED"
                   ? "bg-rose-100 text-rose-700"
                   : "bg-slate-200 text-slate-700"
-              }`}
+                }`}
             >
               {meeting.status === "APPROVED" ? (
                 <ShieldCheck size={20} />
@@ -347,10 +627,12 @@ export default function MeetingDetail() {
               <div className="mt-1 text-xs text-slate2-600 space-y-0.5">
                 <p>
                   {meeting.status === "APPROVED"
-                    ? "This meeting has been approved. Participant roster, attendance flags, and agenda are locked from modification."
+                    ? isSuperAdmin
+                      ? "This meeting is certified and locked for general users. As Super Admin, you have exclusive override privileges to unlock or edit records when required."
+                      : "This meeting has been officially approved & certified. All documents, decisions, attendance records, and minutes are permanently locked in Read-Only mode for all users."
                     : meeting.status === "CANCELLED"
-                    ? "This meeting was cancelled. All records, including action item status, are locked from editing."
-                    : "This meeting has been completed. Meeting records are archived; action items run independently and their status can be updated."}
+                      ? "This meeting was cancelled. All records, including action item status, are locked from editing."
+                      : "This meeting has been completed. Meeting records are archived; action items run independently and their status can be updated."}
                 </p>
                 {meeting.status === "APPROVED" && meeting.approvedBy && meeting.approvedAt && (
                   <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-brand/15 mt-2">
@@ -374,6 +656,19 @@ export default function MeetingDetail() {
                 )}
               </div>
             </div>
+            {isSuperAdmin && (
+              <div className="shrink-0 self-start sm:self-center">
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={() => setIsUnlockModalOpen(true)}
+                  className="text-xs py-1.5 px-3 bg-white hover:bg-amber-50 border-amber-300 text-amber-900 font-semibold shadow-2xs inline-flex items-center gap-1.5"
+                >
+                  <Unlock size={13} className="text-amber-700" />
+                  <span>Unlock Meeting</span>
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -384,11 +679,10 @@ export default function MeetingDetail() {
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`focus-ring flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${
-              tab === t.key
-                ? "border-brand text-brand"
-                : "border-transparent text-slate2-500 hover:text-slate2-700"
-            }`}
+            className={`focus-ring flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${tab === t.key
+              ? "border-brand text-brand"
+              : "border-transparent text-slate2-500 hover:text-slate2-700"
+              }`}
           >
             <t.icon size={14} /> {t.label}
           </button>
@@ -403,15 +697,24 @@ export default function MeetingDetail() {
         <MinutesTab
           meeting={meeting}
           canManage={canManage && canEdit}
+          isSuperAdmin={isSuperAdmin}
           onChange={load}
           canApprove={canApprove}
           onApproveClick={() => setIsApprovalModalOpen(true)}
+          onRequestSignaturesClick={handleRequestSignatures}
+          onParticipantSignClick={() => setIsParticipantSignModalOpen(true)}
+          isEligibleSigner={isEligibleSigner}
+          hasUserSigned={hasUserSigned}
+          requiredSigners={allRequiredSigners}
+          totalSignersCount={totalSignersCount}
+          signedCount={signedCount}
         />
       )}
       {tab === "decisions" && (
         <DecisionsTab
           meeting={meeting}
           canManage={canManage && canEdit}
+          isSuperAdmin={isSuperAdmin}
           onChange={load}
         />
       )}
@@ -428,12 +731,14 @@ export default function MeetingDetail() {
           meeting={meeting}
           canManage={canManage && canEdit}
           onChange={load}
+          onSignSelf={() => setIsParticipantSignModalOpen(true)}
         />
       )}
       {tab === "documents" && (
         <DocumentsTab
           meeting={meeting}
           canManage={canManage && canEdit}
+          isSuperAdmin={isSuperAdmin}
           onChange={load}
         />
       )}
@@ -448,10 +753,114 @@ export default function MeetingDetail() {
             setMeeting(updated);
             setIsApprovalModalOpen(false);
           }}
-          onApproveApi={async (signature) => {
-            return await api.post<MeetingDetailType>(`/meetings/${id}/approve`, { signature });
+          onApproveApi={async (signature, forceApprove, forceReason) => {
+            return await api.post<MeetingDetailType>(`/meetings/${id}/approve`, {
+              signature,
+              forceApprove,
+              forceReason,
+            });
           }}
         />
+      )}
+
+      {/* Participant Pre-Signing Modal Dialog */}
+      {isParticipantSignModalOpen && meeting && (
+        <ParticipantSigningModal
+          open={isParticipantSignModalOpen}
+          onClose={() => setIsParticipantSignModalOpen(false)}
+          meeting={meeting}
+          onSignSuccess={(updated) => {
+            setMeeting(updated);
+            setIsParticipantSignModalOpen(false);
+          }}
+        />
+      )}
+
+      {/* Super Admin Unlock Meeting Modal Dialog */}
+      {isUnlockModalOpen && meeting && (
+        <Modal
+          open={isUnlockModalOpen}
+          onClose={unlocking ? () => {} : () => setIsUnlockModalOpen(false)}
+          title="Super Admin Override: Unlock Meeting"
+        >
+          <div className="space-y-4 text-xs text-slate2-700">
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5">
+              <div className="flex items-start gap-2.5">
+                <ShieldAlert size={20} className="text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-semibold text-amber-950">
+                    Exclusive Super Admin Override Action
+                  </p>
+                  <p className="text-amber-900/90 leading-relaxed">
+                    This meeting is officially certified and locked ({meeting.status}). Unlocking it will
+                    reopen the proceedings (minutes, decisions, documents, and attendance) for
+                    administrative modification.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate2-800 mb-1">
+                Reopen As Status
+              </label>
+              <select
+                value={unlockTargetStatus}
+                onChange={(e) => setUnlockTargetStatus(e.target.value)}
+                className="w-full rounded-lg border border-slate2-300 bg-white px-3 py-2 text-xs text-slate2-800 focus:border-brand focus:outline-none"
+              >
+                <option value="IN_PROGRESS">IN_PROGRESS (Recommended — Active & Editable)</option>
+                <option value="DRAFT">DRAFT (Drafting Mode)</option>
+                <option value="SCHEDULED">SCHEDULED (Scheduled Session)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate2-800 mb-1">
+                Reason for Super Admin Override / Unlock <span className="text-rose-500">*</span>
+              </label>
+              <textarea
+                rows={3}
+                value={unlockReason}
+                onChange={(e) => setUnlockReason(e.target.value)}
+                placeholder="Please specify why this approved meeting is being unlocked (e.g. Correcting attendee roster error, adding omitted decision, board amendment)..."
+                className="w-full rounded-lg border border-slate2-300 bg-white p-2.5 text-xs text-slate2-800 placeholder:text-slate2-400 focus:border-brand focus:outline-none"
+              />
+            </div>
+
+            {unlockError && (
+              <div className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-xs text-rose-700 flex items-center gap-2">
+                <AlertCircle size={14} className="shrink-0" />
+                <span>{unlockError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate2-100">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setIsUnlockModalOpen(false)}
+                disabled={unlocking}
+                className="text-xs"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                onClick={handleUnlockMeeting}
+                disabled={unlocking || !unlockReason.trim()}
+                className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+              >
+                {unlocking ? (
+                  <><Loader2 size={13} className="animate-spin" /> Unlocking...</>
+                ) : (
+                  <><Unlock size={14} /> Confirm Unlock & Reopen</>
+                )}
+              </Button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -889,16 +1298,45 @@ function AgendaTab({
 function MinutesTab({
   meeting,
   canManage,
+  isSuperAdmin = false,
   onChange,
   canApprove,
   onApproveClick,
+  onRequestSignaturesClick,
+  onParticipantSignClick,
+  isEligibleSigner,
+  hasUserSigned,
+  requiredSigners,
+  totalSignersCount,
+  signedCount,
 }: {
   meeting: MeetingDetailType;
   canManage: boolean;
+  isSuperAdmin?: boolean;
   onChange: () => void;
   canApprove?: boolean;
   onApproveClick?: () => void;
+  onRequestSignaturesClick?: () => void;
+  onParticipantSignClick?: () => void;
+  isEligibleSigner?: boolean;
+  hasUserSigned?: boolean;
+  requiredSigners: Array<{
+    id: string;
+    userId: string;
+    user: {
+      id: string;
+      name: string;
+      email?: string;
+      avatarColor?: string | null;
+      department?: { name: string } | null;
+      role?: { name: string; code: string } | null;
+    };
+    roleLabel: string;
+  }>;
+  totalSignersCount: number;
+  signedCount: number;
 }) {
+  const { user } = useAuth();
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   // Meeting Summary State
@@ -908,9 +1346,10 @@ function MinutesTab({
     );
   }, [meeting.minutes]);
 
+  const isApproved = meeting.status === "APPROVED";
   const isCompleted = meeting.status === "COMPLETED";
   const isCancelled = meeting.status === "CANCELLED";
-  const isReadOnly = isCompleted || isCancelled || !canManage;
+  const isReadOnly = isCompleted || isCancelled || (isApproved && !isSuperAdmin) || !canManage;
 
   const [isEditing, setIsEditing] = useState(false);
   const [summaryContent, setSummaryContent] = useState("");
@@ -1005,6 +1444,11 @@ function MinutesTab({
                   <span className="rounded-full bg-brand/15 text-brand px-2.5 py-0.5 text-[10px] font-bold tracking-wide uppercase">
                     Locked & Verified
                   </span>
+                  {meeting.forceApproved && (
+                    <span className="rounded-full bg-amber-100 border border-amber-300 text-amber-800 px-2.5 py-0.5 text-[10px] font-bold tracking-wide uppercase">
+                      Admin Force Approved (Override)
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-slate2-600 max-w-xl">
                   These proceedings and recorded minutes have been formally reviewed, signed, and locked by an authorized reviewer.
@@ -1015,6 +1459,19 @@ function MinutesTab({
                     Approved by <span className="text-brand font-semibold">{meeting.approvedBy.name}</span> on{" "}
                     {new Date(meeting.approvedAt).toLocaleString()}
                   </p>
+                )}
+                {meeting.forceApproved && (
+                  <div className="text-xs text-amber-900 bg-amber-50/90 border border-amber-200/90 rounded-md p-2 mt-1 max-w-xl">
+                    <p className="font-semibold text-amber-950">Administrative Override Notice:</p>
+                    <p className="text-amber-800/90 mt-0.5">
+                      This meeting was certified by the administrator before all participant pre-signatures were collected.
+                    </p>
+                    {meeting.bypassReason && (
+                      <p className="mt-1 text-[11px] text-amber-900 font-medium">
+                        <strong>Reason:</strong> {meeting.bypassReason}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -1041,87 +1498,203 @@ function MinutesTab({
         </Card>
       )}
 
-      {/* Reviewer Callout when pending approval */}
-      {canApprove && meeting.status !== "APPROVED" && (
+      {/* Workflow Phase 1: Pre-Signing Gate Active (inside Minutes Tab) */}
+      {meeting.status === "PENDING_SIGNATURES" && (
+        <div className="rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50/90 via-amber-50/40 to-white p-5 shadow-sm">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="rounded-lg bg-amber-100 p-2.5 text-amber-700 shrink-0">
+                <Clock size={22} className="animate-pulse" />
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-sm sm:text-base text-amber-950">
+                    Participant Pre-Signing Gate Active
+                  </span>
+                  <span className="rounded-full bg-amber-100 border border-amber-300 px-2.5 py-0.5 text-[10px] font-bold text-amber-900 tracking-wide uppercase">
+                    {signedCount} of {totalSignersCount} SIGNED
+                  </span>
+                  <span className="rounded-full bg-slate2-100 border border-slate2-200 px-2 py-0.5 text-[10px] font-semibold text-slate2-600">
+                    PROTECTED / READ-ONLY
+                  </span>
+                </div>
+                <p className="text-xs text-amber-800/90 leading-relaxed max-w-2xl">
+                  Meeting minutes are undergoing participant verification. All confirmed attendees and organizers can review and affix their digital signature below.
+                  Authorized reviewers and administrators may certify and lock the proceedings at any time.
+                </p>
+                <div className="pt-1 flex items-center gap-3">
+                  <div className="h-2 w-48 rounded-full bg-amber-200/80 overflow-hidden">
+                    <div
+                      className="h-full bg-amber-500 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${totalSignersCount > 0 ? (signedCount / totalSignersCount) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-xs font-semibold text-amber-900">
+                    {totalSignersCount > 0 ? Math.round((signedCount / totalSignersCount) * 100) : 0}% Collected ({signedCount}/{totalSignersCount})
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 self-start lg:self-center">
+              {isEligibleSigner && !hasUserSigned && (
+                <Button
+                  variant="primary"
+                  type="button"
+                  onClick={() => onParticipantSignClick?.()}
+                  className="bg-brand hover:bg-brand-light text-white text-xs py-2 px-3.5 shadow-sm inline-flex items-center gap-1.5 font-semibold"
+                >
+                  <Signature size={13} /> Review & Sign Minutes
+                </Button>
+              )}
+              {isEligibleSigner && hasUserSigned && (
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-100/90 border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-800">
+                  <Signature size={14} className="text-emerald-600" /> You Have Signed
+                </span>
+              )}
+              {canApprove && (
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={onApproveClick}
+                  className="text-xs py-2 px-3.5 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50 font-semibold border-brand/30 text-brand shadow-xs"
+                  title="Certify, sign and lock meeting minutes"
+                >
+                  <ShieldCheck size={14} className="text-brand" />
+                  <span>Sign & Approve Meeting</span>
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Workflow Phase 2: All Participant Signatures Collected — Ready for Final Approval (inside Minutes Tab) */}
+      {meeting.status === "READY_FOR_APPROVAL" && (
+        <div className="rounded-xl border border-teal-200 bg-gradient-to-r from-teal-50 via-teal-50/40 to-white p-5 shadow-sm">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="rounded-lg bg-teal-100 p-2.5 text-brand shrink-0">
+                <CheckCircle2 size={22} className="text-brand" />
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-sm sm:text-base text-teal-950">
+                    All Required Signatures Collected
+                  </span>
+                  <span className="rounded-full bg-teal-100 border border-teal-300 px-2.5 py-0.5 text-[10px] font-bold text-teal-900 tracking-wide uppercase">
+                    Ready for Approval ({signedCount}/{totalSignersCount})
+                  </span>
+                </div>
+                <p className="text-xs text-teal-800/90 leading-relaxed max-w-2xl">
+                  All {totalSignersCount} meeting attendees and organizers have submitted their digital signatures.
+                  The Reviewer / Systems Administrator can now provide final formal certification.
+                </p>
+              </div>
+            </div>
+
+            <div className="shrink-0 self-start lg:self-center">
+              {canApprove ? (
+                <Button
+                  variant="primary"
+                  type="button"
+                  onClick={onApproveClick}
+                  className="bg-brand hover:bg-brand-light text-white text-xs py-2.5 px-4 shadow-sm inline-flex items-center gap-1.5 font-semibold"
+                >
+                  <ShieldCheck size={14} /> Approve Meeting & Minutes
+                </Button>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate2-600 bg-white border border-slate2-200 rounded-lg px-3 py-1.5">
+                  <Clock size={13} className="text-slate2-400" /> Awaiting Reviewer Signature
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(meeting.status === "IN_PROGRESS" || meeting.status === "SCHEDULED") && canManage && summaryMinute?.content && (
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-brand/20 bg-brand/5 px-4 py-3 text-xs">
           <div className="flex items-center gap-2.5 text-brand-dark">
-            <ShieldCheck size={18} className="text-brand shrink-0" />
+            <Signature size={18} className="text-brand shrink-0" />
             <span>
-              <strong>Reviewer Notice:</strong> Ready to conclude this meeting? You can approve and sign the minutes.
+              <strong>Minutes Drafting:</strong> Meeting summary recorded. When finalized, request digital signatures from all participants.
             </span>
           </div>
           <Button
-            variant="primary"
-            onClick={onApproveClick}
-            className="bg-brand hover:bg-brand-light text-white text-xs py-1.5 px-3 shrink-0 shadow-sm inline-flex items-center gap-1.5"
+            variant="secondary"
+            type="button"
+            onClick={onRequestSignaturesClick}
+            className="border-brand/30 text-brand hover:bg-brand/10 text-xs py-1.5 px-3 shrink-0 inline-flex items-center gap-1.5 font-medium bg-white"
           >
-            <ShieldCheck size={13} /> Approve Meeting
+            <Signature size={13} /> Request Participant Signatures
           </Button>
         </div>
       )}
 
       {/* ─────────────────────────────────────────────────────────────
-          MEETING SUMMARY (SINGLE SECTION ONLY)
+          MEETING SUMMARY CARD
           ───────────────────────────────────────────────────────────── */}
-      <Card className="overflow-hidden border border-slate2-200/80 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/10 text-brand font-semibold text-xs">
-                <FileText size={15} />
-              </span>
-              <h3 className="text-base font-semibold text-slate2-900">Meeting Summary</h3>
+      <Card className="border border-slate2-200/80 bg-white p-6 rounded-2xl shadow-xs">
+        {/* Top Header Row */}
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#E6F4F1] text-[#0B7A6B]">
+              <FileText size={20} className="text-[#0B7A6B]" />
             </div>
-            <p className="mt-0.5 text-xs text-slate2-500">
-              General overview and key points discussed in this meeting
-            </p>
+            <div>
+              <h3 className="text-base sm:text-lg font-bold text-slate2-900 leading-snug">Meeting Summary</h3>
+              <p className="text-xs text-slate2-500 mt-0.5">
+                General overview and key points discussed in this meeting
+              </p>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Print and Export Minutes Actions */}
+          {/* Action Buttons on Top Right */}
+          <div className="flex items-center gap-2">
             {summaryMinute?.content && !isEditing && (
-              <div className="flex items-center gap-1.5 mr-1">
-                <Button
-                  variant="secondary"
+              <>
+                {/* Print Button */}
+                <button
                   type="button"
                   onClick={handlePrintMinutes}
                   id="print-minutes-btn"
-                  className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 h-8 bg-white hover:bg-slate2-50"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate2-200 bg-white text-slate2-700 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs cursor-pointer"
                   title="Print Meeting Minutes (Clean Corporate Letterhead)"
                 >
-                  <Printer size={13} className="text-slate2-600" />
-                  <span>Print Minutes</span>
-                </Button>
+                  <Printer size={16} className="text-slate2-700" />
+                </button>
 
-                <div className="relative inline-flex" ref={exportMenuRef}>
-                  <Button
-                    variant="secondary"
+                {/* Export Split Dropdown Button */}
+                <div className="relative inline-flex items-center h-9 rounded-lg border border-slate2-200 bg-white text-slate2-700 shadow-2xs" ref={exportMenuRef}>
+                  <button
                     type="button"
-                    onClick={() => handleExportMinutes("pdf")}
                     id="export-minutes-btn"
-                    className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 h-8 rounded-r-none border-r-0 bg-white hover:bg-slate2-50"
+                    onClick={() => handleExportMinutes("pdf")}
+                    className="flex h-full px-2.5 items-center justify-center hover:bg-slate2-50 hover:text-slate2-900 rounded-l-lg transition-colors border-r border-slate2-200 cursor-pointer"
                     title="Export Meeting Minutes to PDF (.pdf)"
                   >
-                    <Download size={13} className="text-slate2-600" />
-                    <span>Export</span>
-                  </Button>
+                    <Download size={16} className="text-slate2-700" />
+                  </button>
                   <button
                     type="button"
                     id="export-minutes-options-btn"
                     onClick={() => setExportMenuOpen(!exportMenuOpen)}
-                    className="focus-ring inline-flex h-8 items-center rounded-r-lg border border-slate2-200 bg-white px-2 text-slate2-600 hover:bg-slate2-50"
+                    className="flex h-full px-2 items-center justify-center hover:bg-slate2-50 hover:text-slate2-900 rounded-r-lg transition-colors cursor-pointer"
                     title="Export format options"
                     aria-label="Export format options"
                   >
-                    <ChevronDown size={13} />
+                    <ChevronDown size={14} className="text-slate2-700" />
                   </button>
 
                   {exportMenuOpen && (
-                    <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-lg border border-slate2-200 bg-white py-1 shadow-lg">
+                    <div className="absolute right-0 top-full z-30 mt-1.5 w-52 rounded-xl border border-slate2-200 bg-white py-1.5 shadow-lg text-xs font-medium text-slate2-700">
                       <button
                         type="button"
                         onClick={() => handleExportMinutes("pdf")}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left hover:bg-slate2-50 text-slate2-700 transition-colors"
                       >
                         <FileText size={15} className="text-rose-600" />
                         <span>PDF Document (.pdf)</span>
@@ -1129,7 +1702,7 @@ function MinutesTab({
                       <button
                         type="button"
                         onClick={() => handleExportMinutes("doc")}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left hover:bg-slate2-50 text-slate2-700 transition-colors"
                       >
                         <FileText size={15} className="text-blue-600" />
                         <span>Word Document (.doc)</span>
@@ -1137,7 +1710,7 @@ function MinutesTab({
                       <button
                         type="button"
                         onClick={() => handleExportMinutes("excel")}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left hover:bg-slate2-50 text-slate2-700 transition-colors"
                       >
                         <FileSpreadsheet size={15} className="text-emerald-600" />
                         <span>Excel Summary (.xlsx)</span>
@@ -1145,7 +1718,7 @@ function MinutesTab({
                       <button
                         type="button"
                         onClick={() => handleExportMinutes("text")}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate2-700 hover:bg-slate2-50"
+                        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left hover:bg-slate2-50 text-slate2-700 transition-colors"
                       >
                         <FileText size={15} className="text-slate2-500" />
                         <span>Plain Text (.txt)</span>
@@ -1153,9 +1726,19 @@ function MinutesTab({
                     </div>
                   )}
                 </div>
-              </div>
+              </>
             )}
 
+            {isApproved && isSuperAdmin && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                <ShieldAlert size={12} className="text-amber-600" /> Super Admin Override
+              </span>
+            )}
+            {isApproved && !isSuperAdmin && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
+                <Lock size={12} /> Certified & Locked (Read-only)
+              </span>
+            )}
             {isCompleted && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
                 <Lock size={12} /> Meeting Completed (Read-only)
@@ -1166,129 +1749,267 @@ function MinutesTab({
                 <Lock size={12} /> Meeting Cancelled (Read-only)
               </span>
             )}
-            {!isCompleted && !isCancelled && !canManage && (
+            {!isApproved && !isCompleted && !isCancelled && !canManage && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
                 <Lock size={12} /> Read-only View
               </span>
             )}
-            {summaryMinute && !isEditing && (
-              <span className="text-[11px] text-slate2-400">
-                Last recorded by{" "}
-                <span className="font-medium text-slate2-700">
-                  {summaryMinute.recordedBy?.name || "Organizer"}
-                </span>{" "}
-                · {new Date(summaryMinute.updatedAt || summaryMinute.createdAt).toLocaleDateString()}
-              </span>
-            )}
-            {!isReadOnly && !isEditing && summaryMinute?.content && (
-              <Button
-                variant="secondary"
-                type="button"
-                onClick={() => {
-                  setIsEditing(true);
-                  setSummaryContent(summaryMinute.content);
-                }}
-                className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5"
-              >
-                <Pencil size={13} /> Edit Summary
-              </Button>
-            )}
           </div>
         </div>
 
-        {/* Meeting Summary Body */}
-        <div className="p-5">
-          {isEditing ? (
-            <div className="space-y-4">
+        {/* Meeting Summary Content & Footer */}
+        {isEditing ? (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-2xl border border-slate2-200 overflow-hidden bg-white p-2">
               <RichTextEditor
                 value={summaryContent}
                 onChange={setSummaryContent}
                 placeholder="Write a general summary of the meeting..."
                 minHeight="260px"
               />
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-                <p className="text-xs text-slate2-400">
-                  Use headings (H1, H2, H3), bold, lists, quotes, links, tables, images, and attachments as needed.
-                </p>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="secondary"
-                    type="button"
-                    disabled={savingSummary}
-                    onClick={() => {
-                      setIsEditing(false);
-                      setSummaryContent(summaryMinute?.content || "");
-                    }}
-                    className="text-xs sm:text-sm py-2 px-4"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    variant="primary"
-                    type="button"
-                    disabled={savingSummary || !summaryContent.trim()}
-                    onClick={handleSaveSummary}
-                    className="bg-brand hover:bg-brand-light text-white text-xs sm:text-sm py-2 px-5 shadow-sm inline-flex items-center gap-1.5"
-                  >
-                    {savingSummary ? (
-                      <>
-                        <Loader2 size={15} className="animate-spin" /> Saving...
-                      </>
-                    ) : (
-                      <>
-                        <Save size={15} /> Save Meeting Summary
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
             </div>
-          ) : summaryMinute?.content ? (
-            <div className="space-y-3">
-              <div className="rounded-xl border border-slate2-100 bg-white p-5 shadow-2xs">
-                <RichTextRenderer content={summaryMinute.content} />
-              </div>
-              {!isReadOnly && (
-                <div className="flex justify-end pt-1">
-                  <Button
-                    variant="secondary"
-                    type="button"
-                    onClick={() => {
-                      setIsEditing(true);
-                      setSummaryContent(summaryMinute.content);
-                    }}
-                    className="text-xs py-1.5 px-3.5 inline-flex items-center gap-1.5"
-                  >
-                    <Pencil size={13} /> Edit Summary
-                  </Button>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="rounded-xl border border-dashed border-slate2-200 bg-slate2-50/40 p-8 text-center">
-              <FileText size={28} className="mx-auto text-slate2-300 mb-2" />
-              <p className="text-sm font-medium text-slate2-700">No meeting summary recorded yet</p>
-              <p className="mt-1 text-xs text-slate2-400 max-w-sm mx-auto">
-                Capture the general overview and key discussion points so nothing gets lost.
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <p className="text-xs text-slate2-400">
+                Use headings (H1, H2, H3), bold, lists, quotes, links, tables, images, and attachments as needed.
               </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  type="button"
+                  disabled={savingSummary}
+                  onClick={() => {
+                    setIsEditing(false);
+                    setSummaryContent(summaryMinute?.content || "");
+                  }}
+                  className="text-xs sm:text-sm py-2 px-4 rounded-xl"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  type="button"
+                  disabled={savingSummary || !summaryContent.trim()}
+                  onClick={handleSaveSummary}
+                  className="bg-brand hover:bg-brand-dark text-white text-xs sm:text-sm py-2 px-5 shadow-sm inline-flex items-center gap-1.5 rounded-xl font-semibold"
+                >
+                  {savingSummary ? (
+                    <>
+                      <Loader2 size={15} className="animate-spin" /> Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Save size={15} /> Save Meeting Summary
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+        ) : summaryMinute?.content ? (
+          <div className="mt-5 space-y-4">
+            {/* The Main Content Box */}
+            <div className="rounded-2xl border border-slate2-200 bg-white p-5 min-h-[90px] shadow-2xs">
+              <RichTextRenderer content={summaryMinute.content} />
+            </div>
+
+            {/* Bottom Row: Last recorded by ... & Edit Summary button */}
+            <div className="flex flex-wrap items-center justify-end gap-3.5 text-xs pt-0.5">
+              <span className="text-slate2-500">
+                Last recorded by{" "}
+                <strong className="font-semibold text-slate2-800">
+                  {summaryMinute.recordedBy?.name || meeting.organizer?.name || "Dawit Bekele"}
+                </strong>
+                {" · "}
+                {new Date(summaryMinute.updatedAt || summaryMinute.createdAt).toLocaleDateString("en-US")}
+              </span>
               {!isReadOnly && (
-                <div className="mt-4">
-                  <Button
-                    variant="primary"
-                    onClick={() => {
-                      setIsEditing(true);
-                      setSummaryContent("");
-                    }}
-                    className="text-xs py-1.5 px-4 bg-brand hover:bg-brand-light text-white inline-flex items-center gap-1.5"
-                  >
-                    <Plus size={13} /> Write Meeting Summary
-                  </Button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditing(true);
+                    setSummaryContent(summaryMinute.content);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate2-200 bg-white px-4 py-2 text-xs font-semibold text-slate2-800 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs cursor-pointer"
+                >
+                  <Pencil size={14} className="text-slate2-600" />
+                  <span>Edit Summary</span>
+                </button>
               )}
             </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="mt-5 rounded-2xl border border-dashed border-slate2-200 bg-slate2-50/40 p-8 text-center">
+            <FileText size={28} className="mx-auto text-slate2-300 mb-2" />
+            <p className="text-sm font-medium text-slate2-700">No meeting summary recorded yet</p>
+            <p className="mt-1 text-xs text-slate2-400 max-w-sm mx-auto">
+              Capture the general overview and key discussion points so nothing gets lost.
+            </p>
+            {!isReadOnly && (
+              <div className="mt-4">
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    setIsEditing(true);
+                    setSummaryContent("");
+                  }}
+                  className="text-xs py-2 px-4 bg-brand hover:bg-brand-dark text-white inline-flex items-center gap-1.5 rounded-xl font-semibold"
+                >
+                  <Plus size={14} /> Write Meeting Summary
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
+
+      {/* ─────────────────────────────────────────────────────────────
+          PARTICIPANT & ORGANIZER PRE-SIGNATURES & ATTESTATIONS ROSTER
+          ───────────────────────────────────────────────────────────── */}
+      {(meeting.status === "PENDING_SIGNATURES" ||
+        meeting.status === "READY_FOR_APPROVAL" ||
+        meeting.status === "APPROVED" ||
+        (meeting.participantSignatures && meeting.participantSignatures.length > 0)) && (
+        <Card className="overflow-hidden border border-slate2-200/80 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/10 text-brand font-semibold text-xs">
+                  <UserCheck size={15} />
+                </span>
+                <h3 className="text-base font-semibold text-slate2-900">
+                  Attendee & Organizer Pre-Signatures
+                </h3>
+              </div>
+              <p className="mt-0.5 text-xs text-slate2-500">
+                Digital verification submitted by confirmed attendees and organizers before formal approval ({signedCount} of {totalSignersCount} signed)
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {isEligibleSigner && !hasUserSigned && meeting.status === "PENDING_SIGNATURES" && (
+                <Button
+                  variant="primary"
+                  type="button"
+                  onClick={() => onParticipantSignClick?.()}
+                  className="bg-brand hover:bg-brand-light text-white text-xs py-1.5 px-3.5 inline-flex items-center gap-1.5 font-semibold shadow-xs"
+                >
+                  <Signature size={13} /> Sign Minutes
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <div className="p-5 space-y-4">
+            {/* Progress bar */}
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs text-slate2-600">
+                <span className="font-medium">Signature Collection Progress</span>
+                <span className={`font-semibold ${signedCount >= totalSignersCount && totalSignersCount > 0 ? "text-emerald-600" : "text-amber-600"}`}>
+                  {signedCount} / {totalSignersCount} Signed ({totalSignersCount > 0 ? Math.round((signedCount / totalSignersCount) * 100) : 0}%)
+                </span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-slate2-100 overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{
+                    width: `${totalSignersCount > 0 ? (signedCount / totalSignersCount) * 100 : 0}%`,
+                    background: signedCount >= totalSignersCount && totalSignersCount > 0 ? "#10b981" : "#0B7A6B",
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Attendee & organizer signature cards grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {requiredSigners.map((signer) => {
+                const sig = meeting.participantSignatures?.find((s) => s.userId === signer.userId);
+                const isMe = signer.userId === user?.id;
+                return (
+                  <div
+                    key={signer.userId}
+                    className={`rounded-xl border p-3.5 transition-all flex flex-col justify-between ${
+                      sig
+                        ? "border-emerald-200/90 bg-emerald-50/20"
+                        : "border-slate2-200 bg-white"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-2xs"
+                            style={{ background: (signer.user as any).avatarColor || "#0B7A6B" }}
+                          >
+                            {signer.user.name.charAt(0).toUpperCase()}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-xs font-semibold text-slate2-900 truncate">
+                                {signer.user.name}
+                              </p>
+                              {isMe && (
+                                <span className="rounded bg-brand/10 text-brand px-1 py-0.2 text-[9px] font-bold">
+                                  You
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-slate2-500 truncate">
+                              {signer.roleLabel} · {signer.user.email}
+                            </p>
+                          </div>
+                        </div>
+
+                        {sig ? (
+                          <span
+                            className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-600 shadow-2xs shrink-0"
+                            title={`Signed on ${new Date(sig.signedAt).toLocaleDateString()}`}
+                          >
+                            <Signature size={14} />
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-amber-50 border border-amber-200 text-amber-600 shadow-2xs shrink-0"
+                            title="Signature pending"
+                          >
+                            <Signature size={14} className="opacity-70" />
+                          </span>
+                        )}
+                      </div>
+
+                      {sig ? (
+                        <div className="mt-2 rounded-lg border border-emerald-100 bg-white p-2 text-center">
+                          <img
+                            src={sig.signatureDataUrl}
+                            alt={`${signer.user.name}'s signature`}
+                            className="h-10 max-w-[140px] mx-auto object-contain"
+                          />
+                          <div className="mt-1 pt-1 border-t border-slate2-100 flex items-center justify-between text-[9px] text-slate2-400">
+                            <span>Attested</span>
+                            <span>{new Date(sig.signedAt).toLocaleDateString()}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-2 rounded-lg border border-dashed border-slate2-200 bg-slate2-50/50 p-3 text-center">
+                          <p className="text-[11px] text-slate2-400 italic">Signature pending</p>
+                          {meeting.status === "PENDING_SIGNATURES" && isMe && (
+                            <button
+                              type="button"
+                              onClick={() => onParticipantSignClick?.()}
+                              className="mt-1.5 text-[11px] text-brand hover:underline font-semibold inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Signature size={11} /> Sign Now →
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -1296,15 +2017,26 @@ function MinutesTab({
 function DecisionsTab({
   meeting,
   canManage,
+  isSuperAdmin = false,
   onChange,
 }: {
   meeting: MeetingDetailType;
   canManage: boolean;
+  isSuperAdmin?: boolean;
   onChange: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // Edit state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editStatus, setEditStatus] = useState<DecisionStatus>("OPEN");
+  const [updating, setUpdating] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1312,14 +2044,78 @@ function DecisionsTab({
     setSubmitting(true);
     try {
       await api.post(`/meetings/${meeting.id}/decisions`, {
-        title,
-        description: description || undefined,
+        title: title.trim(),
+        description: description.trim() || undefined,
       });
       setTitle("");
       setDescription("");
       onChange();
+    } catch (err: any) {
+      alert(err.message || "Failed to create decision.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const startEdit = (d: Decision) => {
+    setEditingId(d.id);
+    setEditTitle(d.title);
+    setEditDescription(d.description || "");
+    setEditStatus(d.status);
+    setError(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setError(null);
+  };
+
+  const saveEdit = async (decisionId: string) => {
+    if (!editTitle.trim()) {
+      setError("Please provide a decision title.");
+      return;
+    }
+    setUpdating(true);
+    setError(null);
+    try {
+      await api.put(`/meetings/decisions/${decisionId}`, {
+        title: editTitle.trim(),
+        description: editDescription.trim() || null,
+        status: editStatus,
+      });
+      setEditingId(null);
+      onChange();
+    } catch (err: any) {
+      setError(err.message || "Failed to update decision.");
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const quickUpdateStatus = async (decisionId: string, newStatus: DecisionStatus) => {
+    try {
+      await api.put(`/meetings/decisions/${decisionId}`, { status: newStatus });
+      onChange();
+    } catch (err: any) {
+      alert(err.message || "Failed to update status.");
+    }
+  };
+
+  const deleteDecision = async (decisionId: string, code: string) => {
+    if (!window.confirm(`Are you sure you want to delete decision "${code}"? Any linked action items will be unlinked.`)) {
+      return;
+    }
+    setDeletingId(decisionId);
+    try {
+      await api.delete(`/meetings/decisions/${decisionId}`);
+      if (editingId === decisionId) {
+        setEditingId(null);
+      }
+      onChange();
+    } catch (err: any) {
+      alert(err.message || "Failed to delete decision.");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -1329,6 +2125,41 @@ function DecisionsTab({
         title="Decisions"
         subtitle="Formal outcomes reached in this meeting"
       />
+      {meeting.status === "APPROVED" && isSuperAdmin && (
+        <div className="mx-5 mb-3 rounded-xl border border-amber-300 bg-amber-50/80 p-3.5 shadow-2xs">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <ShieldAlert size={18} className="text-amber-600 mt-0.5 shrink-0" />
+              <div>
+                <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider">
+                  Super Admin Override Active
+                </h4>
+                <p className="mt-0.5 text-xs text-amber-800 leading-relaxed">
+                  This meeting is certified and locked for general users. As Super Admin, you have exclusive administrative authority to create, edit, or remove decisions.
+                </p>
+              </div>
+            </div>
+            <span className="rounded-full bg-amber-200/80 border border-amber-300 px-2.5 py-0.5 text-[10px] font-bold text-amber-900 uppercase tracking-wider shrink-0">
+              Override Permission
+            </span>
+          </div>
+        </div>
+      )}
+      {meeting.status === "APPROVED" && !isSuperAdmin && (
+        <div className="mx-5 mb-3 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
+          <div className="flex items-start gap-2.5">
+            <Lock size={18} className="text-slate2-500 mt-0.5 shrink-0" />
+            <div>
+              <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
+                Decisions Permanently Certified & Locked (Read-Only)
+              </h4>
+              <p className="mt-0.5 text-xs text-slate2-600 leading-relaxed">
+                This meeting has been officially approved and certified. In accordance with compliance and governance rules, all decisions are permanently locked in Read-Only mode. Only the Super Admin can unlock or override this record.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="divide-y divide-slate2-100">
         {meeting.decisions.length === 0 ? (
           <EmptyState
@@ -1336,27 +2167,165 @@ function DecisionsTab({
             description="Record decisions here so they can be tracked to completion."
           />
         ) : (
-          meeting.decisions.map((d) => (
-            <div
-              key={d.id}
-              className="flex items-start justify-between gap-3 px-5 py-3"
-            >
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium text-slate2-800">
-                    {d.title}
-                  </p>
-                  <CodeChip>{d.code}</CodeChip>
+          meeting.decisions.map((d) => {
+            const isEditing = editingId === d.id;
+
+            if (isEditing) {
+              return (
+                <div key={d.id} className="bg-slate2-50/70 p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-brand">
+                        Edit Decision
+                      </span>
+                      <CodeChip>{d.code}</CodeChip>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={cancelEdit}
+                      className="text-slate2-400 hover:text-slate2-600 transition-colors"
+                      title="Cancel editing"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+
+                  {error && (
+                    <div className="rounded-lg bg-red-50 p-2 text-xs text-danger flex items-center gap-1.5">
+                      <AlertCircle size={14} />
+                      <span>{error}</span>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                    <div className="sm:col-span-8">
+                      <label className="mb-1 block text-xs font-medium text-slate2-600">
+                        Decision title <span className="text-danger">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={editTitle}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                        placeholder="Decision title"
+                        className={inputClass}
+                      />
+                    </div>
+
+                    <div className="sm:col-span-4">
+                      <label className="mb-1 block text-xs font-medium text-slate2-600">
+                        Status
+                      </label>
+                      <select
+                        value={editStatus}
+                        onChange={(e) => setEditStatus(e.target.value as DecisionStatus)}
+                        className={`${inputClass} bg-white cursor-pointer font-medium`}
+                      >
+                        <option value="OPEN">OPEN</option>
+                        <option value="IMPLEMENTED">IMPLEMENTED</option>
+                        <option value="REVERSED">REVERSED</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate2-600">
+                      Details / Background (Optional)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={editDescription}
+                      onChange={(e) => setEditDescription(e.target.value)}
+                      placeholder="Enter decision details, rationale, or context..."
+                      className={`${inputClass} min-h-[76px] w-full resize-y text-slate2-800 bg-white leading-relaxed`}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={cancelEdit}
+                      disabled={updating}
+                    >
+                      <X size={14} /> Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      onClick={() => saveEdit(d.id)}
+                      disabled={updating || !editTitle.trim()}
+                    >
+                      <Check size={14} /> {updating ? "Saving..." : "Save changes"}
+                    </Button>
+                  </div>
                 </div>
-                {d.description && (
-                  <p className="mt-1 text-xs text-slate2-500">
-                    {d.description}
-                  </p>
-                )}
+              );
+            }
+
+            return (
+              <div
+                key={d.id}
+                className="flex flex-col gap-2 px-5 py-3.5 sm:flex-row sm:items-start sm:justify-between"
+              >
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold text-slate2-800">
+                      {d.title}
+                    </p>
+                    <CodeChip>{d.code}</CodeChip>
+                  </div>
+                  {d.description && (
+                    <p className="text-xs leading-relaxed text-slate2-600 whitespace-pre-wrap">
+                      {d.description}
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                  {canManage ? (
+                    <select
+                      value={d.status}
+                      onChange={(e) => quickUpdateStatus(d.id, e.target.value as DecisionStatus)}
+                      className="rounded-lg border border-slate2-200 bg-white px-2 py-1 text-xs font-semibold text-slate2-700 shadow-2xs focus-ring cursor-pointer hover:border-slate2-300"
+                      title="Update decision status"
+                    >
+                      <option value="OPEN">OPEN</option>
+                      <option value="IMPLEMENTED">IMPLEMENTED</option>
+                      <option value="REVERSED">REVERSED</option>
+                    </select>
+                  ) : (
+                    <StatusBadge status={d.status} />
+                  )}
+
+                  {canManage && (
+                    <div className="flex items-center gap-1 ml-1">
+                      <button
+                        type="button"
+                        onClick={() => startEdit(d)}
+                        className="rounded-md p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
+                        title="Edit decision"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteDecision(d.id, d.code)}
+                        disabled={deletingId === d.id}
+                        className="rounded-md p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors disabled:opacity-50"
+                        title="Delete decision"
+                      >
+                        {deletingId === d.id ? (
+                          <Loader2 size={14} className="animate-spin text-danger" />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
-              <StatusBadge status={d.status} />
-            </div>
-          ))
+            );
+          })
         )}
       </div>
       {canManage && (
@@ -1399,13 +2368,22 @@ function ActionsTab({
   isSuperAdmin: boolean;
   onChange: () => void;
 }) {
-  const { user, hasPermission } = useAuth();
+  const { user, hasPermission, hasAnyPermission } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [title, setTitle] = useState("");
   const [assignedToId, setAssignedToId] = useState("");
   const [deadline, setDeadline] = useState("");
   const [decisionId, setDecisionId] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // Today's date string in YYYY-MM-DD format to lock past dates in calendar picker
+  const todayDateStr = useMemo(() => {
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }, []);
 
   useEffect(() => {
     api.get<User[]>("/users").then(setUsers);
@@ -1419,20 +2397,28 @@ function ActionsTab({
     if (isMeetingCancelled) {
       return false;
     }
-    // If meeting is completed or active, action items run independently
-    return (
-      isSuperAdmin ||
-      hasPermission("meetings:edit") ||
-      hasPermission("action_items:edit") ||
-      hasPermission("action_items:update_own") ||
-      (user && user.id === item.assignedTo.id) ||
-      (user && user.id === meeting.organizer.id)
-    );
+    if (isSuperAdmin) return true;
+    if (user && user.id === item.assignedTo.id) return true;
+    if (user && user.id === meeting.organizer.id) return true;
+    if (hasPermission("action_items:edit:all") || hasPermission("meetings:edit:all")) return true;
+    if (
+      (hasPermission("action_items:edit:dept") || hasPermission("meetings:edit:dept")) &&
+      user?.department?.id === meeting.department?.id
+    ) {
+      return true;
+    }
+    return false;
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !assignedToId || !deadline) return;
+
+    if (deadline < todayDateStr) {
+      alert("Action item deadline cannot be in the past. Please select today or a future date.");
+      return;
+    }
+
     const assignee = users.find((u) => u.id === assignedToId);
     setSubmitting(true);
     try {
@@ -1524,12 +2510,11 @@ function ActionsTab({
                     isMeetingCancelled
                       ? "Meeting is cancelled. Action items are locked from editing."
                       : !canUpdateItemStatus(a)
-                      ? "You do not have permission to update this action item status."
-                      : undefined
+                        ? "You do not have permission to update this action item status."
+                        : undefined
                   }
-                  className={`${inputClass} w-auto text-xs ${
-                    !canUpdateItemStatus(a) ? "opacity-60 cursor-not-allowed bg-slate2-100" : ""
-                  }`}
+                  className={`${inputClass} w-auto text-xs ${!canUpdateItemStatus(a) ? "opacity-60 cursor-not-allowed bg-slate2-100" : ""
+                    }`}
                 >
                   {["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"].map(
                     (s) => (
@@ -1556,20 +2541,17 @@ function ActionsTab({
               placeholder="Task description"
               className={`${inputClass} sm:col-span-2`}
             />
-            <select
-              value={assignedToId}
-              onChange={(e) => setAssignedToId(e.target.value)}
-              className={inputClass}
-            >
-              <option value="">Assign to…</option>
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.name}
-                </option>
-              ))}
-            </select>
+            <SearchableUserSelect
+              users={users}
+              selectedUserId={assignedToId}
+              onSelect={setAssignedToId}
+              meetingParticipants={meeting.participants}
+              organizerId={meeting.organizer?.id}
+              placeholder="Assign to…"
+            />
             <input
               type="date"
+              min={todayDateStr}
               value={deadline}
               onChange={(e) => setDeadline(e.target.value)}
               className={inputClass}
@@ -1599,19 +2581,137 @@ function ActionsTab({
     </Card>
   );
 }
+// Types the browser can render inline in an iframe
+const INLINE_VIEWABLE_EXTS = ["pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "txt", "csv"];
+
+function buildMeetingDocViewUrl(meetingId: string, docId: string) {
+  const token = getToken();
+  return token
+    ? `/api/meetings/${meetingId}/documents/${docId}/view?token=${encodeURIComponent(token)}`
+    : `/api/meetings/${meetingId}/documents/${docId}/view`;
+}
+
+function InlineDocViewer({
+  meetingId,
+  doc,
+  onClose,
+  onDownload,
+}: {
+  meetingId: string;
+  doc: { id: string; fileName: string; fileSize: number };
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  const viewUrl = buildMeetingDocViewUrl(meetingId, doc.id);
+  const sizeMB = (doc.fileSize / 1024 / 1024).toFixed(2);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 9999,
+        background: "rgba(0,0,0,0.75)",
+        display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{
+        background: "#fff", borderRadius: 12, overflow: "hidden",
+        display: "flex", flexDirection: "column",
+        width: "92vw", maxWidth: 1100, height: "90vh",
+        boxShadow: "0 25px 60px rgba(0,0,0,0.4)",
+      }}>
+        {/* Header */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "12px 16px", borderBottom: "1px solid #e2e8f0",
+          background: "#f8fafc", flexShrink: 0,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            <FileText size={16} color="#0B7A6B" style={{ flexShrink: 0 }} />
+            <span style={{
+              fontSize: 14, fontWeight: 600, color: "#1e293b",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>{doc.fileName}</span>
+            <span style={{ fontSize: 12, color: "#94a3b8", flexShrink: 0 }}>{sizeMB} MB</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            <a href={viewUrl} target="_blank" rel="noopener noreferrer" title="Open in new tab"
+              style={{
+                width: 32, height: 32, display: "inline-flex",
+                alignItems: "center", justifyContent: "center",
+                borderRadius: 6, border: "1px solid #cbd5e1",
+                background: "#fff", cursor: "pointer", textDecoration: "none",
+              }}
+            >
+              <ExternalLink size={14} color="#475569" />
+            </a>
+            <button type="button" onClick={onDownload} title="Download file"
+              style={{
+                width: 32, height: 32, display: "inline-flex",
+                alignItems: "center", justifyContent: "center",
+                borderRadius: 6, border: "1.5px solid #0B7A6B",
+                background: "#0B7A6B", cursor: "pointer",
+              }}
+            >
+              <Download size={14} color="#fff" />
+            </button>
+            <button type="button" onClick={onClose} title="Close (Esc)"
+              style={{
+                width: 32, height: 32, display: "inline-flex",
+                alignItems: "center", justifyContent: "center",
+                borderRadius: 6, border: "1px solid #fca5a5",
+                background: "#fff", cursor: "pointer",
+              }}
+            >
+              <X size={14} color="#ef4444" />
+            </button>
+          </div>
+        </div>
+        {/* Content — always iframe; only invoked for browser-viewable file types */}
+        <div style={{ flex: 1, overflow: "hidden", background: "#f1f5f9" }}>
+          <iframe
+            src={viewUrl}
+            title={doc.fileName}
+            style={{ width: "100%", height: "100%", border: "none" }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function DocumentsTab({
   meeting,
   canManage,
+  isSuperAdmin = false,
   onChange,
 }: {
   meeting: MeetingDetailType;
   canManage: boolean;
+  isSuperAdmin?: boolean;
   onChange: () => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [viewing, setViewing] = useState<{ id: string; fileName: string; fileSize: number } | null>(null);
+
+  // Smart view: previewable files open in modal; Office files download directly
+  const handleView = (d: { id: string; fileName: string; fileSize: number }) => {
+    const ext = d.fileName.split(".").pop()?.toLowerCase() ?? "";
+    if (INLINE_VIEWABLE_EXTS.includes(ext)) {
+      setViewing(d);
+    } else {
+      download(d.id, d.fileName);
+    }
+  };
 
   const attach = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1640,12 +2740,9 @@ function DocumentsTab({
       const token = getToken();
       const response = await fetch(
         `/api/meetings/${meeting.id}/documents/${documentId}/download`,
-        {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        },
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
       );
       if (!response.ok) throw new Error("Download failed");
-
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1660,6 +2757,7 @@ function DocumentsTab({
       setError("Failed to download file");
     }
   };
+
   const remove = async (documentId: string) => {
     if (!window.confirm("Delete this document?")) return;
     await api.delete(`/meetings/${meeting.id}/documents/${documentId}`);
@@ -1667,75 +2765,163 @@ function DocumentsTab({
   };
 
   return (
-    <Card>
-      <CardHeader
-        title="Documents"
-        subtitle="Upload and manage files attached to this meeting"
-      />
-      <div className="divide-y divide-slate2-100">
-        {meeting.documents.length === 0 ? (
-          <EmptyState
-            title="No documents attached"
-            description="Upload meeting documents below."
-          />
-        ) : (
-          meeting.documents.map((d) => (
-            <div
-              key={d.id}
-              className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
-            >
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-slate2-800">
-                  {d.fileName}
-                </p>
-                <p className="text-xs text-slate2-400">
-                  {d.uploadedBy.name} · {(d.fileSize / 1024 / 1024).toFixed(2)}{" "}
-                  MB
-                </p>
+    <>
+      {viewing && (
+        <InlineDocViewer
+          meetingId={meeting.id}
+          doc={viewing}
+          onClose={() => setViewing(null)}
+          onDownload={() => download(viewing.id, viewing.fileName)}
+        />
+      )}
+      <Card>
+        <CardHeader
+          title="Documents"
+          subtitle="Upload and manage files attached to this meeting"
+        />
+        {meeting.status === "APPROVED" && isSuperAdmin && (
+          <div className="mx-5 mb-3 rounded-xl border border-amber-300 bg-amber-50/80 p-3.5 shadow-2xs">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <ShieldAlert size={18} className="text-amber-600 mt-0.5 shrink-0" />
+                <div>
+                  <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider">
+                    Super Admin Override Active
+                  </h4>
+                  <p className="mt-0.5 text-xs text-amber-800 leading-relaxed">
+                    This meeting is certified and locked for general users. As Super Admin, you retain exclusive permission to upload or remove document attachments when required.
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  onClick={() => download(d.id, d.fileName)}
-                >
-                  Download
-                </Button>
-                {canManage && (
-                  <button
-                    type="button"
-                    onClick={() => remove(d.id)}
-                    className="text-xs font-medium text-red-600 hover:text-red-700"
-                  >
-                    Delete
-                  </button>
-                )}
+              <span className="rounded-full bg-amber-200/80 border border-amber-300 px-2.5 py-0.5 text-[10px] font-bold text-amber-900 uppercase tracking-wider shrink-0">
+                Override Permission
+              </span>
+            </div>
+          </div>
+        )}
+        {meeting.status === "APPROVED" && !isSuperAdmin && (
+          <div className="mx-5 mb-3 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
+            <div className="flex items-start gap-2.5">
+              <Lock size={18} className="text-slate2-500 mt-0.5 shrink-0" />
+              <div>
+                <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
+                  Documents Permanently Certified & Locked (Read-Only)
+                </h4>
+                <p className="mt-0.5 text-xs text-slate2-600 leading-relaxed">
+                  This meeting has been officially approved and certified. All meeting documents and attachments are permanently locked in Read-Only mode. Only the Super Admin can unlock or attach additional documents.
+                </p>
               </div>
             </div>
-          ))
-        )}
-      </div>
-      {canManage && (
-        <form onSubmit={attach} className="border-t border-slate2-100 p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              id="meeting-document-file"
-              type="file"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-              className={`${inputClass} flex-1`}
-            />
-            <Button type="submit" disabled={!file || submitting}>
-              <Plus size={14} /> {submitting ? "Uploading…" : "Upload"}
-            </Button>
           </div>
-          <p className="mt-2 text-xs text-slate2-400">
-            Any file type supported
-          </p>
-          {error && (
-            <p className="mt-2 text-xs font-medium text-red-600">{error}</p>
+        )}
+        <div className="divide-y divide-slate2-100">
+          {meeting.documents.length === 0 ? (
+            <EmptyState
+              title="No documents attached"
+              description="Upload meeting documents below."
+            />
+          ) : (
+            meeting.documents.map((d) => (
+              <div
+                key={d.id}
+                className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
+              >
+                <div className="min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => handleView(d)}
+                    className="truncate text-sm font-medium hover:underline transition-colors cursor-pointer text-left"
+                    style={{ color: "#0B7A6B" }}
+                    title={`Preview ${d.fileName}`}
+                  >
+                    {d.fileName}
+                  </button>
+                  <p className="text-xs text-slate2-400">
+                    {d.uploadedBy.name} · {(d.fileSize / 1024 / 1024).toFixed(2)} MB
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {/* View button — opens inline modal */}
+                  <button
+                    type="button"
+                    onClick={() => handleView(d)}
+                    title="Preview file inline"
+                    style={{
+                      width: 36, height: 36,
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      borderRadius: 8, border: "1.5px solid #cbd5e1",
+                      background: "#ffffff", cursor: "pointer", flexShrink: 0,
+                      transition: "border-color 0.15s, background 0.15s",
+                    }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
+                      (e.currentTarget as HTMLElement).style.background = "#f0faf8";
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.borderColor = "#cbd5e1";
+                      (e.currentTarget as HTMLElement).style.background = "#ffffff";
+                    }}
+                  >
+                    <Eye size={16} color="#0B7A6B" />
+                  </button>
+                  {/* Download / Export button */}
+                  <button
+                    type="button"
+                    onClick={() => download(d.id, d.fileName)}
+                    title="Export / Download file"
+                    style={{
+                      width: 36, height: 36,
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      borderRadius: 8, border: "1.5px solid #0B7A6B",
+                      background: "#0B7A6B", cursor: "pointer", flexShrink: 0,
+                      transition: "background 0.15s, border-color 0.15s",
+                    }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = "#095f55";
+                      (e.currentTarget as HTMLElement).style.borderColor = "#095f55";
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = "#0B7A6B";
+                      (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
+                    }}
+                  >
+                    <Download size={16} color="#ffffff" />
+                  </button>
+                  {canManage && (
+                    <button
+                      type="button"
+                      onClick={() => remove(d.id)}
+                      className="text-xs font-medium text-red-600 hover:text-red-700"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
           )}
-        </form>
-      )}
-    </Card>
+        </div>
+        {canManage && (
+          <form onSubmit={attach} className="border-t border-slate2-100 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                id="meeting-document-file"
+                type="file"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+                className={`${inputClass} flex-1`}
+              />
+              <Button type="submit" disabled={!file || submitting}>
+                <Plus size={14} /> {submitting ? "Uploading…" : "Upload"}
+              </Button>
+            </div>
+            <p className="mt-2 text-xs text-slate2-400">Any file type supported</p>
+            {error && (
+              <p className="mt-2 text-xs font-medium text-red-600">{error}</p>
+            )}
+          </form>
+        )}
+      </Card>
+    </>
   );
 }
 
@@ -1743,12 +2929,14 @@ function ParticipantsTab({
   meeting,
   canManage: propCanManage,
   onChange,
+  onSignSelf,
 }: {
   meeting: MeetingDetailType;
   canManage?: boolean;
   onChange: () => void;
+  onSignSelf?: () => void;
 }) {
-  const { user, hasPermission } = useAuth();
+  const { user, hasPermission, hasAnyPermission } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [selected, setSelected] = useState("");
   const [addingParticipant, setAddingParticipant] = useState(false);
@@ -1781,7 +2969,8 @@ function ParticipantsTab({
     isSecretary ||
     isOrganizer ||
     hasPermission("meetings:manage_participants") ||
-    hasPermission("meetings:edit") ||
+    hasPermission("meetings:edit:all") ||
+    (hasPermission("meetings:edit:dept") && user?.department?.id === meeting.department?.id) ||
     !!propCanManage;
 
   const meetingEnded = hasMeetingEnded(meeting);
@@ -1794,7 +2983,7 @@ function ParticipantsTab({
     api
       .get<User[]>("/users")
       .then(setUsers)
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // Add participant
@@ -1940,63 +3129,71 @@ function ParticipantsTab({
       : 0;
 
   return (
-    <Card>
+    <Card className="border border-slate2-200/90 bg-white rounded-2xl shadow-xs overflow-hidden">
       <Toast
         message={toast?.message || null}
         type={toast?.type}
         onClose={() => setToast(null)}
       />
 
-      <CardHeader
-        title="Participants & Attendance"
-        subtitle={`${totalParticipants} invited · ${attendedCount} attended (${attendancePct}% attendance)`}
-        action={
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-xs text-slate2-500 font-medium">
-              Attendance:{" "}
-              <strong className="text-brand font-semibold">
-                {attendedCount}/{totalParticipants}
-              </strong>
+      {/* Header matching screenshot: Title, Subtitle, Progress, Finalized Pill, Edit Button */}
+      <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-slate2-100 bg-white">
+        <div>
+          <h3 className="text-base sm:text-lg font-bold text-slate2-900 leading-tight">
+            Participants & Attendance
+          </h3>
+          <p className="mt-0.5 text-xs text-slate2-500 font-normal">
+            {totalParticipants} invited · {attendedCount} attended ({attendancePct}%)
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate2-600 font-medium">
+              Attendance {attendedCount}/{totalParticipants}
             </span>
-
-            {isAttendanceFinalized ? (
-              <div className="flex items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-brand/10 px-2.5 py-1 text-xs font-semibold text-brand border border-brand/20 shadow-sm">
-                  <CheckCircle2 size={13} className="text-brand" />{" "}
-                  Attendance Finalized
-                </span>
-                {isSuperAdmin && (
-                  <Button
-                    variant="secondary"
-                    onClick={openFinalizeModal}
-                    className="text-xs py-1 px-2.5"
-                    title="Admin Override: Re-finalize attendance"
-                  >
-                    <Pencil size={12} /> Edit Finalized
-                  </Button>
-                )}
-              </div>
-            ) : meetingEnded ? (
-              <Button
-                variant="primary"
-                onClick={openFinalizeModal}
-                disabled={!canManage || isFinalizing}
-                className="text-xs py-1.5 px-3"
-              >
-                <CheckCircle2 size={14} /> Finalize Attendance
-              </Button>
-            ) : (
-              <span
-                title={`Attendance can be finalized once the meeting reaches its scheduled end time (${meeting.endTime}).`}
-                className="inline-flex items-center gap-1.5 text-xs text-slate2-400 bg-slate2-100 rounded-lg px-2.5 py-1.5 border border-slate2-200"
-              >
-                <Clock size={13} /> Finalize Attendance (After {meeting.endTime})
-              </span>
-            )}
+            <div className="h-1.5 w-20 rounded-full bg-slate2-100 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[#0B7A6B] transition-all duration-300"
+                style={{ width: `${attendancePct}%` }}
+              />
+            </div>
           </div>
-        }
-      />
 
+          {isAttendanceFinalized ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/80 px-2.5 py-0.5 text-xs font-semibold">
+              <CheckCircle2 size={13} className="text-emerald-600" /> Finalized
+            </span>
+          ) : meetingEnded ? (
+            <button
+              type="button"
+              onClick={openFinalizeModal}
+              disabled={!canManage || isFinalizing}
+              className="inline-flex items-center gap-1 rounded-full bg-brand/10 text-brand border border-brand/20 px-2.5 py-0.5 text-xs font-semibold hover:bg-brand/20 transition-colors cursor-pointer"
+            >
+              <CheckCircle2 size={13} /> Finalize
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-600 px-2.5 py-0.5 text-xs font-medium">
+              <Clock size={12} /> In Progress
+            </span>
+          )}
+
+          {canManage && (
+            <button
+              type="button"
+              onClick={openFinalizeModal}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate2-200 bg-white px-3 py-1 text-xs font-semibold text-slate2-700 hover:bg-slate2-50 transition-colors shadow-2xs cursor-pointer"
+              title="Edit attendance"
+            >
+              <Pencil size={12} className="text-slate2-600" />
+              <span>Edit</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Participants List: Every participant on ONE single row */}
       <div className="divide-y divide-slate2-100">
         {meeting.participants.length === 0 ? (
           <EmptyState
@@ -2006,26 +3203,43 @@ function ParticipantsTab({
         ) : (
           meeting.participants.map((p) => {
             const isAttended = p.participated || p.status === "ATTENDED";
+            const initials = p.user.name
+              ? p.user.name
+                  .split(" ")
+                  .filter(Boolean)
+                  .map((n) => n[0])
+                  .slice(0, 2)
+                  .join("")
+                  .toUpperCase()
+              : "U";
+
             return (
               <div
                 key={p.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-5 py-3 hover:bg-slate2-50/50 transition-colors"
+                className="flex items-center justify-between gap-4 px-5 py-3 hover:bg-slate2-50/50 transition-colors"
               >
-                <div className="flex items-center gap-3 min-w-0">
-                  <Avatar name={p.user.name} color={p.user.avatarColor} />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-slate2-800 truncate">
+                {/* Left: Avatar + Name + Email on ONE single row */}
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <div
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white text-xs font-bold tracking-tight shadow-2xs"
+                    style={{ backgroundColor: p.user.avatarColor || "#0b2545" }}
+                  >
+                    {initials}
+                  </div>
+                  <div className="flex items-baseline gap-2 min-w-0 truncate">
+                    <span className="text-sm font-bold text-slate2-900 truncate">
                       {p.user.name}
-                    </p>
-                    <p className="text-xs text-slate2-400 truncate">
+                    </span>
+                    <span className="text-xs text-slate2-500 font-normal truncate">
                       {p.user.email}
-                    </p>
+                    </span>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2.5 self-end sm:self-auto shrink-0">
-                  {/* Attendance status options (ATTENDED / NOT ATTENDED) */}
-                  <div className="inline-flex items-center rounded-lg bg-slate2-100 p-0.5 border border-slate2-200">
+                {/* Right: Attended/Absent Toggle + Signature Badge + Delete Action */}
+                <div className="flex items-center gap-3 shrink-0">
+                  {/* Attendance status toggle [ Attended | Absent ] */}
+                  <div className="inline-flex items-center rounded-xl bg-slate2-100/90 p-0.5 border border-slate2-200/80">
                     <button
                       type="button"
                       onClick={() => updateSingleAttendance(p.id, true)}
@@ -2037,17 +3251,17 @@ function ParticipantsTab({
                             ? "Attendance finalized"
                             : `Available after meeting ends at ${meeting.endTime}`
                       }
-                      className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold transition-all ${
+                      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-all ${
                         isAttended
-                          ? "bg-brand text-white shadow-sm"
-                          : "text-slate2-600 hover:text-slate2-900"
+                          ? "bg-[#0B7A6B] text-white shadow-2xs"
+                          : "text-slate2-600 hover:text-slate2-900 cursor-pointer"
                       } ${!canEditAttendance ? "opacity-80 cursor-not-allowed" : "cursor-pointer"}`}
                     >
                       <CheckCircle2
-                        size={12}
+                        size={13}
                         className={isAttended ? "text-white" : "text-slate2-400"}
                       />
-                      <span>ATTENDED</span>
+                      <span>Attended</span>
                     </button>
                     <button
                       type="button"
@@ -2055,31 +3269,63 @@ function ParticipantsTab({
                       disabled={!canEditAttendance || togglingId === p.id}
                       title={
                         canEditAttendance
-                          ? "Mark as Not Attended"
+                          ? "Mark as Absent"
                           : isAttendanceFinalized
                             ? "Attendance finalized"
                             : `Available after meeting ends at ${meeting.endTime}`
                       }
-                      className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold transition-all ${
+                      className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-all ${
                         !isAttended
-                          ? "bg-slate2-700 text-white shadow-sm"
-                          : "text-slate2-500 hover:text-slate2-800"
+                          ? "bg-slate2-700 text-white shadow-2xs"
+                          : "text-slate2-500 hover:text-slate2-800 cursor-pointer"
                       } ${!canEditAttendance ? "opacity-80 cursor-not-allowed" : "cursor-pointer"}`}
                     >
-                      <UserX
-                        size={12}
-                        className={
-                          !isAttended ? "text-white" : "text-slate2-400"
-                        }
+                      <XCircle
+                        size={13}
+                        className={!isAttended ? "text-white" : "text-slate2-400"}
                       />
-                      <span>NOT ATTENDED</span>
+                      <span>Absent</span>
                     </button>
                   </div>
 
-                  {/* Status Indicator */}
-                  <span className="text-[11px] font-medium text-slate2-500 bg-slate2-100 rounded-md px-2 py-0.5">
-                    {p.status}
-                  </span>
+                  {/* Digital Signature Status - Icon Only */}
+                  {(() => {
+                    const sig = meeting.participantSignatures?.find((s) => s.userId === p.user.id);
+                    if (sig) {
+                      return (
+                        <span
+                          className="inline-flex items-center justify-center h-8 w-8 rounded-xl bg-emerald-50 border border-emerald-200/90 text-emerald-600 shadow-2xs shrink-0"
+                          title={`Digitally signed on ${new Date(sig.signedAt).toLocaleDateString()}`}
+                        >
+                          <Signature size={15} />
+                        </span>
+                      );
+                    }
+                    if (
+                      p.user.id === user?.id &&
+                      (!!meeting.signaturesRequestedAt || meeting.status === "PENDING_SIGNATURES") &&
+                      onSignSelf
+                    ) {
+                      return (
+                        <button
+                          type="button"
+                          onClick={onSignSelf}
+                          title="Affix your digital signature to the minutes"
+                          className="inline-flex items-center justify-center h-8 w-8 rounded-xl bg-brand/10 hover:bg-brand text-brand hover:text-white border border-brand/20 transition-all cursor-pointer shadow-2xs shrink-0"
+                        >
+                          <Signature size={15} />
+                        </button>
+                      );
+                    }
+                    return (
+                      <span
+                        className="inline-flex items-center justify-center h-8 w-8 rounded-xl bg-amber-50/80 border border-amber-200/80 text-amber-600 shadow-2xs shrink-0"
+                        title="Signature pending"
+                      >
+                        <Signature size={15} className="opacity-70" />
+                      </span>
+                    );
+                  })()}
 
                   {/* Remove Participant Action */}
                   {canManage && (
@@ -2087,7 +3333,7 @@ function ParticipantsTab({
                       type="button"
                       onClick={() => setParticipantToDelete(p)}
                       title="Remove participant"
-                      className="rounded-lg p-1.5 text-slate2-400 hover:bg-red-50 hover:text-red-600 transition-colors"
+                      className="p-1.5 text-slate2-400 hover:text-rose-600 transition-colors cursor-pointer"
                     >
                       <Trash2 size={15} />
                     </button>
@@ -2099,33 +3345,42 @@ function ParticipantsTab({
         )}
       </div>
 
-      {/* Add Participant Section */}
+      {/* Add Participant Section: Search/Select + [+ Add] Button */}
       {canManage && (
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 border-t border-slate2-100 p-4 bg-slate2-50/30">
-          <select
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-            disabled={addingParticipant}
-            className={`${inputClass} flex-1`}
+        <div className="flex items-center gap-3 border-t border-slate2-100 p-4">
+          <div className="relative flex-1">
+            <select
+              value={selected}
+              onChange={(e) => setSelected(e.target.value)}
+              disabled={addingParticipant}
+              className="w-full appearance-none rounded-xl border border-slate2-200 bg-white px-4 py-2.5 text-xs text-slate2-700 placeholder:text-slate2-400 focus:outline-none focus:border-brand pr-8 cursor-pointer shadow-2xs"
+            >
+              <option value="">Select a user to invite...</option>
+              {available.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name} — {u.department?.name || u.email}
+                </option>
+              ))}
+            </select>
+            <ChevronDown
+              size={14}
+              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate2-500"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={add}
+            disabled={!selected || addingParticipant}
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#0B7A6B] hover:bg-brand-dark disabled:opacity-50 text-white font-semibold text-xs px-5 py-2.5 transition-colors shadow-2xs shrink-0 cursor-pointer"
           >
-            <option value="">Select a user to invite…</option>
-            {available.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name} — {u.department?.name || "Ahununu"}
-              </option>
-            ))}
-          </select>
-          <Button onClick={add} disabled={!selected || addingParticipant}>
             {addingParticipant ? (
               <>
-                <Loader2 size={14} className="animate-spin" /> Adding...
+                <Loader2 size={13} className="animate-spin" /> Adding...
               </>
             ) : (
-              <>
-                <Plus size={14} /> Add Participant
-              </>
+              <>+ Add</>
             )}
-          </Button>
+          </button>
         </div>
       )}
 
@@ -2267,11 +3522,10 @@ function ParticipantsTab({
                           }))
                         }
                         disabled={isFinalizing}
-                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${
-                          currentStatus === "ATTENDED"
-                            ? "bg-brand text-white shadow-sm"
-                            : "text-slate2-600 hover:text-slate2-900"
-                        }`}
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${currentStatus === "ATTENDED"
+                          ? "bg-brand text-white shadow-sm"
+                          : "text-slate2-600 hover:text-slate2-900"
+                          }`}
                       >
                         ATTENDED
                       </button>
@@ -2284,11 +3538,10 @@ function ParticipantsTab({
                           }))
                         }
                         disabled={isFinalizing}
-                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${
-                          currentStatus === "NOT ATTENDED"
-                            ? "bg-slate2-700 text-white shadow-sm"
-                            : "text-slate2-500 hover:text-slate2-800"
-                        }`}
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${currentStatus === "NOT ATTENDED"
+                          ? "bg-slate2-700 text-white shadow-sm"
+                          : "text-slate2-500 hover:text-slate2-800"
+                          }`}
                       >
                         NOT ATTENDED
                       </button>

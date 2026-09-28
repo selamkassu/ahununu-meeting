@@ -70,22 +70,23 @@ model User {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  role               Role                 @relation(fields: [roleId], references: [id])
-  department         Department?          @relation("DepartmentMembers", fields: [departmentId], references: [id])
-  headOfDepartments  Department[]         @relation("DepartmentHead")
-  organizedMeetings  Meeting[]            @relation("MeetingOrganizer")
-  approvedMeetings   Meeting[]            @relation("MeetingApprover")
-  participations     MeetingParticipant[]
-  assignedActions    ActionItem[]         @relation("ActionAssignee")
-  minutesAuthored    MeetingMinutes[]
-  attendeeMinutes    MeetingMinutes[]     @relation("AttendeeMinutes")
-  notifications      Notification[]
-  documents          Document[]
+  role                  Role                   @relation(fields: [roleId], references: [id])
+  department            Department?            @relation("DepartmentMembers", fields: [departmentId], references: [id])
+  headOfDepartments     Department[]           @relation("DepartmentHead")
+  organizedMeetings     Meeting[]              @relation("MeetingOrganizer")
+  approvedMeetings      Meeting[]              @relation("MeetingApprover")
+  participations        MeetingParticipant[]
+  assignedActions       ActionItem[]           @relation("ActionAssignee")
+  minutesAuthored       MeetingMinutes[]
+  attendeeMinutes       MeetingMinutes[]       @relation("AttendeeMinutes")
+  notifications         Notification[]
+  documents             Document[]
+  participantSignatures ParticipantSignature[]
 }
 
 // ---------- Meetings ----------
 
-// Status: SCHEDULED | IN_PROGRESS | APPROVED | COMPLETED | CANCELLED
+// Status: SCHEDULED | IN_PROGRESS | PENDING_SIGNATURES | READY_FOR_APPROVAL | APPROVED | COMPLETED | CANCELLED
 // Priority: LOW | MEDIUM | HIGH | CRITICAL
 model Meeting {
   id                    String    @id @default(cuid())
@@ -106,19 +107,23 @@ model Meeting {
   approvalSignature     String?
   attendanceFinalized   Boolean   @default(false)
   attendanceFinalizedAt DateTime?
+  signaturesRequestedAt DateTime?
+  forceApproved         Boolean   @default(false)
+  bypassReason          String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
-  organizer     User                 @relation("MeetingOrganizer", fields: [organizerId], references: [id])
-  approvedBy    User?                @relation("MeetingApprover", fields: [approvedById], references: [id])
-  department    Department           @relation(fields: [departmentId], references: [id])
-  participants  MeetingParticipant[]
-  agendaItems   AgendaItem[]
-  minutes       MeetingMinutes[]
-  decisions     Decision[]
-  actionItems   ActionItem[]
-  documents     Document[]
-  notifications Notification[]
+  organizer              User                   @relation("MeetingOrganizer", fields: [organizerId], references: [id])
+  approvedBy             User?                  @relation("MeetingApprover", fields: [approvedById], references: [id])
+  department             Department             @relation(fields: [departmentId], references: [id])
+  participants           MeetingParticipant[]
+  agendaItems            AgendaItem[]
+  minutes                MeetingMinutes[]
+  decisions              Decision[]
+  actionItems            ActionItem[]
+  documents              Document[]
+  notifications          Notification[]
+  participantSignatures  ParticipantSignature[]
 }
 
 // Status: INVITED | ACCEPTED | DECLINED | ATTENDED | ABSENT
@@ -240,4 +245,22 @@ model Notification {
 
   user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   meeting Meeting? @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+}
+
+// Participant digital signature captured during PENDING_SIGNATURES phase
+model ParticipantSignature {
+  id               String   @id @default(cuid())
+  meetingId        String
+  userId           String
+  signerName       String
+  signerRole       String?
+  signatureDataUrl String   @db.Text
+  signedAt         DateTime @default(now())
+  userAgent        String?
+  bypassReason     String?  // set only when admin force-approved
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([meetingId, userId])
 }

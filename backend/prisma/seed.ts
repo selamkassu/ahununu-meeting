@@ -32,6 +32,7 @@ async function main() {
   // ──────────────────────────────────────────────────────────────
   const roleDefinitions = [
     { name: "System Admin", code: "SYSTEM_ADMIN", description: "Full system access — manage users, roles, departments, and all portal features." },
+    { name: "Meeting Approver", code: "MEETING_APPROVER", description: "Review, verify participant signatures, and provide final formal approval to lock and certify meeting minutes and decisions." },
     { name: "Meeting Secretary", code: "MEETING_SECRETARY", description: "Create and manage meetings, agenda, minutes, decisions, and documents." },
     { name: "Department Head", code: "DEPARTMENT_HEAD", description: "Manage department meetings, action items, and decisions." },
     { name: "Participant", code: "PARTICIPANT", description: "View assigned meetings, agenda, and update own action items." },

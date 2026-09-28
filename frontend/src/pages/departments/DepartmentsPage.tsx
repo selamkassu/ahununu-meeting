@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Plus, Building2, Pencil, Trash2, AlertTriangle, Loader2, UserCircle, X } from "lucide-react";
+import { Plus, Building2, Pencil, Trash2, AlertTriangle, Loader2, UserCircle, X, Users } from "lucide-react";
 import { api, ApiError } from "../../api/client";
 import type { Department, DepartmentHeadUser, UserLite } from "../../types";
 import { Card, CardHeader, Button, Field, inputClass, EmptyState } from "../../components/ui/Primitives";
@@ -233,34 +233,70 @@ export default function DepartmentsPage() {
             }
           />
         ) : (
-          <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 p-4 sm:p-5 md:grid-cols-2 xl:grid-cols-3">
             {departments.map((d) => (
               <div
                 key={d.id}
-                className="flex flex-col justify-between rounded-xl border border-slate2-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md"
+                className="flex flex-col justify-between rounded-2xl border border-slate2-200/90 bg-white p-4 sm:p-5 shadow-sm transition-all hover:shadow-md overflow-hidden min-w-0"
               >
                 <div>
-                  {/* Top Header: icon + name + code */}
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand">
-                        <Building2 size={17} strokeWidth={2} />
+                  {/* Top Header: Icon + Title + Code on left, Status Pill on right */}
+                  <div className="flex items-start justify-between gap-2.5">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex h-11 w-11 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-2xl bg-[#e6f4f1] text-[#0d6e5a]">
+                        <svg
+                          width="24"
+                          height="24"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M6 22V8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v14" />
+                          <path d="M2 22V13a2 2 0 0 1 2-2h2v11" />
+                          <path d="M18 22V13h2a2 2 0 0 1 2 2v7" />
+                          <path d="M10 10h4" />
+                          <path d="M10 13.5h4" />
+                          <path d="M10 17h4" />
+                          <path d="M2 22h20" />
+                        </svg>
                       </div>
-                      <div>
-                        <h4 className="font-display text-sm font-bold text-slate2-800">{d.name}</h4>
-                        <span className="font-mono text-[11px] text-slate2-400 font-semibold">{d.code}</span>
+                      <div className="min-w-0">
+                        <h4 className="font-display text-base font-bold text-slate2-900 tracking-tight truncate">
+                          {d.name}
+                        </h4>
+                        <p className="text-xs font-bold text-slate2-500 tracking-wide mt-0.5">
+                          {d.code}
+                        </p>
                       </div>
                     </div>
+
+                    {/* Status Pill in top right */}
+                    {d.isActive ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-[#dcfce7]/70 px-2.5 py-1 text-xs font-bold tracking-wider text-[#15803d] shrink-0">
+                        <span className="h-1.5 w-1.5 rounded-full bg-[#15803d]" />
+                        ACTIVE
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-bold tracking-wider text-slate2-500 shrink-0">
+                        <span className="h-1.5 w-1.5 rounded-full bg-slate2-400" />
+                        INACTIVE
+                      </span>
+                    )}
                   </div>
 
                   {/* Description */}
-                  <p className="mt-2.5 text-xs text-slate2-600 leading-relaxed min-h-[2.5rem]">
-                    {d.description || <span className="italic text-slate2-400">No description provided.</span>}
+                  <p className="mt-3 text-sm text-slate2-800 leading-relaxed font-normal min-h-[2.5rem]">
+                    {d.description || (
+                      <span className="italic text-slate2-400">No description provided.</span>
+                    )}
                   </p>
 
                   {/* Department Head */}
                   {d.head ? (
-                    <div className="mt-2 flex items-center gap-1.5 text-xs text-slate2-600">
+                    <div className="mt-2 flex items-center gap-2 text-sm text-slate2-600">
                       <span
                         className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white"
                         style={{ backgroundColor: d.head.avatarColor ?? "#0B7A6B" }}
@@ -268,54 +304,52 @@ export default function DepartmentsPage() {
                         {d.head.name.charAt(0).toUpperCase()}
                       </span>
                       <span className="font-medium text-slate2-700">{d.head.name}</span>
-                      <span className="text-slate2-400">— Head</span>
+                      <span className="text-slate2-400 text-xs">— Head</span>
                     </div>
                   ) : (
-                    <p className="mt-2 text-[11px] italic text-slate2-400">No department head assigned.</p>
+                    <p className="mt-2 text-sm italic text-slate2-400">
+                      No department head assigned.
+                    </p>
                   )}
+                </div>
 
-                  {/* Status row */}
-                  <div className="mt-3 flex items-center justify-between border-t border-slate2-100 pt-2.5">
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <span className="font-medium text-slate2-500">Status:</span>
-                      <Badge tone={d.isActive ? "success" : "neutral"}>
-                        {d.isActive ? "ACTIVE" : "INACTIVE"}
-                      </Badge>
-                    </div>
-                    <span className="text-[11px] text-slate2-400">
+                {/* Footer Divider & Controls */}
+                <div className="mt-4 border-t border-slate2-100/90 pt-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs text-slate2-500 font-medium min-w-0 truncate">
+                    <Users size={14} className="text-slate2-400 stroke-[1.8] shrink-0" />
+                    <span className="truncate">
                       {d._count?.users ?? 0} users · {d._count?.meetings ?? 0} meetings
                     </span>
                   </div>
+
+                  {(canEdit || canDelete) && (
+                    <div className="flex items-center gap-1.5 ml-auto shrink-0 justify-end">
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={() => setEditingDepartment(d)}
+                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-[#2dd4bf]/70 bg-white text-[#0d6e5a] shadow-2xs hover:bg-[#ecfdf5] hover:border-[#14b8a6] transition-colors"
+                          title="Edit department"
+                          aria-label="Edit department"
+                        >
+                          <Pencil size={13} className="stroke-[2.2]" />
+                        </button>
+                      )}
+
+                      {canDelete && (
+                        <button
+                          type="button"
+                          onClick={() => setDeletingDepartment(d)}
+                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-red-200 bg-white text-[#dc2626] shadow-2xs hover:bg-red-50 hover:border-red-300 transition-colors"
+                          title="Delete department"
+                          aria-label="Delete department"
+                        >
+                          <Trash2 size={13} className="stroke-[2.2]" />
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
-
-                {/* Actions: Edit & Delete */}
-                {(canEdit || canDelete) && (
-                  <div className="mt-3.5 flex items-center justify-end gap-2 border-t border-slate2-100 pt-3">
-                    {canEdit && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={() => setEditingDepartment(d)}
-                        className="px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 hover:border-brand hover:text-brand"
-                      >
-                        <Pencil size={13} />
-                        <span>Edit</span>
-                      </Button>
-                    )}
-
-                    {canDelete && (
-                      <button
-                        type="button"
-                        onClick={() => setDeletingDepartment(d)}
-                        className="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-danger transition-colors hover:bg-red-50 hover:border-red-300"
-                        title="Delete department"
-                      >
-                        <Trash2 size={13} />
-                        <span>Delete</span>
-                      </button>
-                    )}
-                  </div>
-                )}
               </div>
             ))}
           </div>

@@ -14,6 +14,7 @@ import dashboardRoutes from "./routes/dashboard.routes";
 import notificationsRoutes from "./routes/notifications.routes";
 
 const app = express();
+// Meeting search update trigger
 const PORT = process.env.PORT || 4000;
 
 const corsOriginEnv = process.env.CORS_ORIGIN;

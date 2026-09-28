@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requirePermission, AuthedRequest } from "../middleware/auth";
 import { ACTION_ITEM_STATUSES, PRIORITIES, isOverdue, isLockedMeetingStatus } from "../utils/enums";
+import { checkOwnershipAccess, ensureUserPermissions } from "../utils/ownership";
 import { makeCode } from "../utils/codes";
 
 const router = Router();
@@ -24,6 +25,28 @@ router.get("/", async (req: AuthedRequest, res) => {
   if (typeof assignedToId === "string" && assignedToId) where.assignedToId = assignedToId;
   if (typeof priority === "string" && priority) where.priority = priority;
   if (mine === "true") where.assignedToId = req.user!.userId;
+
+  // 3-Tier Ownership Access Filter
+  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+    if (!req.userPermissions) {
+      const rolePerms = await prisma.rolePermission.findMany({
+        where: { roleId: req.user.roleId },
+        select: { permission: true },
+      });
+      req.userPermissions = rolePerms.map((rp) => rp.permission);
+    }
+    const canViewAll = req.userPermissions.includes("action_items:view:all");
+    const canViewDept = req.userPermissions.includes("action_items:view:dept");
+    const canViewOwn = req.userPermissions.includes("action_items:view:own");
+
+    if (!canViewAll) {
+      if (canViewDept && req.user.departmentId && mine !== "true") {
+        where.departmentId = req.user.departmentId;
+      } else {
+        where.assignedToId = req.user.userId;
+      }
+    }
+  }
 
   let items = (await prisma.actionItem.findMany({ where, include: withMeta, orderBy: { deadline: "asc" } })) as any[];
 
@@ -59,6 +82,14 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
     });
   }
 
+  // Enforce that deadline cannot be in the past
+  const deadlineDate = new Date(parsed.data.deadline);
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  if (deadlineDate.getTime() < startOfToday.getTime()) {
+    return res.status(400).json({ error: "Action item deadline cannot be in the past." });
+  }
+
   const count = await prisma.actionItem.count();
   const item = await prisma.actionItem.create({
     data: { ...parsed.data, code: makeCode("ACT", count + 1), deadline: new Date(parsed.data.deadline) },
@@ -78,9 +109,25 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
   res.status(201).json({ ...item, overdue: isOverdue(item.status, item.deadline) });
 });
 
-router.get("/:id", async (req, res) => {
-  const item = await prisma.actionItem.findUnique({ where: { id: req.params.id }, include: withMeta });
+router.get("/:id", async (req: AuthedRequest, res) => {
+  const item = await prisma.actionItem.findUnique({
+    where: { id: req.params.id },
+    include: {
+      ...withMeta,
+      meeting: { select: { id: true, title: true, code: true, status: true, organizerId: true } },
+    },
+  });
   if (!item) return res.status(404).json({ error: "Action item not found." });
+
+  await ensureUserPermissions(req);
+  if (!checkOwnershipAccess(req, "action_items", "view", {
+    departmentId: item.departmentId,
+    ownerId: item.assignedToId,
+    participantIds: item.meeting?.organizerId ? [item.meeting.organizerId] : [],
+  })) {
+    return res.status(403).json({ error: "You do not have permission to view this action item outside your ownership scope." });
+  }
+
   res.json({ ...item, overdue: isOverdue(item.status, item.deadline) });
 });
 
@@ -98,9 +145,27 @@ const updateSchema = z.object({
 router.put("/:id", async (req: AuthedRequest, res) => {
   const existing = await prisma.actionItem.findUnique({
     where: { id: req.params.id },
-    include: { meeting: { select: { status: true } } },
+    include: { meeting: { select: { status: true, organizerId: true, departmentId: true } } },
   });
   if (!existing) return res.status(404).json({ error: "Action item not found." });
+
+  // 3-Tier Ownership Permission Check for editing action items
+  if (req.user?.roleCode !== "SYSTEM_ADMIN") {
+    if (!req.userPermissions) {
+      const rolePerms = await prisma.rolePermission.findMany({
+        where: { roleId: req.user!.roleId },
+        select: { permission: true },
+      });
+      req.userPermissions = rolePerms.map((rp) => rp.permission);
+    }
+    const hasEditAll = req.userPermissions.includes("action_items:edit:all");
+    const hasEditDept = req.userPermissions.includes("action_items:edit:dept") && req.user?.departmentId === existing.departmentId;
+    const hasEditOwn = req.userPermissions.includes("action_items:edit:own") && (existing.assignedToId === req.user?.userId || existing.meeting?.organizerId === req.user?.userId);
+
+    if (!hasEditAll && !hasEditDept && !hasEditOwn) {
+      return res.status(403).json({ error: "You do not have permission to edit this action item." });
+    }
+  }
 
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid action item update." });
@@ -131,7 +196,15 @@ router.put("/:id", async (req: AuthedRequest, res) => {
   const { deadline, ...rest } = parsed.data;
 
   const data: any = { ...rest };
-  if (deadline) data.deadline = new Date(deadline);
+  if (deadline) {
+    const deadlineDate = new Date(deadline);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    if (deadlineDate.getTime() < startOfToday.getTime()) {
+      return res.status(400).json({ error: "Action item deadline cannot be in the past." });
+    }
+    data.deadline = deadlineDate;
+  }
   if (rest.status === "COMPLETED") {
     data.completedAt = new Date();
     data.progressPercent = 100;
@@ -148,25 +221,35 @@ router.put("/:id", async (req: AuthedRequest, res) => {
   }
 });
 
-router.delete("/:id", requirePermission("action_items:edit"), async (req: AuthedRequest, res) => {
-  const existing = await prisma.actionItem.findUnique({
-    where: { id: req.params.id },
-    include: { meeting: { select: { status: true } } },
-  });
-  if (!existing) return res.status(404).json({ error: "Action item not found." });
-
-  // Enforce meeting lock
-  if (existing.meeting?.status === "CANCELLED") {
-    return res.status(403).json({
-      error: "This meeting is cancelled. All records are locked from editing.",
+router.delete(
+  "/:id",
+  requirePermission("action_items:delete:all", "action_items:delete:dept", "action_items:delete:own"),
+  async (req: AuthedRequest, res) => {
+    const existing = await prisma.actionItem.findUnique({
+      where: { id: req.params.id },
+      include: { meeting: { select: { status: true, organizerId: true, departmentId: true } } },
     });
-  }
+    if (!existing) return res.status(404).json({ error: "Action item not found." });
 
-  if (existing.meeting && isLockedMeetingStatus(existing.meeting.status) && req.user?.roleCode !== "SYSTEM_ADMIN") {
-    return res.status(403).json({
-      error: `Meeting is locked (${existing.meeting.status.replace("_", " ")}). Cannot delete action items unless authorized by Super Admin.`,
-    });
-  }
+    if (!checkOwnershipAccess(req, "action_items", "delete", {
+      departmentId: existing.departmentId,
+      ownerId: existing.assignedToId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete this action item outside your ownership scope." });
+    }
+
+    // Enforce meeting lock
+    if (existing.meeting?.status === "CANCELLED") {
+      return res.status(403).json({
+        error: "This meeting is cancelled. All records are locked from editing.",
+      });
+    }
+
+    if (existing.meeting && isLockedMeetingStatus(existing.meeting.status) && req.user?.roleCode !== "SYSTEM_ADMIN") {
+      return res.status(403).json({
+        error: `Meeting is locked (${existing.meeting.status.replace("_", " ")}). Cannot delete action items unless authorized by Super Admin.`,
+      });
+    }
 
   try {
     await prisma.actionItem.delete({ where: { id: req.params.id } });

@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, AuthedRequest } from "../middleware/auth";
 import { isOverdue } from "../utils/enums";
+import { ensureUserPermissions, getOwnershipTier } from "../utils/ownership";
 
 const router = Router();
 router.use(requireAuth);
@@ -17,37 +18,76 @@ function endOfDay(d: Date) {
   return x;
 }
 
-router.get("/stats", async (_req, res) => {
+router.get("/stats", async (req: AuthedRequest, res) => {
   try {
     const now = new Date();
     const today0 = startOfDay(now);
     const today1 = endOfDay(now);
 
-  const [
-    totalMeetings,
-    todaysMeetings,
-    upcomingMeetings,
-    completedMeetings,
-    allActionItems,
-    pendingDecisions,
-    departments,
-    meetingsForMonthly,
-  ] = await Promise.all([
-    prisma.meeting.count(),
-    prisma.meeting.count({ where: { date: { gte: today0, lte: today1 } } }),
-    prisma.meeting.count({ where: { date: { gt: today1 }, status: "SCHEDULED" } }),
-    prisma.meeting.count({ where: { status: "COMPLETED" } }),
-    prisma.actionItem.findMany({
-      include: {
-        assignedTo: { select: { id: true, name: true, avatarColor: true } },
-        department: { select: { id: true, name: true } },
-        meeting: { select: { id: true, title: true, code: true } },
-      },
-    }),
-    prisma.decision.count({ where: { status: "OPEN" } }),
-    prisma.department.findMany({ where: { isActive: true } }),
-    prisma.meeting.findMany({ select: { date: true, status: true } }),
-  ]);
+    const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
+    await ensureUserPermissions(req);
+
+    // 3-Tier Meeting Scope
+    const meetingTier = getOwnershipTier(req.userPermissions, "meetings", "view", isSuperAdmin);
+    const baseMeetingWhere: any = {};
+    if (meetingTier === "dept" && req.user?.departmentId) {
+      baseMeetingWhere.departmentId = req.user.departmentId;
+    } else if (meetingTier === "own" && req.user) {
+      baseMeetingWhere.OR = [
+        { organizerId: req.user.userId },
+        { participants: { some: { userId: req.user.userId } } },
+      ];
+    }
+
+    // 3-Tier Action Item Scope
+    const actionTier = getOwnershipTier(req.userPermissions, "action_items", "view", isSuperAdmin);
+    const baseActionWhere: any = {};
+    if (actionTier === "dept" && req.user?.departmentId) {
+      baseActionWhere.departmentId = req.user.departmentId;
+    } else if (actionTier === "own" && req.user) {
+      baseActionWhere.assignedToId = req.user.userId;
+    }
+
+    // 3-Tier Decision Scope
+    const decisionTier = getOwnershipTier(req.userPermissions, "decisions", "view", isSuperAdmin);
+    const baseDecisionWhere: any = { status: "OPEN" };
+    if (decisionTier === "dept" && req.user?.departmentId) {
+      baseDecisionWhere.meeting = { departmentId: req.user.departmentId };
+    } else if (decisionTier === "own" && req.user) {
+      baseDecisionWhere.meeting = {
+        OR: [
+          { organizerId: req.user.userId },
+          { participants: { some: { userId: req.user.userId } } },
+        ],
+      };
+    }
+
+    const [
+      totalMeetings,
+      todaysMeetings,
+      upcomingMeetings,
+      completedMeetings,
+      allActionItems,
+      pendingDecisions,
+      departments,
+      meetingsForMonthly,
+    ] = await Promise.all([
+      prisma.meeting.count({ where: baseMeetingWhere }),
+      prisma.meeting.count({ where: { ...baseMeetingWhere, date: { gte: today0, lte: today1 } } }),
+      prisma.meeting.count({ where: { ...baseMeetingWhere, date: { gt: today1 }, status: "SCHEDULED" } }),
+      prisma.meeting.count({ where: { ...baseMeetingWhere, status: "COMPLETED" } }),
+      prisma.actionItem.findMany({
+        where: baseActionWhere,
+        include: {
+          assignedTo: { select: { id: true, name: true, avatarColor: true } },
+          department: { select: { id: true, name: true } },
+          meeting: { select: { id: true, title: true, code: true } },
+        },
+      }),
+      prisma.decision.count({ where: baseDecisionWhere }),
+      prisma.department.findMany({ where: { isActive: true } }),
+      prisma.meeting.findMany({ where: baseMeetingWhere, select: { date: true, status: true } }),
+    ]);
 
   const actionItemsTyped = allActionItems as any[];
   const departmentsTyped = departments as any[];

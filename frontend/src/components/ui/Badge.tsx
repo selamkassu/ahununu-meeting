@@ -25,6 +25,10 @@ export function statusTone(status: string): Tone {
       return "info";
     case "IN_PROGRESS":
       return "warning";
+    case "PENDING_SIGNATURES":
+      return "warning";
+    case "READY_FOR_APPROVAL":
+      return "info";
     case "APPROVED":
       return "brand";
     case "COMPLETED":
@@ -58,7 +62,7 @@ export function priorityTone(priority: string): Tone {
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  return <Badge tone={statusTone(status)}>{status.replace("_", " ")}</Badge>;
+  return <Badge tone={statusTone(status)}>{status.replace(/_/g, " ")}</Badge>;
 }
 
 export function PriorityBadge({ priority }: { priority: string }) {

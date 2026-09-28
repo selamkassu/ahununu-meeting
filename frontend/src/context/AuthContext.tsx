@@ -65,13 +65,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [user]);
 
   const hasPermission = useCallback(
-    (permission: string) => permissionSet.has(permission),
+    (permission: string) => {
+      if (permissionSet.has(permission)) return true;
+      // If base permission is checked without tier, check if user has any scoped variant (:all, :dept, :own)
+      if (!permission.endsWith(":all") && !permission.endsWith(":dept") && !permission.endsWith(":own")) {
+        return (
+          permissionSet.has(`${permission}:all`) ||
+          permissionSet.has(`${permission}:dept`) ||
+          permissionSet.has(`${permission}:own`)
+        );
+      }
+      return false;
+    },
     [permissionSet]
   );
 
   const hasAnyPermission = useCallback(
-    (...permissions: string[]) => permissions.some((p) => permissionSet.has(p)),
-    [permissionSet]
+    (...permissions: string[]) => permissions.some((p) => hasPermission(p)),
+    [hasPermission]
   );
 
   return (

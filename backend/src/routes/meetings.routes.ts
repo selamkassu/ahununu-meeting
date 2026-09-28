@@ -12,6 +12,7 @@ import {
   DECISION_STATUSES,
   isLockedMeetingStatus,
 } from "../utils/enums";
+import { checkOwnershipAccess, ensureUserPermissions } from "../utils/ownership";
 import { makeCode } from "../utils/codes";
 
 const router = Router();
@@ -68,6 +69,12 @@ const detailInclude = {
     orderBy: { deadline: "asc" as const },
   },
   documents: { include: { uploadedBy: { select: { id: true, name: true } } } },
+  participantSignatures: {
+    include: {
+      user: { select: { id: true, name: true, avatarColor: true, jobTitle: true, role: { select: { name: true } } } },
+    },
+    orderBy: { signedAt: "asc" as const },
+  },
 };
 /**
  * Check if a meeting is locked for editing.
@@ -86,7 +93,12 @@ function checkMeetingLock(meeting: { status: string }, req: AuthedRequest): stri
  */
 async function canApproveMeeting(organizerId: string, req: AuthedRequest): Promise<boolean> {
   if (!req.user) return false;
-  if (req.user.roleCode === "SYSTEM_ADMIN") return true;
+  if (
+    req.user.roleCode === "SYSTEM_ADMIN" ||
+    req.user.roleCode === "MEETING_SECRETARY" ||
+    req.user.roleCode === "MEETING_APPROVER" ||
+    req.user.roleCode === "CHAIRPERSON"
+  ) return true;
   if (organizerId === req.user.userId) return true;
 
   if (!req.userPermissions) {
@@ -96,7 +108,14 @@ async function canApproveMeeting(organizerId: string, req: AuthedRequest): Promi
     });
     req.userPermissions = rolePerms.map((rp) => rp.permission);
   }
-  return req.userPermissions.includes("meetings:approve");
+  return (
+    req.userPermissions.includes("meetings:approve") ||
+    req.userPermissions.includes("meetings:certify_lock") ||
+    req.userPermissions.includes("meetings:edit:all") ||
+    req.userPermissions.includes("meetings:edit:dept") ||
+    req.userPermissions.includes("meetings:edit:own") ||
+    req.userPermissions.includes("meetings:manage_participants")
+  );
 }
 
 /**
@@ -134,7 +153,8 @@ async function canUserManageAttendance(meeting: { organizerId: string }, req: Au
   }
   return (
     req.userPermissions.includes("meetings:manage_participants") ||
-    req.userPermissions.includes("meetings:edit")
+    req.userPermissions.includes("meetings:edit:all") ||
+    req.userPermissions.includes("meetings:edit:dept")
   );
 }
 
@@ -149,23 +169,89 @@ function canEditFinalizedAttendance(req: AuthedRequest): boolean {
 // ---------- List ----------
 router.get("/", async (req: AuthedRequest, res) => {
   const { status, departmentId, priority, from, to, q, mine } = req.query;
-  const where: any = {};
-  if (typeof status === "string" && status) where.status = status;
+  const conditions: any[] = [];
+
+  if (typeof status === "string" && status) conditions.push({ status });
   if (typeof departmentId === "string" && departmentId)
-    where.departmentId = departmentId;
-  if (typeof priority === "string" && priority) where.priority = priority;
+    conditions.push({ departmentId });
+  if (typeof priority === "string" && priority) conditions.push({ priority });
+
   if (from || to) {
-    where.date = {};
-    if (typeof from === "string" && from) where.date.gte = new Date(from);
-    if (typeof to === "string" && to) where.date.lte = new Date(to);
+    const dateCond: any = {};
+    if (typeof from === "string" && from) dateCond.gte = new Date(from);
+    if (typeof to === "string" && to) dateCond.lte = new Date(to);
+    conditions.push({ date: dateCond });
   }
-  if (typeof q === "string" && q) where.title = { contains: q };
-  if (mine === "true") {
-    where.OR = [
-      { organizerId: req.user!.userId },
-      { participants: { some: { userId: req.user!.userId } } },
-    ];
+
+  if (mine === "true" && req.user) {
+    conditions.push({
+      OR: [
+        { organizerId: req.user.userId },
+        { participants: { some: { userId: req.user.userId } } },
+      ],
+    });
   }
+
+  // 3-Tier Ownership Enforcement for Viewing Meetings
+  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+    if (!req.userPermissions) {
+      const rolePerms = await prisma.rolePermission.findMany({
+        where: { roleId: req.user.roleId },
+        select: { permission: true },
+      });
+      req.userPermissions = rolePerms.map((rp) => rp.permission);
+    }
+    const canViewAll = req.userPermissions.includes("meetings:view:all");
+    const canViewDept = req.userPermissions.includes("meetings:view:dept");
+    const canViewOwn = req.userPermissions.includes("meetings:view:own");
+
+    if (!canViewAll) {
+      if (canViewDept && req.user.departmentId && mine !== "true") {
+        // Enforce user's department and override any requested departmentId
+        for (let i = conditions.length - 1; i >= 0; i--) {
+          if (conditions[i].departmentId) {
+            conditions.splice(i, 1);
+          }
+        }
+        conditions.push({ departmentId: req.user.departmentId });
+      } else {
+        conditions.push({
+          OR: [
+            { organizerId: req.user.userId },
+            { participants: { some: { userId: req.user.userId } } },
+          ],
+        });
+      }
+    }
+  }
+
+  // Case-insensitive search across: Meeting title, Meeting description, and Participant name (and Organizer name)
+  if (typeof q === "string" && q.trim()) {
+    const searchTerm = q.trim();
+    conditions.push({
+      OR: [
+        { title: { contains: searchTerm, mode: "insensitive" } },
+        { description: { contains: searchTerm, mode: "insensitive" } },
+        { code: { contains: searchTerm, mode: "insensitive" } },
+        {
+          participants: {
+            some: {
+              user: {
+                name: { contains: searchTerm, mode: "insensitive" },
+              },
+            },
+          },
+        },
+        {
+          organizer: {
+            name: { contains: searchTerm, mode: "insensitive" },
+          },
+        },
+      ],
+    });
+  }
+
+  const where = conditions.length > 0 ? { AND: conditions } : {};
 
   const meetings = await prisma.meeting.findMany({
     where,
@@ -173,6 +259,11 @@ router.get("/", async (req: AuthedRequest, res) => {
       organizer: { select: { id: true, name: true, avatarColor: true } },
       approvedBy: { select: { id: true, name: true, avatarColor: true } },
       department: { select: { id: true, name: true } },
+      participants: {
+        select: {
+          user: { select: { id: true, name: true, avatarColor: true } },
+        },
+      },
       _count: {
         select: { participants: true, actionItems: true, agendaItems: true },
       },
@@ -267,10 +358,27 @@ router.post(
 );
 
 // ---------- Cross-meeting overviews ----------
-router.get("/agenda-overview/upcoming", async (_req, res) => {
+router.get("/agenda-overview/upcoming", async (req: AuthedRequest, res) => {
+  const meetingWhere: any = { date: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } };
+  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+    await ensureUserPermissions(req);
+    const canAll = req.userPermissions?.includes("meetings:view:all");
+    const canDept = req.userPermissions?.includes("meetings:view:dept");
+    if (!canAll) {
+      if (canDept && req.user.departmentId) {
+        meetingWhere.departmentId = req.user.departmentId;
+      } else {
+        meetingWhere.OR = [
+          { organizerId: req.user.userId },
+          { participants: { some: { userId: req.user.userId } } },
+        ];
+      }
+    }
+  }
+
   const items = await prisma.agendaItem.findMany({
     where: {
-      meeting: { date: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+      meeting: meetingWhere,
     },
     include: {
       meeting: {
@@ -289,8 +397,32 @@ router.get("/agenda-overview/upcoming", async (_req, res) => {
   res.json(items);
 });
 
-router.get("/minutes-overview/recent", async (_req, res) => {
+router.get("/minutes-overview/recent", async (req: AuthedRequest, res) => {
+  const where: any = {};
+  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+    if (!req.userPermissions) {
+      const rolePerms = await prisma.rolePermission.findMany({
+        where: { roleId: req.user.roleId },
+        select: { permission: true },
+      });
+      req.userPermissions = rolePerms.map((rp) => rp.permission);
+    }
+    const canAll = req.userPermissions.includes("minutes:view:all");
+    const canDept = req.userPermissions.includes("minutes:view:dept");
+    if (!canAll) {
+      if (canDept && req.user.departmentId) {
+        where.meeting = { departmentId: req.user.departmentId };
+      } else {
+        where.OR = [
+          { recordedById: req.user.userId },
+          { meeting: { OR: [{ organizerId: req.user.userId }, { participants: { some: { userId: req.user.userId } } }] } },
+        ];
+      }
+    }
+  }
+
   const items = await prisma.meetingMinutes.findMany({
+    where,
     include: {
       recordedBy: { select: { id: true, name: true } },
       meeting: {
@@ -309,10 +441,37 @@ router.get("/minutes-overview/recent", async (_req, res) => {
   res.json(items);
 });
 
-router.get("/decisions-overview/all", async (req, res) => {
+router.get("/decisions-overview/all", async (req: AuthedRequest, res) => {
   const { status } = req.query;
+  const where: any = {};
+  if (typeof status === "string" && status) where.status = status;
+
+  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+    if (!req.userPermissions) {
+      const rolePerms = await prisma.rolePermission.findMany({
+        where: { roleId: req.user.roleId },
+        select: { permission: true },
+      });
+      req.userPermissions = rolePerms.map((rp) => rp.permission);
+    }
+    const canAll = req.userPermissions.includes("decisions:view:all");
+    const canDept = req.userPermissions.includes("decisions:view:dept");
+    if (!canAll) {
+      if (canDept && req.user.departmentId) {
+        where.meeting = { departmentId: req.user.departmentId };
+      } else {
+        where.meeting = {
+          OR: [
+            { organizerId: req.user.userId },
+            { participants: { some: { userId: req.user.userId } } },
+          ],
+        };
+      }
+    }
+  }
+
   const decisions = await prisma.decision.findMany({
-    where: typeof status === "string" && status ? { status } : undefined,
+    where,
     include: {
       meeting: {
         select: {
@@ -320,7 +479,10 @@ router.get("/decisions-overview/all", async (req, res) => {
           title: true,
           code: true,
           date: true,
-          department: { select: { name: true } },
+          status: true,
+          departmentId: true,
+          organizerId: true,
+          department: { select: { id: true, name: true } },
         },
       },
       actionItems: { select: { id: true, status: true } },
@@ -331,8 +493,32 @@ router.get("/decisions-overview/all", async (req, res) => {
   res.json(decisions);
 });
 
-router.get("/documents-overview/all", async (_req, res) => {
+router.get("/documents-overview/all", async (req: AuthedRequest, res) => {
+  const where: any = {};
+  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+    if (!req.userPermissions) {
+      const rolePerms = await prisma.rolePermission.findMany({
+        where: { roleId: req.user.roleId },
+        select: { permission: true },
+      });
+      req.userPermissions = rolePerms.map((rp) => rp.permission);
+    }
+    const canAll = req.userPermissions.includes("documents:view:all");
+    const canDept = req.userPermissions.includes("documents:view:dept");
+    if (!canAll) {
+      if (canDept && req.user.departmentId) {
+        where.meeting = { departmentId: req.user.departmentId };
+      } else {
+        where.OR = [
+          { uploadedById: req.user.userId },
+          { meeting: { OR: [{ organizerId: req.user.userId }, { participants: { some: { userId: req.user.userId } } }] } },
+        ];
+      }
+    }
+  }
+
   const documents = await prisma.document.findMany({
+    where,
     include: {
       uploadedBy: { select: { id: true, name: true } },
       meeting: {
@@ -374,7 +560,13 @@ router.post(
     if (!req.file) return res.status(400).json({ error: "No file selected." });
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        departmentId: true,
+        organizerId: true,
+        participants: { select: { userId: true } },
+      },
     });
     if (!meeting) {
       fs.unlinkSync(req.file.path);
@@ -384,6 +576,16 @@ router.post(
     if (lockError) {
       fs.unlinkSync(req.file.path);
       return res.status(403).json({ error: lockError });
+    }
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+      participantIds: meeting.participants.map((p) => p.userId),
+    })) {
+      fs.unlinkSync(req.file.path);
+      return res.status(403).json({ error: "You do not have permission to upload documents to this meeting outside your ownership scope." });
     }
 
     const doc = await prisma.document.create({
@@ -408,9 +610,31 @@ router.get(
   async (req: AuthedRequest, res) => {
     const doc = await prisma.document.findFirst({
       where: { id: req.params.documentId, meetingId: req.params.id },
+      include: {
+        meeting: {
+          select: {
+            departmentId: true,
+            organizerId: true,
+            participants: { select: { userId: true } },
+          },
+        },
+      },
     });
     if (!doc || !doc.storedName)
       return res.status(404).json({ error: "Document not found." });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "documents", "view", {
+      departmentId: doc.meeting.departmentId,
+      ownerId: doc.uploadedById,
+      participantIds: [
+        doc.meeting.organizerId,
+        ...doc.meeting.participants.map((p) => p.userId),
+      ],
+    })) {
+      return res.status(403).json({ error: "You do not have permission to download this document outside your ownership scope." });
+    }
+
     const filePath = path.join(uploadDir, doc.storedName);
     if (!fs.existsSync(filePath))
       return res.status(404).json({ error: "File is no longer available." });
@@ -418,13 +642,58 @@ router.get(
   },
 );
 
+router.get(
+  "/:id/documents/:documentId/view",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const doc = await prisma.document.findFirst({
+      where: { id: req.params.documentId, meetingId: req.params.id },
+      include: {
+        meeting: {
+          select: {
+            departmentId: true,
+            organizerId: true,
+            participants: { select: { userId: true } },
+          },
+        },
+      },
+    });
+    if (!doc || !doc.storedName)
+      return res.status(404).json({ error: "Document not found." });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "documents", "view", {
+      departmentId: doc.meeting.departmentId,
+      ownerId: doc.uploadedById,
+      participantIds: [
+        doc.meeting.organizerId,
+        ...doc.meeting.participants.map((p) => p.userId),
+      ],
+    })) {
+      return res.status(403).json({ error: "You do not have permission to view this document outside your ownership scope." });
+    }
+
+    const filePath = path.join(uploadDir, doc.storedName);
+    if (!fs.existsSync(filePath))
+      return res.status(404).json({ error: "File is no longer available." });
+    // Serve inline so browser can preview PDFs, images, etc.
+    res.setHeader("Content-Type", doc.fileType || "application/octet-stream");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${encodeURIComponent(doc.fileName)}"`,
+    );
+    res.sendFile(filePath);
+  },
+);
+
+
 router.delete(
   "/:id/documents/:documentId",
-  requirePermission("documents:delete"),
+  requirePermission("documents:delete:all", "documents:delete:dept", "documents:delete:own"),
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
@@ -434,6 +703,14 @@ router.delete(
       where: { id: req.params.documentId, meetingId: req.params.id },
     });
     if (!doc) return res.status(404).json({ error: "Document not found." });
+
+    if (!checkOwnershipAccess(req, "documents", "delete", {
+      departmentId: meeting.departmentId,
+      ownerId: doc.uploadedById,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete this document outside your ownership scope." });
+    }
+
     if (doc.storedName) {
       const filePath = path.join(uploadDir, doc.storedName);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -444,12 +721,22 @@ router.delete(
 );
 
 // ---------- Detail ----------
-router.get("/:id", async (req, res) => {
+router.get("/:id", async (req: AuthedRequest, res) => {
   const meeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
     include: detailInclude,
   });
   if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+
+  await ensureUserPermissions(req);
+  if (!checkOwnershipAccess(req, "meetings", "view", {
+    departmentId: meeting.departmentId,
+    ownerId: meeting.organizerId,
+    participantIds: meeting.participants.map((p) => p.userId),
+  })) {
+    return res.status(403).json({ error: "You do not have permission to view this meeting outside your ownership scope." });
+  }
+
   res.json(meeting);
 });
 
@@ -467,16 +754,26 @@ const updateSchema = z.object({
   departmentId: z.string().optional(),
 });
 
-router.put("/:id", requirePermission("meetings:edit"), async (req: AuthedRequest, res) => {
-  const parsed = updateSchema.safeParse(req.body);
-  if (!parsed.success)
-    return res.status(400).json({ error: "Invalid meeting update.", details: parsed.error.flatten() });
+router.put(
+  "/:id",
+  requirePermission("meetings:edit:all", "meetings:edit:dept", "meetings:edit:own"),
+  async (req: AuthedRequest, res) => {
+    const parsed = updateSchema.safeParse(req.body);
+    if (!parsed.success)
+      return res.status(400).json({ error: "Invalid meeting update.", details: parsed.error.flatten() });
 
-  const existing = await prisma.meeting.findUnique({
-    where: { id: req.params.id },
-    select: { id: true, status: true, organizerId: true, approvedById: true },
-  });
-  if (!existing) return res.status(404).json({ error: "Meeting not found." });
+    const existing = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, status: true, organizerId: true, approvedById: true, departmentId: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Meeting not found." });
+
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: existing.departmentId,
+      ownerId: existing.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to edit meetings outside your ownership scope." });
+    }
 
   const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
   const wasLocked = isLockedMeetingStatus(existing.status);
@@ -525,29 +822,180 @@ router.put("/:id", requirePermission("meetings:edit"), async (req: AuthedRequest
 });
 
 // ---------- Delete Meeting ----------
-router.delete("/:id", requirePermission("meetings:delete"), async (req: AuthedRequest, res) => {
-  const existing = await prisma.meeting.findUnique({
+router.delete(
+  "/:id",
+  requirePermission("meetings:delete:all", "meetings:delete:dept", "meetings:delete:own"),
+  async (req: AuthedRequest, res) => {
+    const existing = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Meeting not found." });
+
+    if (!checkOwnershipAccess(req, "meetings", "delete", {
+      departmentId: existing.departmentId,
+      ownerId: existing.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete meetings outside your ownership scope." });
+    }
+
+    const lockError = checkMeetingLock(existing, req);
+    if (lockError) return res.status(403).json({ error: lockError });
+
+    try {
+      await prisma.meeting.delete({ where: { id: req.params.id } });
+      res.status(204).send();
+    } catch {
+      res.status(404).json({ error: "Meeting not found." });
+    }
+  },
+);
+
+// ---------- Signing Workflow ----------
+
+// POST /:id/request-signatures  — move meeting to PENDING_SIGNATURES phase
+router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
+  const meeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
-    select: { id: true, status: true },
+    select: { id: true, status: true, organizerId: true, title: true, participants: { select: { userId: true } } },
   });
-  if (!existing) return res.status(404).json({ error: "Meeting not found." });
+  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-  const lockError = checkMeetingLock(existing, req);
-  if (lockError) return res.status(403).json({ error: lockError });
+  const authorized = await canApproveMeeting(meeting.organizerId, req);
+  if (!authorized) return res.status(403).json({ error: "Only organizers or administrators can initiate the signing phase." });
 
-  try {
-    await prisma.meeting.delete({ where: { id: req.params.id } });
-    res.status(204).send();
-  } catch {
-    res.status(404).json({ error: "Meeting not found." });
+  if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
+  if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot request signatures for a cancelled meeting." });
+  if (meeting.status === "PENDING_SIGNATURES") return res.status(400).json({ error: "Signatures already being collected." });
+  if (meeting.status === "READY_FOR_APPROVAL") return res.status(400).json({ error: "All signatures already collected." });
+
+  const updated = await (prisma.meeting as any).update({
+    where: { id: req.params.id },
+    data: { status: "PENDING_SIGNATURES", signaturesRequestedAt: new Date() },
+    include: detailInclude,
+  });
+
+  // Notify all participants
+  const notifData = meeting.participants
+    .filter(p => p.userId !== req.user!.userId)
+    .map(p => ({
+      userId: p.userId,
+      meetingId: meeting.id,
+      type: "MEETING_SIGN_REQUEST",
+      title: "Signature Requested",
+      message: `Your digital signature is required for the meeting: "${meeting.title}".`,
+      link: `/meetings/${meeting.id}?tab=overview`,
+    }));
+  if (notifData.length) await prisma.notification.createMany({ data: notifData });
+
+  res.json(updated);
+});
+
+// POST /:id/participant-sign  — participant submits their digital signature
+router.post("/:id/participant-sign", async (req: AuthedRequest, res) => {
+  const meeting = await (prisma.meeting as any).findUnique({
+    where: { id: req.params.id },
+    include: {
+      participants: { select: { userId: true } },
+      participantSignatures: { select: { userId: true } },
+    },
+  });
+  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+  if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
+  if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot sign a cancelled meeting." });
+
+  if (meeting.status !== "PENDING_SIGNATURES") {
+    if (["SCHEDULED", "IN_PROGRESS", "COMPLETED", "DRAFT"].includes(meeting.status)) {
+      await (prisma.meeting as any).update({
+        where: { id: req.params.id },
+        data: { status: "PENDING_SIGNATURES", signaturesRequestedAt: new Date() },
+      });
+    } else {
+      return res.status(400).json({ error: "Signatures are not being collected for this meeting right now." });
+    }
   }
+
+  // Nobody can sign for anybody else: strictly use authenticated userId
+  const targetUserId = req.user!.userId;
+
+  const isParticipant = meeting.participants.some((p: any) => p.userId === targetUserId);
+  const isOrganizerOrAdmin =
+    meeting.organizerId === targetUserId ||
+    req.user!.roleCode === "SYSTEM_ADMIN" ||
+    req.user!.roleCode === "MEETING_SECRETARY" ||
+    req.user!.roleCode === "MEETING_APPROVER" ||
+    req.user!.roleCode === "CHAIRPERSON";
+
+  if (!isParticipant && !isOrganizerOrAdmin) {
+    return res.status(403).json({ error: "Only confirmed attendees or organizers can sign the minutes." });
+  }
+
+  const alreadySigned = meeting.participantSignatures.some((s: any) => s.userId === targetUserId);
+  if (alreadySigned) return res.status(400).json({ error: "You have already signed this meeting." });
+
+  const { signature } = req.body || {};
+  if (!signature || typeof signature !== "string" || !signature.trim()) {
+    return res.status(400).json({ error: "A valid digital signature is required." });
+  }
+
+  const userRecord = await prisma.user.findUnique({
+    where: { id: targetUserId },
+    select: { name: true, jobTitle: true, role: { select: { name: true } } },
+  });
+  const signerName = userRecord?.name || "Participant";
+  const signerRole = userRecord?.jobTitle || userRecord?.role?.name || undefined;
+
+  await (prisma.participantSignature as any).create({
+    data: {
+      meetingId: req.params.id,
+      userId: targetUserId,
+      signerName,
+      signerRole,
+      signatureDataUrl: signature.trim(),
+      userAgent: req.headers["user-agent"] || null,
+    },
+  });
+
+  // Check if all signers (participants + organizer/admin) have now signed
+  const requiredSignerIds = new Set(meeting.participants.map((p: any) => p.userId));
+  if (meeting.organizerId) requiredSignerIds.add(meeting.organizerId);
+  const totalRequired = requiredSignerIds.size;
+  const signedCount = meeting.participantSignatures.length + 1; // +1 for the one just added
+
+  let newStatus = "PENDING_SIGNATURES";
+  if (signedCount >= totalRequired && totalRequired > 0) {
+    newStatus = "READY_FOR_APPROVAL";
+  }
+
+  const updated = await (prisma.meeting as any).update({
+    where: { id: req.params.id },
+    data: { status: newStatus },
+    include: detailInclude,
+  });
+
+  res.json(updated);
+});
+
+// GET /:id/signatures  — get all participant signatures
+router.get("/:id/signatures", async (req: AuthedRequest, res) => {
+  const signatures = await (prisma.participantSignature as any).findMany({
+    where: { meetingId: req.params.id },
+    include: {
+      user: { select: { id: true, name: true, avatarColor: true, jobTitle: true } },
+    },
+    orderBy: { signedAt: "asc" },
+  });
+  res.json(signatures);
 });
 
 // ---------- Approve Meeting Workflow ----------
 router.post("/:id/approve", async (req: AuthedRequest, res) => {
-  const meeting = await prisma.meeting.findUnique({
+  const meeting = await (prisma.meeting as any).findUnique({
     where: { id: req.params.id },
-    select: { id: true, status: true, organizerId: true },
+    include: {
+      participants: { select: { userId: true } },
+      participantSignatures: { select: { userId: true } },
+    },
   });
   if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
@@ -558,18 +1006,75 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
     });
   }
 
-  if (meeting.status === "APPROVED") {
-    return res.status(400).json({ error: "Meeting is already approved." });
-  }
-  if (meeting.status === "CANCELLED") {
-    return res.status(400).json({ error: "Cannot approve a cancelled meeting." });
-  }
+  if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
+  if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot approve a cancelled meeting." });
 
-  const { signature } = req.body || {};
+  const { signature, forceApprove, forceReason } = req.body || {};
   if (!signature || typeof signature !== "string" || !signature.trim()) {
     return res.status(400).json({
       error: "A valid digital signature is required to approve this meeting and formalize its minutes.",
     });
+  }
+
+  // Calculate if all required signers have completed their signatures
+  const requiredSignerIds = new Set(meeting.participants.map((p: any) => p.userId));
+  if (meeting.organizerId) requiredSignerIds.add(meeting.organizerId);
+  const signedUserIds = new Set(meeting.participantSignatures.map((s: any) => s.userId));
+
+  // Remaining signers who have not signed yet (excluding the approving user who signs now)
+  const pendingSignerIds = Array.from(requiredSignerIds).filter(
+    (uid) => !signedUserIds.has(uid) && uid !== req.user!.userId
+  );
+  const allSigned = pendingSignerIds.length === 0;
+
+  // When some participants have not yet signed, admin must toggle force submit checkbox
+  if (!allSigned && !forceApprove) {
+    return res.status(400).json({
+      error: `Some participants have not yet submitted their digital signatures (${pendingSignerIds.length} pending). Please toggle the Force Submit checkbox to confirm admin override.`,
+      requiresForceApprove: true,
+      pendingCount: pendingSignerIds.length,
+    });
+  }
+
+  const isForceApproved = !allSigned && !!forceApprove;
+  const recordedBypassReason = isForceApproved
+    ? (typeof forceReason === "string" && forceReason.trim()
+        ? forceReason.trim()
+        : "Administrative override: approved before all attendee signatures collected")
+    : null;
+
+  // Also record the approving admin/reviewer signature in participantSignatures if not already present
+  const alreadySignedParticipant = meeting.participantSignatures.some((s: any) => s.userId === req.user!.userId);
+  if (!alreadySignedParticipant) {
+    const userRecord = await prisma.user.findUnique({
+      where: { id: req.user!.userId },
+      select: { name: true, jobTitle: true, role: { select: { name: true } } },
+    });
+    try {
+      await (prisma.participantSignature as any).create({
+        data: {
+          meetingId: req.params.id,
+          userId: req.user!.userId,
+          signerName: userRecord?.name || "System Admin",
+          signerRole: userRecord?.jobTitle || userRecord?.role?.name || "Approver",
+          signatureDataUrl: signature.trim(),
+          userAgent: req.headers["user-agent"] || null,
+          bypassReason: recordedBypassReason,
+        },
+      });
+    } catch {
+      // ignore in case of race condition
+    }
+  } else if (isForceApproved) {
+    // If the approver already had a signature record, update its bypassReason
+    try {
+      await (prisma.participantSignature as any).updateMany({
+        where: { meetingId: req.params.id, userId: req.user!.userId },
+        data: { bypassReason: recordedBypassReason },
+      });
+    } catch {
+      // ignore
+    }
   }
 
   const updated = await (prisma.meeting as any).update({
@@ -579,6 +1084,51 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
       approvedById: req.user!.userId,
       approvedAt: new Date(),
       approvalSignature: signature.trim(),
+      forceApproved: isForceApproved,
+      bypassReason: recordedBypassReason,
+    },
+    include: detailInclude,
+  });
+
+  res.json(updated);
+});
+
+// ---------- Unlock / Override Meeting Lock (Exclusive to Super Admin) ----------
+router.post("/:id/unlock", async (req: AuthedRequest, res) => {
+  const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
+  if (!isSuperAdmin) {
+    return res.status(403).json({
+      error: "Access Denied: Only a designated Super Admin (SYSTEM_ADMIN) possesses the exclusive permission to unlock an approved or locked meeting.",
+    });
+  }
+
+  const meeting = await prisma.meeting.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, status: true, title: true, code: true },
+  });
+  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+
+  if (!isLockedMeetingStatus(meeting.status)) {
+    return res.status(400).json({
+      error: `Meeting is not currently locked (current status is ${meeting.status}).`,
+    });
+  }
+
+  const { targetStatus = "IN_PROGRESS", reason } = req.body || {};
+  const validTargetStatus = ["IN_PROGRESS", "DRAFT", "SCHEDULED"].includes(targetStatus)
+    ? targetStatus
+    : "IN_PROGRESS";
+
+  const recordedReason =
+    typeof reason === "string" && reason.trim()
+      ? reason.trim()
+      : "Administrative override: meeting unlocked by Super Admin for modification";
+
+  const updated = await (prisma.meeting as any).update({
+    where: { id: req.params.id },
+    data: {
+      status: validTargetStatus,
+      bypassReason: `Unlocked by Super Admin: ${recordedReason}`,
     },
     include: detailInclude,
   });
@@ -589,7 +1139,7 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
 // ---------- Participants Management ----------
 router.post(
   "/:id/participants",
-  requirePermission("meetings:manage_participants"),
+  requirePermission("meetings:manage_participants", "meetings:edit:all", "meetings:edit:dept", "meetings:edit:own"),
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
@@ -600,6 +1150,8 @@ router.post(
         date: true,
         startTime: true,
         endTime: true,
+        departmentId: true,
+        organizerId: true,
         organizer: { select: { id: true, name: true } },
       },
     });
@@ -607,6 +1159,14 @@ router.post(
 
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to manage participants for this meeting outside your ownership scope." });
+    }
 
     const schema = z.object({ userIds: z.array(z.string()).min(1) });
     const parsed = schema.safeParse(req.body);
@@ -624,7 +1184,7 @@ router.post(
     });
 
     // Create MEETING_INVITATION notifications for each invited user.
-    // The notification is sent ONLY to the invited participant Ã¢â‚¬â€ not to the
+    // The notification is sent ONLY to the invited participant — not to the
     // organizer or whoever made the request.
     const meetingDate = new Date(meeting.date).toLocaleDateString("en-US", {
       weekday: "short",
@@ -662,16 +1222,24 @@ router.post(
 
 router.delete(
   "/:id/participants/:participantId",
-  requirePermission("meetings:manage_participants"),
+  requirePermission("meetings:manage_participants", "meetings:edit:all", "meetings:edit:dept", "meetings:edit:own"),
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to manage participants for this meeting outside your ownership scope." });
+    }
 
     // Look for participant record either by participant ID or user ID
     const participant = await prisma.meetingParticipant.findFirst({
@@ -893,11 +1461,19 @@ router.post(
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to add agenda items to this meeting outside your ownership scope." });
+    }
 
     const schema = z.object({
       title: z.string().min(2),
@@ -931,12 +1507,20 @@ router.put(
   async (req: AuthedRequest, res) => {
     const existing = await prisma.agendaItem.findUnique({
       where: { id: req.params.agendaId },
-      include: { meeting: { select: { status: true } } },
+      include: { meeting: { select: { status: true, departmentId: true, organizerId: true } } },
     });
     if (!existing) return res.status(404).json({ error: "Agenda item not found." });
 
     const lockError = checkMeetingLock(existing.meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to edit this agenda item outside your ownership scope." });
+    }
 
     const schema = z.object({
       title: z.string().min(2).optional(),
@@ -979,12 +1563,20 @@ router.delete(
   async (req: AuthedRequest, res) => {
     const existing = await prisma.agendaItem.findUnique({
       where: { id: req.params.agendaId },
-      include: { meeting: { select: { status: true } } },
+      include: { meeting: { select: { status: true, departmentId: true, organizerId: true } } },
     });
     if (!existing) return res.status(404).json({ error: "Agenda item not found." });
 
     const lockError = checkMeetingLock(existing.meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete this agenda item outside your ownership scope." });
+    }
 
     try {
       await prisma.agendaItem.delete({ where: { id: req.params.agendaId } });
@@ -1002,11 +1594,19 @@ router.post(
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to record minutes for this meeting outside your ownership scope." });
+    }
 
     const schema = z.object({ content: z.string().min(3) });
     const parsed = schema.safeParse(req.body);
@@ -1027,15 +1627,23 @@ router.post(
 // ---------- Minutes: Summary upsert (PUT /:id/minutes/summary) ----------
 router.put(
   "/:id/minutes/summary",
-  requirePermission("minutes:create", "minutes:edit"),
+  requirePermission("minutes:create", "minutes:edit:all", "minutes:edit:dept", "minutes:edit:own"),
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to update minutes summary for this meeting outside your ownership scope." });
+    }
 
     const schema = z.object({ content: z.string() });
     const parsed = schema.safeParse(req.body);
@@ -1079,15 +1687,25 @@ router.put(
 // ---------- Minutes: Per-attendee upsert (PUT /:id/minutes/attendee/:userId) ----------
 router.put(
   "/:id/minutes/attendee/:userId",
-  requirePermission("minutes:create", "minutes:edit"),
+  requirePermission("minutes:create", "minutes:edit:all", "minutes:edit:dept", "minutes:edit:own"),
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    const isOwnAttendee = req.user?.userId === req.params.userId;
+    const canManageMeeting = checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    });
+    if (!isOwnAttendee && !canManageMeeting) {
+      return res.status(403).json({ error: "You do not have permission to edit attendee minutes for this participant outside your ownership scope." });
+    }
 
     const schema = z.object({
       content: z.string(),
@@ -1150,15 +1768,25 @@ router.put(
 // ---------- Minutes: Clear attendee minutes (DELETE /:id/minutes/attendee/:userId) ----------
 router.delete(
   "/:id/minutes/attendee/:userId",
-  requirePermission("minutes:edit"),
+  requirePermission("minutes:edit:all", "minutes:edit:dept", "minutes:edit:own"),
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    const isOwnAttendee = req.user?.userId === req.params.userId;
+    const canManageMeeting = checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+    });
+    if (!isOwnAttendee && !canManageMeeting) {
+      return res.status(403).json({ error: "You do not have permission to clear attendee minutes for this participant outside your ownership scope." });
+    }
 
     const existing = await (prisma as any).meetingMinutes.findFirst({
       where: { meetingId: req.params.id, attendeeId: req.params.userId, type: "ATTENDEE" },
@@ -1173,15 +1801,23 @@ router.delete(
 // ---------- Minutes: Wildcard by minuteId ----------
 router.put(
   "/:id/minutes/:minuteId",
-  requirePermission("minutes:edit"),
+  requirePermission("minutes:edit:all", "minutes:edit:dept", "minutes:edit:own"),
   async (req: AuthedRequest, res) => {
     const existing = await prisma.meetingMinutes.findFirst({
       where: { id: req.params.minuteId, meetingId: req.params.id },
-      include: { meeting: { select: { id: true, status: true } } },
+      include: { meeting: { select: { id: true, status: true, departmentId: true, organizerId: true } } },
     });
     if (!existing) return res.status(404).json({ error: "Minutes not found." });
     const lockError = checkMeetingLock(existing.meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.recordedById || existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to edit these minutes outside your ownership scope." });
+    }
 
     const schema = z.object({ content: z.string().min(3) });
     const parsed = schema.safeParse(req.body);
@@ -1199,15 +1835,23 @@ router.put(
 
 router.put(
   "/minutes/:minuteId",
-  requirePermission("minutes:edit"),
+  requirePermission("minutes:edit:all", "minutes:edit:dept", "minutes:edit:own"),
   async (req: AuthedRequest, res) => {
     const existing = await prisma.meetingMinutes.findUnique({
       where: { id: req.params.minuteId },
-      include: { meeting: { select: { id: true, status: true } } },
+      include: { meeting: { select: { id: true, status: true, departmentId: true, organizerId: true } } },
     });
     if (!existing) return res.status(404).json({ error: "Minutes not found." });
     const lockError = checkMeetingLock(existing.meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.recordedById || existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to edit these minutes outside your ownership scope." });
+    }
 
     const schema = z.object({ content: z.string().min(3) });
     const parsed = schema.safeParse(req.body);
@@ -1225,15 +1869,23 @@ router.put(
 
 router.delete(
   "/:id/minutes/:minuteId",
-  requirePermission("minutes:edit"),
+  requirePermission("minutes:edit:all", "minutes:edit:dept", "minutes:edit:own"),
   async (req: AuthedRequest, res) => {
     const existing = await prisma.meetingMinutes.findFirst({
       where: { id: req.params.minuteId, meetingId: req.params.id },
-      include: { meeting: { select: { id: true, status: true } } },
+      include: { meeting: { select: { id: true, status: true, departmentId: true, organizerId: true } } },
     });
     if (!existing) return res.status(404).json({ error: "Minutes not found." });
     const lockError = checkMeetingLock(existing.meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "minutes", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.recordedById || existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete these minutes outside your ownership scope." });
+    }
 
     await prisma.meetingMinutes.delete({ where: { id: existing.id } });
     res.json({ ok: true });
@@ -1246,11 +1898,25 @@ router.post(
   async (req: AuthedRequest, res) => {
     const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, departmentId: true, organizerId: true },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
     const lockError = checkMeetingLock(meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (
+      !checkOwnershipAccess(req, "decisions", "create", {
+        departmentId: meeting.departmentId,
+        ownerId: meeting.organizerId,
+      }) &&
+      !checkOwnershipAccess(req, "meetings", "edit", {
+        departmentId: meeting.departmentId,
+        ownerId: meeting.organizerId,
+      })
+    ) {
+      return res.status(403).json({ error: "You do not have permission to record decisions for this meeting outside your ownership scope." });
+    }
 
     const schema = z.object({
       title: z.string().min(3),
@@ -1273,19 +1939,27 @@ router.post(
 
 router.put(
   "/decisions/:decisionId",
-  requirePermission("decisions:edit"),
+  requirePermission("decisions:edit:all", "decisions:edit:dept", "decisions:edit:own"),
   async (req: AuthedRequest, res) => {
     const existing = await prisma.decision.findUnique({
       where: { id: req.params.decisionId },
-      include: { meeting: { select: { status: true } } },
+      include: { meeting: { select: { status: true, departmentId: true, organizerId: true } } },
     });
     if (!existing) return res.status(404).json({ error: "Decision not found." });
     const lockError = checkMeetingLock(existing.meeting, req);
     if (lockError) return res.status(403).json({ error: lockError });
 
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "decisions", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to edit this decision outside your ownership scope." });
+    }
+
     const schema = z.object({
-      title: z.string().min(3).optional(),
-      description: z.string().optional(),
+      title: z.string().min(1).optional(),
+      description: z.string().nullable().optional(),
       status: z.enum(DECISION_STATUSES).optional(),
     });
     const parsed = schema.safeParse(req.body);
@@ -1300,6 +1974,107 @@ router.put(
     } catch {
       res.status(404).json({ error: "Decision not found." });
     }
+  },
+);
+
+router.put(
+  "/:id/decisions/:decisionId",
+  requirePermission("decisions:edit:all", "decisions:edit:dept", "decisions:edit:own"),
+  async (req: AuthedRequest, res) => {
+    const existing = await prisma.decision.findFirst({
+      where: { id: req.params.decisionId, meetingId: req.params.id },
+      include: { meeting: { select: { status: true, departmentId: true, organizerId: true } } },
+    });
+    if (!existing) return res.status(404).json({ error: "Decision not found." });
+    const lockError = checkMeetingLock(existing.meeting, req);
+    if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "decisions", "edit", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to edit this decision outside your ownership scope." });
+    }
+
+    const schema = z.object({
+      title: z.string().min(1).optional(),
+      description: z.string().nullable().optional(),
+      status: z.enum(DECISION_STATUSES).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+      return res.status(400).json({ error: "Invalid decision update." });
+    try {
+      const decision = await prisma.decision.update({
+        where: { id: existing.id },
+        data: parsed.data,
+      });
+      res.json(decision);
+    } catch {
+      res.status(404).json({ error: "Decision not found." });
+    }
+  },
+);
+
+router.delete(
+  "/decisions/:decisionId",
+  requirePermission("decisions:delete:all", "decisions:delete:dept", "decisions:delete:own"),
+  async (req: AuthedRequest, res) => {
+    const existing = await prisma.decision.findUnique({
+      where: { id: req.params.decisionId },
+      include: { meeting: { select: { id: true, status: true, departmentId: true, organizerId: true } } },
+    });
+    if (!existing) return res.status(404).json({ error: "Decision not found." });
+    const lockError = checkMeetingLock(existing.meeting, req);
+    if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "decisions", "delete", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete this decision outside your ownership scope." });
+    }
+
+    // Disconnect action items from this decision before deleting
+    await prisma.actionItem.updateMany({
+      where: { decisionId: existing.id },
+      data: { decisionId: null },
+    });
+
+    await prisma.decision.delete({ where: { id: existing.id } });
+    res.json({ ok: true });
+  },
+);
+
+router.delete(
+  "/:id/decisions/:decisionId",
+  requirePermission("decisions:delete:all", "decisions:delete:dept", "decisions:delete:own"),
+  async (req: AuthedRequest, res) => {
+    const existing = await prisma.decision.findFirst({
+      where: { id: req.params.decisionId, meetingId: req.params.id },
+      include: { meeting: { select: { id: true, status: true, departmentId: true, organizerId: true } } },
+    });
+    if (!existing) return res.status(404).json({ error: "Decision not found." });
+    const lockError = checkMeetingLock(existing.meeting, req);
+    if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "decisions", "delete", {
+      departmentId: existing.meeting.departmentId,
+      ownerId: existing.meeting.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete this decision outside your ownership scope." });
+    }
+
+    await prisma.actionItem.updateMany({
+      where: { decisionId: existing.id },
+      data: { decisionId: null },
+    });
+
+    await prisma.decision.delete({ where: { id: existing.id } });
+    res.json({ ok: true });
   },
 );
 

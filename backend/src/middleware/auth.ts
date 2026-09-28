@@ -10,12 +10,21 @@ export interface AuthedRequest extends Request {
 
 export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
+  // Also accept ?token= query param (used for browser window.open URLs like /view)
+  const queryToken = typeof req.query.token === "string" ? req.query.token : null;
+
+  let rawToken: string | null = null;
+  if (header && header.startsWith("Bearer ")) {
+    rawToken = header.slice("Bearer ".length);
+  } else if (queryToken) {
+    rawToken = queryToken;
+  }
+
+  if (!rawToken) {
     return res.status(401).json({ error: "Missing or invalid Authorization header." });
   }
-  const token = header.slice("Bearer ".length);
   try {
-    req.user = verifyToken(token);
+    req.user = verifyToken(rawToken);
     next();
   } catch {
     return res.status(401).json({ error: "Session expired or token invalid. Please sign in again." });
