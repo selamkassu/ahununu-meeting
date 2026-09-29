@@ -272,6 +272,16 @@ router.get("/", async (req: AuthedRequest, res) => {
   res.json(meetings);
 });
 
+// Helper to parse HH:mm or HH:mm:ss string into components
+function parseTimeString(timeStr: string): { hours: number; minutes: number; totalMinutes: number } | null {
+  if (!timeStr) return null;
+  const match = /^([01]\d|2[0-3]):([0-5]\d)(:[0-5]\d)?$/.exec(timeStr.trim());
+  if (!match) return null;
+  const hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  return { hours, minutes, totalMinutes: hours * 60 + minutes };
+}
+
 // ---------- Create ----------
 const createSchema = z.object({
   title: z.string().min(3),
@@ -308,6 +318,47 @@ router.post(
       });
     }
     const data = parsed.data;
+
+    // Strict validation: Start time and End time format
+    const startParsed = parseTimeString(data.startTime);
+    const endParsed = parseTimeString(data.endTime);
+    if (!startParsed || !endParsed) {
+      return res.status(400).json({
+        error: "Invalid time format. Please provide valid start and end times in HH:mm format.",
+      });
+    }
+
+    // Strict validation: End time must be strictly after Start time
+    if (endParsed.totalMinutes <= startParsed.totalMinutes) {
+      return res.status(400).json({
+        error: "Meeting end time must be strictly after the start time.",
+      });
+    }
+
+    // Strict validation: Minimum meeting duration of at least 5 minutes
+    if (endParsed.totalMinutes - startParsed.totalMinutes < 5) {
+      return res.status(400).json({
+        error: "Meeting duration must be at least 5 minutes.",
+      });
+    }
+
+    // Strict validation: Prevent scheduling meetings in the past
+    const dateParts = data.date.slice(0, 10).split("-").map(Number);
+    if (dateParts.length !== 3 || dateParts.some(isNaN)) {
+      return res.status(400).json({ error: "Invalid date format. Expected YYYY-MM-DD." });
+    }
+    const [year, month, day] = dateParts;
+
+    // Check against current time (allowing 5-minute grace period for network latency and clock drift)
+    const scheduledStart = new Date(year, month - 1, day, startParsed.hours, startParsed.minutes, 0, 0);
+    const nowWithGrace = new Date(Date.now() - 5 * 60 * 1000);
+
+    if (scheduledStart.getTime() < nowWithGrace.getTime()) {
+      return res.status(400).json({
+        error: "Cannot schedule a meeting in the past. Please select a future date and time.",
+      });
+    }
+
     const count = await prisma.meeting.count();
 
     const meeting = await prisma.meeting.create({
@@ -745,7 +796,7 @@ router.put(
 
     const existing = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true, organizerId: true, approvedById: true, departmentId: true },
+      select: { id: true, status: true, organizerId: true, approvedById: true, departmentId: true, startTime: true, endTime: true },
     });
     if (!existing) return res.status(404).json({ error: "Meeting not found." });
 
@@ -771,6 +822,23 @@ router.put(
     return res.status(403).json({
       error: `Meeting is locked (${existing.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE permission.`,
     });
+  }
+
+  // Validate updated time constraints if startTime or endTime is modified
+  if (parsed.data.startTime || parsed.data.endTime) {
+    const checkStartTime = parsed.data.startTime || existing.startTime;
+    const checkEndTime = parsed.data.endTime || existing.endTime;
+    const sParsed = parseTimeString(checkStartTime);
+    const eParsed = parseTimeString(checkEndTime);
+    if (!sParsed || !eParsed) {
+      return res.status(400).json({ error: "Invalid time format. Please provide time as HH:mm." });
+    }
+    if (eParsed.totalMinutes <= sParsed.totalMinutes) {
+      return res.status(400).json({ error: "Meeting end time must be strictly after the start time." });
+    }
+    if (eParsed.totalMinutes - sParsed.totalMinutes < 5) {
+      return res.status(400).json({ error: "Meeting duration must be at least 5 minutes." });
+    }
   }
 
   const { date, status, ...rest } = parsed.data;
