@@ -122,16 +122,30 @@ async function canApproveMeeting(organizerId: string, req: AuthedRequest): Promi
  * Check if a meeting has reached its conclusion (status is COMPLETED or current server time >= meeting end datetime)
  */
 function hasMeetingEnded(meeting: { date: Date | string; endTime: string; status: string }): boolean {
-  if (meeting.status === "COMPLETED") return true;
+  // If the meeting has progressed beyond SCHEDULED, attendance can be finalized
+  if (
+    [
+      "IN_PROGRESS",
+      "PENDING_SIGNATURES",
+      "READY_FOR_APPROVAL",
+      "APPROVED",
+      "COMPLETED",
+    ].includes(meeting.status)
+  ) {
+    return true;
+  }
   if (meeting.status === "CANCELLED") return false;
 
   const dateObj = typeof meeting.date === "string" ? new Date(meeting.date) : meeting.date;
   const dateStr = dateObj.toISOString().split("T")[0];
   const [endHours, endMinutes] = (meeting.endTime || "00:00").split(":").map(Number);
   const [year, month, day] = dateStr.split("-").map(Number);
-  const endDateTime = new Date(year, month - 1, day, endHours || 0, endMinutes || 0, 0);
 
-  return Date.now() >= endDateTime.getTime();
+  // Accounts for East Africa Time (UTC+3, which is 3 hours ahead of UTC server time on Render)
+  const utcEnd = Date.UTC(year, month - 1, day, endHours || 0, endMinutes || 0, 0);
+  const eatEnd = utcEnd - 3 * 60 * 60 * 1000;
+
+  return Date.now() >= Math.min(utcEnd, eatEnd);
 }
 
 /**
