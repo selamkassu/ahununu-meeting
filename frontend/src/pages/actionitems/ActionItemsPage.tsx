@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from "react";
-import { ListChecks } from "lucide-react";
+import React, { useEffect, useState, useMemo } from "react";
+import { useParams, Link } from "react-router-dom";
+import { ListChecks, ArrowLeft, ExternalLink } from "lucide-react";
 import { api } from "../../api/client";
 import type { ActionItem, Department, User } from "../../types";
 import { Card, CardHeader, inputClass } from "../../components/ui/Primitives";
@@ -10,8 +11,10 @@ const STATUSES = ["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"];
 const PRIORITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
 
 export default function ActionItemsPage() {
+  const { id } = useParams<{ id?: string }>();
   const { user, hasPermission } = useAuth();
   const [items, setItems] = useState<ActionItem[]>([]);
+  const [focusedItem, setFocusedItem] = useState<ActionItem | null>(null);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [status, setStatus] = useState("");
@@ -26,6 +29,17 @@ export default function ActionItemsPage() {
     api.get<Department[]>("/departments").then(setDepartments);
     api.get<User[]>("/users").then(setUsers);
   }, []);
+
+  useEffect(() => {
+    if (id) {
+      api
+        .get<ActionItem>(`/action-items/${id}`)
+        .then(setFocusedItem)
+        .catch(() => setFocusedItem(null));
+    } else {
+      setFocusedItem(null);
+    }
+  }, [id]);
 
   const load = () => {
     setLoading(true);
@@ -44,7 +58,13 @@ export default function ActionItemsPage() {
 
   useEffect(load, [status, departmentId, priority, assignedToId, overdueOnly, mineOnly]);
 
-  const overdueCount = items.filter((i) => i.overdue).length;
+  const displayItems = useMemo(() => {
+    if (!focusedItem) return items;
+    if (items.some((i) => i.id === focusedItem.id)) return items;
+    return [focusedItem, ...items];
+  }, [items, focusedItem]);
+
+  const overdueCount = displayItems.filter((i) => i.overdue).length;
 
   const hasActiveFilters = Boolean(
     status || priority || departmentId || assignedToId || overdueOnly || mineOnly
@@ -61,6 +81,38 @@ export default function ActionItemsPage() {
 
   return (
     <div className="space-y-4">
+      {focusedItem && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-teal-200 bg-teal-50/80 px-4 py-3 text-xs text-teal-950 shadow-xs">
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-teal-600 px-2 py-0.5 text-[10px] font-semibold text-white">
+              Selected Task
+            </span>
+            <span className="font-semibold text-slate2-800">{focusedItem.title}</span>
+            <span className="font-mono text-[11px] text-teal-800 bg-teal-100/80 px-1.5 py-0.5 rounded border border-teal-200">
+              {focusedItem.code}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            {focusedItem.meetingId && (
+              <Link
+                to={`/meetings/${focusedItem.meetingId}`}
+                className="inline-flex items-center gap-1 font-semibold text-brand hover:underline"
+              >
+                <span>View Meeting</span>
+                <ExternalLink size={12} />
+              </Link>
+            )}
+            <Link
+              to="/action-items"
+              className="inline-flex items-center gap-1 font-medium text-slate2-600 hover:text-slate2-900"
+            >
+              <ArrowLeft size={12} />
+              <span>View All Tasks</span>
+            </Link>
+          </div>
+        </div>
+      )}
+
       <Card>
         <CardHeader
           title="Action & Accountability"
@@ -170,7 +222,7 @@ export default function ActionItemsPage() {
             ))}
           </div>
         ) : (
-          <AccountabilityTable items={items} />
+          <AccountabilityTable items={displayItems} highlightedId={id} />
         )}
       </Card>
     </div>

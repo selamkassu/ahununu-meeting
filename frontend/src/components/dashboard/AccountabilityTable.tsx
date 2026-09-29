@@ -5,7 +5,13 @@ import { Avatar, ProgressBar, CodeChip, EmptyState } from "../ui/Primitives";
 import { PriorityBadge, StatusBadge } from "../ui/Badge";
 import { Link } from "react-router-dom";
 
-export function AccountabilityTable({ items }: { items: ActionItem[] }) {
+export function AccountabilityTable({
+  items,
+  highlightedId,
+}: {
+  items: ActionItem[];
+  highlightedId?: string;
+}) {
   if (items.length === 0) {
     return <EmptyState title="Nothing to track yet" description="Action items created from meeting decisions will show up here." />;
   }
@@ -28,7 +34,11 @@ export function AccountabilityTable({ items }: { items: ActionItem[] }) {
             <tr
               key={item.id}
               className={`border-b border-slate2-50 last:border-0 hover:bg-slate2-50/60 ${
-                item.overdue ? "bg-red-50/40" : ""
+                item.id === highlightedId
+                  ? "bg-teal-50/90 ring-2 ring-brand ring-inset font-medium"
+                  : item.overdue
+                  ? "bg-red-50/40"
+                  : ""
               }`}
             >
               <td className="px-5 py-3">

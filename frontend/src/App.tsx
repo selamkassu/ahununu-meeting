@@ -1,5 +1,5 @@
 import React from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { NotificationProvider } from "./context/NotificationContext";
 import { AppLayout } from "./components/layout/AppLayout";
@@ -37,6 +37,7 @@ export default function App() {
               <Route path="/minutes" element={<MinutesOverviewPage />} />
               <Route path="/decisions" element={<DecisionsPage />} />
               <Route path="/action-items" element={<ActionItemsPage />} />
+              <Route path="/action-items/:id" element={<ActionItemsPage />} />
               <Route path="/departments" element={<DepartmentsPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/roles" element={<RolesPage />} />
@@ -44,7 +45,9 @@ export default function App() {
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </NotificationProvider>
       </AuthProvider>
