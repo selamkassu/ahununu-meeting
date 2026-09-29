@@ -123,7 +123,7 @@ export default function Dashboard() {
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, borderColor: "#E4E7EC" }} />
                 <Legend
                   wrapperStyle={{ fontSize: 12 }}
-                  formatter={(value) => value.toString().replace("_", " ")}
+                  formatter={(value) => (value != null ? String(value).replace(/_/g, " ") : "")}
                 />
               </PieChart>
             </ResponsiveContainer>
@@ -148,7 +148,7 @@ export default function Dashboard() {
                   axisLine={false}
                   tickLine={false}
                 />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, borderColor: "#E4E7EC" }} formatter={(v: number) => `${v}%`} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, borderColor: "#E4E7EC" }} formatter={(v: any) => `${v != null ? v : 0}%`} />
                 <Bar dataKey="completionRate" name="Completion rate" fill="#1F9D63" radius={[0, 4, 4, 0]} barSize={16} />
               </BarChart>
             </ResponsiveContainer>
