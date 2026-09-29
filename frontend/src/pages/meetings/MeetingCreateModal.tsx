@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Plus, Trash2, Clock, AlertCircle } from "lucide-react";
 import { Modal } from "../../components/ui/Modal";
 import { Field, inputClass, Button } from "../../components/ui/Primitives";
+import { SearchableMultiUserSelect } from "../../components/ui/SearchableMultiUserSelect";
 import { api, ApiError } from "../../api/client";
 import type { Department, MeetingDetail, Priority, User } from "../../types";
 
@@ -439,16 +440,13 @@ export default function MeetingCreateModal({
           </Field>
         </div>
 
-        <Field label="Participants" hint="Select who should be invited">
-          <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-slate2-200 p-2">
-            {users.map((u) => (
-              <label key={u.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate2-50 cursor-pointer">
-                <input type="checkbox" checked={participantIds.includes(u.id)} onChange={() => toggleParticipant(u.id)} />
-                <span className="text-slate2-700">{u.name}</span>
-                <span className="text-xs text-slate2-400">{u.department?.name}</span>
-              </label>
-            ))}
-          </div>
+        <Field label="Participants" hint="Search and multi-select attendees to invite">
+          <SearchableMultiUserSelect
+            users={users}
+            selectedUserIds={participantIds}
+            onChange={setParticipantIds}
+            placeholder="Search attendees by name, department, role, or email..."
+          />
         </Field>
 
         <Field label="Agenda items">
