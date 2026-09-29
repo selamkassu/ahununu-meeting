@@ -67,6 +67,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const hasPermission = useCallback(
     (permission: string) => {
       if (permissionSet.has(permission)) return true;
+      if (permissionSet.has("ADMIN_OVERRIDE")) return true;
       // If base permission is checked without tier, check if user has any scoped variant (:all, :dept, :own)
       if (!permission.endsWith(":all") && !permission.endsWith(":dept") && !permission.endsWith(":own")) {
         return (

@@ -13,7 +13,7 @@ const BRAND_COLORS = [
 
 export default function SettingsPage() {
   const { user, hasPermission } = useAuth();
-  const isAdmin = hasPermission("settings:manage") || user?.role?.code === "SYSTEM_ADMIN";
+  const isAdmin = hasPermission("settings:manage") || hasPermission("ADMIN_OVERRIDE");
 
   return (
     <div className="space-y-4">

@@ -494,7 +494,6 @@ export default function UsersPage() {
               <div className="flex items-center gap-2">
                 <Shield size={14} className="text-brand" />
                 <p className="text-xs font-bold text-slate2-800">{r.name}</p>
-                {r.isSystem && <Lock size={10} className="text-slate2-400" />}
               </div>
               <p className="mt-1 text-[11px] text-slate2-500">
                 {r.permissions.length} permissions · {r.userCount} user{r.userCount !== 1 ? "s" : ""}

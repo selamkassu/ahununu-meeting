@@ -187,7 +187,7 @@ export default function ActionItemsPage() {
                 </option>
               ))}
             </select>
-            {(hasPermission("action_items:view:all") || user?.role?.code === "SYSTEM_ADMIN") && (
+            {(hasPermission("action_items:view:all") || hasPermission("ADMIN_OVERRIDE")) && (
               <select
                 value={departmentId}
                 onChange={(e) => setDepartmentId(e.target.value)}

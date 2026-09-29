@@ -25,6 +25,7 @@ export const PERMISSIONS = [
   "reports:view", "reports:export",
   "settings:view", "settings:edit",
   "dashboard:view",
+  "ADMIN_OVERRIDE",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -101,6 +102,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   "settings:view": "View Settings",
   "settings:edit": "Edit Settings",
   "dashboard:view": "View Dashboard",
+  "ADMIN_OVERRIDE": "System Administrator Override (Full Access & Unlock Meetings)",
 };
 
 export const PERMISSION_GROUPS: { label: string; permissions: string[] }[] = [
@@ -186,6 +188,7 @@ export const PERMISSION_GROUPS: { label: string; permissions: string[] }[] = [
   { label: "Reports & Analytics", permissions: ["reports:view", "reports:export"] },
   { label: "Settings", permissions: ["settings:view", "settings:edit"] },
   { label: "Dashboard", permissions: ["dashboard:view"] },
+  { label: "Administrative Override", permissions: ["ADMIN_OVERRIDE"] },
 ];
 
 // ------------------------------------------------------------

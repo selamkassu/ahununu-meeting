@@ -25,9 +25,9 @@ export function getOwnershipTier(
   userPermissions: string[] | undefined,
   resource: string,
   action: string,
-  isSuperAdmin = false
+  hasAdminOverride = false
 ): OwnershipScope {
-  if (isSuperAdmin) return "all";
+  if (hasAdminOverride || userPermissions?.includes("ADMIN_OVERRIDE")) return "all";
   if (!userPermissions) return null;
   if (userPermissions.includes(`${resource}:${action}:all`)) return "all";
   if (userPermissions.includes(`${resource}:${action}:dept`)) return "dept";
@@ -52,7 +52,7 @@ export function checkOwnershipAccess(
   }
 ): boolean {
   if (!req.user) return false;
-  if (req.user.roleCode === "SYSTEM_ADMIN") return true;
+  if (req.userPermissions?.includes("ADMIN_OVERRIDE")) return true;
 
   const tier = getOwnershipTier(req.userPermissions, resource, action, false);
   if (!tier) return false;

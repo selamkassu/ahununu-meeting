@@ -24,11 +24,11 @@ router.get("/stats", async (req: AuthedRequest, res) => {
     const today0 = startOfDay(now);
     const today1 = endOfDay(now);
 
-    const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
     await ensureUserPermissions(req);
+    const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE") ?? false;
 
     // 3-Tier Meeting Scope
-    const meetingTier = getOwnershipTier(req.userPermissions, "meetings", "view", isSuperAdmin);
+    const meetingTier = getOwnershipTier(req.userPermissions, "meetings", "view", hasAdminOverride);
     const baseMeetingWhere: any = {};
     if (meetingTier === "dept" && req.user?.departmentId) {
       baseMeetingWhere.departmentId = req.user.departmentId;
@@ -40,7 +40,7 @@ router.get("/stats", async (req: AuthedRequest, res) => {
     }
 
     // 3-Tier Action Item Scope
-    const actionTier = getOwnershipTier(req.userPermissions, "action_items", "view", isSuperAdmin);
+    const actionTier = getOwnershipTier(req.userPermissions, "action_items", "view", hasAdminOverride);
     const baseActionWhere: any = {};
     if (actionTier === "dept" && req.user?.departmentId) {
       baseActionWhere.departmentId = req.user.departmentId;
@@ -49,7 +49,7 @@ router.get("/stats", async (req: AuthedRequest, res) => {
     }
 
     // 3-Tier Decision Scope
-    const decisionTier = getOwnershipTier(req.userPermissions, "decisions", "view", isSuperAdmin);
+    const decisionTier = getOwnershipTier(req.userPermissions, "decisions", "view", hasAdminOverride);
     const baseDecisionWhere: any = { status: "OPEN" };
     if (decisionTier === "dept" && req.user?.departmentId) {
       baseDecisionWhere.meeting = { departmentId: req.user.departmentId };

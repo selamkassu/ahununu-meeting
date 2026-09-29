@@ -23,7 +23,7 @@ router.get("/", async (_req, res) => {
       permissions: { select: { permission: true } },
       _count: { select: { users: true } },
     },
-    orderBy: [{ isSystem: "desc" }, { name: "asc" }],
+    orderBy: [{ name: "asc" }],
   });
 
   const shaped = roles.map((r) => ({
@@ -207,9 +207,6 @@ router.delete("/:id", requirePermission("roles:delete"), async (req, res) => {
     include: { _count: { select: { users: true } } },
   });
   if (!role) return res.status(404).json({ error: "Role not found." });
-  if (role.isSystem) {
-    return res.status(403).json({ error: "System roles cannot be deleted. You can edit their permissions instead." });
-  }
   if (role._count.users > 0) {
     return res.status(409).json({
       error: `This role is assigned to ${role._count.users} user(s). Reassign them to a different role first.`,

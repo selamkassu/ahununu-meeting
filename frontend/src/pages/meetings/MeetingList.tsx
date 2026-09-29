@@ -105,7 +105,7 @@ export default function MeetingList() {
         </select>
 
         {/* Department dropdown (visible only for org-wide view tier) */}
-        {(hasPermission("meetings:view:all") || user?.role?.code === "SYSTEM_ADMIN") && (
+        {(hasPermission("meetings:view:all") || hasPermission("ADMIN_OVERRIDE")) && (
           <select
             value={departmentId}
             onChange={(e) => setDepartmentId(e.target.value)}

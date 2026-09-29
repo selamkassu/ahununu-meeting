@@ -168,14 +168,10 @@ export default function DepartmentsPage() {
   const [deletingDepartment, setDeletingDepartment] = useState<Department | null>(null);
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
 
-  const isSuperAdmin =
-    user?.role?.code === "SYSTEM_ADMIN" ||
-    user?.role?.name?.toLowerCase().includes("super admin") ||
-    user?.role?.name?.toLowerCase().includes("system admin");
-
-  const canCreate = isSuperAdmin || hasPermission("departments:create");
-  const canEdit = isSuperAdmin || hasPermission("departments:edit");
-  const canDelete = isSuperAdmin || hasPermission("departments:delete");
+  const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
+  const canCreate = hasAdminOverride || hasPermission("departments:create");
+  const canEdit = hasAdminOverride || hasPermission("departments:edit");
+  const canDelete = hasAdminOverride || hasPermission("departments:delete");
 
   const load = () => {
     setLoading(true);

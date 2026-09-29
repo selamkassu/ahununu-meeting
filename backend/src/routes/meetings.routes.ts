@@ -78,43 +78,34 @@ const detailInclude = {
 };
 /**
  * Check if a meeting is locked for editing.
- * Designated Super Admins (role code "SYSTEM_ADMIN") are permitted to override the lock.
+ * APPROVED meetings are strictly read-only for all users unless unlocked with ADMIN_OVERRIDE.
  */
 function checkMeetingLock(meeting: { status: string }, req: AuthedRequest): string | null {
-  const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
-  if (isLockedMeetingStatus(meeting.status) && !isSuperAdmin) {
-    return `Meeting is locked (${meeting.status.replace("_", " ")}). Modifications are restricted to Super Admin override.`;
+  if (meeting.status === "APPROVED") {
+    return "Meeting is approved and strictly read-only. An administrator with ADMIN_OVERRIDE permission must unlock the meeting before any changes can be made.";
+  }
+  if (isLockedMeetingStatus(meeting.status)) {
+    const hasOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+    if (!hasOverride) {
+      return `Meeting is locked (${meeting.status.replace("_", " ")}). Modifications are restricted.`;
+    }
   }
   return null;
 }
 
 /**
- * Check if user is authorized to approve the meeting (Organizer or Admin)
+ * Check if user is authorized to approve the meeting (Organizer or authorized role with meetings:approve / ADMIN_OVERRIDE)
  */
 async function canApproveMeeting(organizerId: string, req: AuthedRequest): Promise<boolean> {
   if (!req.user) return false;
-  if (
-    req.user.roleCode === "SYSTEM_ADMIN" ||
-    req.user.roleCode === "MEETING_SECRETARY" ||
-    req.user.roleCode === "MEETING_APPROVER" ||
-    req.user.roleCode === "CHAIRPERSON"
-  ) return true;
+  await ensureUserPermissions(req);
+  if (req.userPermissions?.includes("ADMIN_OVERRIDE")) return true;
   if (organizerId === req.user.userId) return true;
 
-  if (!req.userPermissions) {
-    const rolePerms = await prisma.rolePermission.findMany({
-      where: { roleId: req.user.roleId },
-      select: { permission: true },
-    });
-    req.userPermissions = rolePerms.map((rp) => rp.permission);
-  }
   return (
-    req.userPermissions.includes("meetings:approve") ||
-    req.userPermissions.includes("meetings:certify_lock") ||
-    req.userPermissions.includes("meetings:edit:all") ||
-    req.userPermissions.includes("meetings:edit:dept") ||
-    req.userPermissions.includes("meetings:edit:own") ||
-    req.userPermissions.includes("meetings:manage_participants")
+    req.userPermissions?.includes("meetings:approve") ||
+    req.userPermissions?.includes("meetings:certify_lock") ||
+    false
   );
 }
 
@@ -154,30 +145,24 @@ function hasMeetingEnded(meeting: { date: Date | string; endTime: string; status
  */
 async function canUserManageAttendance(meeting: { organizerId: string }, req: AuthedRequest): Promise<boolean> {
   if (!req.user) return false;
-  if (req.user.roleCode === "SYSTEM_ADMIN") return true;
-  if (req.user.roleCode === "MEETING_SECRETARY") return true;
+  await ensureUserPermissions(req);
+  if (req.userPermissions?.includes("ADMIN_OVERRIDE")) return true;
   if (meeting.organizerId === req.user.userId) return true;
 
-  if (!req.userPermissions) {
-    const rolePerms = await prisma.rolePermission.findMany({
-      where: { roleId: req.user.roleId },
-      select: { permission: true },
-    });
-    req.userPermissions = rolePerms.map((rp) => rp.permission);
-  }
   return (
-    req.userPermissions.includes("meetings:manage_participants") ||
-    req.userPermissions.includes("meetings:edit:all") ||
-    req.userPermissions.includes("meetings:edit:dept")
+    req.userPermissions?.includes("meetings:manage_participants") ||
+    req.userPermissions?.includes("meetings:edit:all") ||
+    req.userPermissions?.includes("meetings:edit:dept") ||
+    false
   );
 }
 
 /**
  * Check if user has permission to edit attendance after it has been finalized.
- * System Admins are permitted to override.
+ * Users with ADMIN_OVERRIDE permission are permitted to override.
  */
 function canEditFinalizedAttendance(req: AuthedRequest): boolean {
-  return req.user?.roleCode === "SYSTEM_ADMIN";
+  return req.userPermissions?.includes("ADMIN_OVERRIDE") ?? false;
 }
 
 // ---------- List ----------
@@ -207,17 +192,11 @@ router.get("/", async (req: AuthedRequest, res) => {
   }
 
   // 3-Tier Ownership Enforcement for Viewing Meetings
-  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
-    if (!req.userPermissions) {
-      const rolePerms = await prisma.rolePermission.findMany({
-        where: { roleId: req.user.roleId },
-        select: { permission: true },
-      });
-      req.userPermissions = rolePerms.map((rp) => rp.permission);
-    }
-    const canViewAll = req.userPermissions.includes("meetings:view:all");
-    const canViewDept = req.userPermissions.includes("meetings:view:dept");
-    const canViewOwn = req.userPermissions.includes("meetings:view:own");
+  if (req.user) {
+    await ensureUserPermissions(req);
+    const canViewAll = req.userPermissions?.includes("ADMIN_OVERRIDE") || req.userPermissions?.includes("meetings:view:all");
+    const canViewDept = req.userPermissions?.includes("meetings:view:dept");
+    const canViewOwn = req.userPermissions?.includes("meetings:view:own");
 
     if (!canViewAll) {
       if (canViewDept && req.user.departmentId && mine !== "true") {
@@ -380,9 +359,9 @@ router.post(
 // ---------- Cross-meeting overviews ----------
 router.get("/agenda-overview/upcoming", async (req: AuthedRequest, res) => {
   const meetingWhere: any = { date: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } };
-  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
+  if (req.user) {
     await ensureUserPermissions(req);
-    const canAll = req.userPermissions?.includes("meetings:view:all");
+    const canAll = req.userPermissions?.includes("ADMIN_OVERRIDE") || req.userPermissions?.includes("meetings:view:all");
     const canDept = req.userPermissions?.includes("meetings:view:dept");
     if (!canAll) {
       if (canDept && req.user.departmentId) {
@@ -419,16 +398,10 @@ router.get("/agenda-overview/upcoming", async (req: AuthedRequest, res) => {
 
 router.get("/minutes-overview/recent", async (req: AuthedRequest, res) => {
   const where: any = {};
-  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
-    if (!req.userPermissions) {
-      const rolePerms = await prisma.rolePermission.findMany({
-        where: { roleId: req.user.roleId },
-        select: { permission: true },
-      });
-      req.userPermissions = rolePerms.map((rp) => rp.permission);
-    }
-    const canAll = req.userPermissions.includes("minutes:view:all");
-    const canDept = req.userPermissions.includes("minutes:view:dept");
+  if (req.user) {
+    await ensureUserPermissions(req);
+    const canAll = req.userPermissions?.includes("ADMIN_OVERRIDE") || req.userPermissions?.includes("minutes:view:all");
+    const canDept = req.userPermissions?.includes("minutes:view:dept");
     if (!canAll) {
       if (canDept && req.user.departmentId) {
         where.meeting = { departmentId: req.user.departmentId };
@@ -466,16 +439,10 @@ router.get("/decisions-overview/all", async (req: AuthedRequest, res) => {
   const where: any = {};
   if (typeof status === "string" && status) where.status = status;
 
-  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
-    if (!req.userPermissions) {
-      const rolePerms = await prisma.rolePermission.findMany({
-        where: { roleId: req.user.roleId },
-        select: { permission: true },
-      });
-      req.userPermissions = rolePerms.map((rp) => rp.permission);
-    }
-    const canAll = req.userPermissions.includes("decisions:view:all");
-    const canDept = req.userPermissions.includes("decisions:view:dept");
+  if (req.user) {
+    await ensureUserPermissions(req);
+    const canAll = req.userPermissions?.includes("ADMIN_OVERRIDE") || req.userPermissions?.includes("decisions:view:all");
+    const canDept = req.userPermissions?.includes("decisions:view:dept");
     if (!canAll) {
       if (canDept && req.user.departmentId) {
         where.meeting = { departmentId: req.user.departmentId };
@@ -515,16 +482,10 @@ router.get("/decisions-overview/all", async (req: AuthedRequest, res) => {
 
 router.get("/documents-overview/all", async (req: AuthedRequest, res) => {
   const where: any = {};
-  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
-    if (!req.userPermissions) {
-      const rolePerms = await prisma.rolePermission.findMany({
-        where: { roleId: req.user.roleId },
-        select: { permission: true },
-      });
-      req.userPermissions = rolePerms.map((rp) => rp.permission);
-    }
-    const canAll = req.userPermissions.includes("documents:view:all");
-    const canDept = req.userPermissions.includes("documents:view:dept");
+  if (req.user) {
+    await ensureUserPermissions(req);
+    const canAll = req.userPermissions?.includes("ADMIN_OVERRIDE") || req.userPermissions?.includes("documents:view:all");
+    const canDept = req.userPermissions?.includes("documents:view:dept");
     if (!canAll) {
       if (canDept && req.user.departmentId) {
         where.meeting = { departmentId: req.user.departmentId };
@@ -795,13 +756,20 @@ router.put(
       return res.status(403).json({ error: "You do not have permission to edit meetings outside your ownership scope." });
     }
 
-  const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
-  const wasLocked = isLockedMeetingStatus(existing.status);
+  await ensureUserPermissions(req);
+  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
 
-  // If already locked, only Super Admin can edit or alter the status
-  if (wasLocked && !isSuperAdmin) {
+  // Once a meeting is APPROVED, it is strictly READ-ONLY for everyone until unlocked!
+  if (existing.status === "APPROVED") {
     return res.status(403).json({
-      error: `Meeting is locked (${existing.status.replace("_", " ")}). Only Super Admins can override and modify locked meetings.`,
+      error: "Meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission before any edits can be made.",
+    });
+  }
+
+  const wasLocked = isLockedMeetingStatus(existing.status);
+  if (wasLocked && !hasAdminOverride) {
+    return res.status(403).json({
+      error: `Meeting is locked (${existing.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE permission.`,
     });
   }
 
@@ -809,24 +777,14 @@ router.put(
   const dataToUpdate: any = { ...rest };
   if (date) dataToUpdate.date = new Date(date);
 
-  // Handle status transitions
+  // Status transitions: APPROVED cannot be set via standard update dropdown
   if (status !== undefined) {
-    if (status === "APPROVED" && existing.status !== "APPROVED") {
-      const authorized = await canApproveMeeting(existing.organizerId, req);
-      if (!authorized) {
-        return res.status(403).json({
-          error: "Only the meeting organizer or an authorized administrator can approve this meeting.",
-        });
-      }
-      dataToUpdate.status = "APPROVED";
-      dataToUpdate.approvedById = req.user!.userId;
-      dataToUpdate.approvedAt = new Date();
-      if (req.body.signature && typeof req.body.signature === "string") {
-        dataToUpdate.approvalSignature = req.body.signature.trim();
-      }
-    } else {
-      dataToUpdate.status = status;
+    if (status === "APPROVED") {
+      return res.status(400).json({
+        error: "Meetings cannot be set to APPROVED via status update. Approval must be performed using the 'Approve Meeting' workflow with digital certification.",
+      });
     }
+    dataToUpdate.status = status;
   }
 
   try {
@@ -939,15 +897,15 @@ router.post("/:id/participant-sign", async (req: AuthedRequest, res) => {
   const targetUserId = req.user!.userId;
 
   const isParticipant = meeting.participants.some((p: any) => p.userId === targetUserId);
-  const isOrganizerOrAdmin =
-    meeting.organizerId === targetUserId ||
-    req.user!.roleCode === "SYSTEM_ADMIN" ||
-    req.user!.roleCode === "MEETING_SECRETARY" ||
-    req.user!.roleCode === "MEETING_APPROVER" ||
-    req.user!.roleCode === "CHAIRPERSON";
+  await ensureUserPermissions(req);
+  const canSignByPermission =
+    req.userPermissions?.includes("ADMIN_OVERRIDE") ||
+    req.userPermissions?.includes("minutes:sign") ||
+    req.userPermissions?.includes("meetings:approve");
+  const isOrganizer = meeting.organizerId === targetUserId;
 
-  if (!isParticipant && !isOrganizerOrAdmin) {
-    return res.status(403).json({ error: "Only confirmed attendees or organizers can sign the minutes." });
+  if (!isParticipant && !isOrganizer && !canSignByPermission) {
+    return res.status(403).json({ error: "Only confirmed attendees or authorized organizers can sign the minutes." });
   }
 
   const alreadySigned = meeting.participantSignatures.some((s: any) => s.userId === targetUserId);
@@ -1075,7 +1033,7 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
         data: {
           meetingId: req.params.id,
           userId: req.user!.userId,
-          signerName: userRecord?.name || "System Admin",
+          signerName: userRecord?.name || "Meeting Approver",
           signerRole: userRecord?.jobTitle || userRecord?.role?.name || "Approver",
           signatureDataUrl: signature.trim(),
           userAgent: req.headers["user-agent"] || null,
@@ -1113,12 +1071,13 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
   res.json(updated);
 });
 
-// ---------- Unlock / Override Meeting Lock (Exclusive to Super Admin) ----------
+// ---------- Unlock / Override Meeting Lock (Exclusive to ADMIN_OVERRIDE) ----------
 router.post("/:id/unlock", async (req: AuthedRequest, res) => {
-  const isSuperAdmin = req.user?.roleCode === "SYSTEM_ADMIN";
-  if (!isSuperAdmin) {
+  await ensureUserPermissions(req);
+  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+  if (!hasAdminOverride) {
     return res.status(403).json({
-      error: "Access Denied: Only a designated Super Admin (SYSTEM_ADMIN) possesses the exclusive permission to unlock an approved or locked meeting.",
+      error: "Access Denied: Only users with the ADMIN_OVERRIDE permission possess the authority to unlock an approved or locked meeting.",
     });
   }
 
@@ -1142,13 +1101,13 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
   const recordedReason =
     typeof reason === "string" && reason.trim()
       ? reason.trim()
-      : "Administrative override: meeting unlocked by Super Admin for modification";
+      : "Administrative override: meeting unlocked for modification";
 
   const updated = await (prisma.meeting as any).update({
     where: { id: req.params.id },
     data: {
       status: validTargetStatus,
-      bypassReason: `Unlocked by Super Admin: ${recordedReason}`,
+      bypassReason: `Unlocked by Administrator: ${recordedReason}`,
     },
     include: detailInclude,
   });

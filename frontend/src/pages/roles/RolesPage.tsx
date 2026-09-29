@@ -65,10 +65,9 @@ export default function RolesPage() {
   }, [roles, searchQuery]);
 
   const stats = useMemo(() => {
-    const system = roles.filter((r) => r.isSystem).length;
-    const custom = roles.filter((r) => !r.isSystem).length;
+    const active = roles.filter((r) => r.isActive).length;
     const totalUsers = roles.reduce((sum, r) => sum + r.userCount, 0);
-    return { total: roles.length, system, custom, totalUsers };
+    return { total: roles.length, active, totalUsers };
   }, [roles]);
 
   const handleDelete = async (role: RoleListItem) => {
@@ -103,28 +102,31 @@ export default function RolesPage() {
         <div className="flex flex-col rounded-xl border border-slate2-200 bg-white p-4">
           <span className="text-xs font-medium uppercase tracking-wider text-slate2-400">Total Roles</span>
           <span className="mt-2 text-2xl font-bold text-slate2-800">{stats.total}</span>
-          <span className="mt-1 text-[11px] text-slate2-500">System + custom roles</span>
+          <span className="mt-1 text-[11px] text-slate2-500">Configured roles</span>
         </div>
         <div className="flex flex-col rounded-xl border border-slate2-200 bg-white p-4">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium uppercase tracking-wider text-brand">System</span>
-            <Lock size={12} className="text-brand" />
+            <span className="text-xs font-medium uppercase tracking-wider text-emerald-700">Active</span>
+            <CheckCircle2 size={13} className="text-emerald-600" />
           </div>
-          <span className="mt-2 text-2xl font-bold text-brand">{stats.system}</span>
-          <span className="mt-1 text-[11px] text-slate2-500">Built-in protected roles</span>
-        </div>
-        <div className="flex flex-col rounded-xl border border-slate2-200 bg-white p-4">
-          <span className="text-xs font-medium uppercase tracking-wider text-violet-700">Custom</span>
-          <span className="mt-2 text-2xl font-bold text-violet-800">{stats.custom}</span>
-          <span className="mt-1 text-[11px] text-slate2-500">Admin-created roles</span>
+          <span className="mt-2 text-2xl font-bold text-emerald-700">{stats.active}</span>
+          <span className="mt-1 text-[11px] text-slate2-500">Available for assignment</span>
         </div>
         <div className="flex flex-col rounded-xl border border-slate2-200 bg-white p-4">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium uppercase tracking-wider text-slate2-400">Assigned Users</span>
-            <Users2 size={12} className="text-slate2-400" />
+            <Users2 size={13} className="text-slate2-400" />
           </div>
           <span className="mt-2 text-2xl font-bold text-slate2-800">{stats.totalUsers}</span>
           <span className="mt-1 text-[11px] text-slate2-500">Across all roles</span>
+        </div>
+        <div className="flex flex-col rounded-xl border border-slate2-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium uppercase tracking-wider text-brand">Permissions</span>
+            <Shield size={13} className="text-brand" />
+          </div>
+          <span className="mt-2 text-2xl font-bold text-brand">35</span>
+          <span className="mt-1 text-[11px] text-slate2-500">Fine-grained capabilities</span>
         </div>
       </div>
 
@@ -185,7 +187,7 @@ export default function RolesPage() {
                   <th className="px-5 py-3.5">Code</th>
                   <th className="px-5 py-3.5">Permissions</th>
                   <th className="px-5 py-3.5">Users</th>
-                  <th className="px-5 py-3.5">Type</th>
+                  <th className="px-5 py-3.5">Status</th>
                   <th className="px-5 py-3.5 text-right">Actions</th>
                 </tr>
               </thead>
@@ -194,14 +196,8 @@ export default function RolesPage() {
                   <tr key={role.id} className="group transition-colors hover:bg-slate2-50/60">
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-2.5">
-                        <div
-                          className={`flex h-8 w-8 items-center justify-center rounded-lg ${
-                            role.isSystem
-                              ? "bg-brand/10 text-brand"
-                              : "bg-violet-100 text-violet-600"
-                          }`}
-                        >
-                          {role.isSystem ? <ShieldCheck size={16} /> : <Shield size={16} />}
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand/10 text-brand">
+                          <Shield size={16} />
                         </div>
                         <div>
                           <p className="font-medium text-slate2-800">{role.name}</p>
@@ -228,10 +224,10 @@ export default function RolesPage() {
                       </div>
                     </td>
                     <td className="px-5 py-3.5">
-                      {role.isSystem ? (
-                        <Badge tone="brand">System</Badge>
+                      {role.isActive ? (
+                        <Badge tone="success">Active</Badge>
                       ) : (
-                        <Badge tone="neutral">Custom</Badge>
+                        <Badge tone="neutral">Inactive</Badge>
                       )}
                     </td>
                     <td className="px-5 py-3.5 text-right">
@@ -252,11 +248,25 @@ export default function RolesPage() {
                             <Edit2 size={15} />
                           </button>
                         )}
-                        {canDelete && !role.isSystem && (
+                        {canDelete && (
                           <button
-                            onClick={() => setDeleteConfirm(role)}
-                            className="rounded-lg p-1.5 text-rose-400 hover:bg-rose-50 hover:text-rose-600"
-                            title="Delete role"
+                            onClick={() => {
+                              if (role.userCount > 0) {
+                                alert(`Cannot delete role "${role.name}": ${role.userCount} user(s) are currently assigned to this role. Please reassign them to another role first.`);
+                                return;
+                              }
+                              setDeleteConfirm(role);
+                            }}
+                            className={`rounded-lg p-1.5 ${
+                              role.userCount > 0
+                                ? "text-slate2-300 hover:text-slate2-400 cursor-not-allowed"
+                                : "text-rose-400 hover:bg-rose-50 hover:text-rose-600"
+                            }`}
+                            title={
+                              role.userCount > 0
+                                ? `Cannot delete: ${role.userCount} user(s) assigned`
+                                : "Delete role"
+                            }
                           >
                             <Trash2 size={15} />
                           </button>
@@ -586,12 +596,8 @@ function RoleViewModal({
         {/* Header */}
         <div className="flex items-center justify-between rounded-xl bg-slate2-50 p-4">
           <div className="flex items-center gap-3">
-            <div
-              className={`flex h-10 w-10 items-center justify-center rounded-xl ${
-                role.isSystem ? "bg-brand/10 text-brand" : "bg-violet-100 text-violet-600"
-              }`}
-            >
-              {role.isSystem ? <ShieldCheck size={20} /> : <Shield size={20} />}
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/10 text-brand">
+              <Shield size={20} />
             </div>
             <div>
               <h3 className="font-display text-base font-bold text-slate2-900">{role.name}</h3>
@@ -599,10 +605,10 @@ function RoleViewModal({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {role.isSystem ? (
-              <Badge tone="brand">System Role</Badge>
+            {role.isActive ? (
+              <Badge tone="success">Active</Badge>
             ) : (
-              <Badge tone="neutral">Custom Role</Badge>
+              <Badge tone="neutral">Inactive</Badge>
             )}
             <span className="flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
               <Users2 size={12} /> {role.userCount} users

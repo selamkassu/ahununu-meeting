@@ -30,6 +30,32 @@ async function main() {
     console.log(`Updated ${role.name} (${roleCode}) with ${perms.length} permissions.`);
   }
 
+  // Ensure any admin role in the DB has ADMIN_OVERRIDE
+  const adminRoles = await prisma.role.findMany({
+    where: {
+      OR: [
+        { code: "SYSTEM_ADMIN" },
+        { name: { contains: "Admin", mode: "insensitive" } },
+      ],
+    },
+  });
+  for (const r of adminRoles) {
+    await prisma.rolePermission.upsert({
+      where: {
+        roleId_permission: {
+          roleId: r.id,
+          permission: "ADMIN_OVERRIDE",
+        },
+      },
+      create: {
+        roleId: r.id,
+        permission: "ADMIN_OVERRIDE",
+      },
+      update: {},
+    });
+    console.log(`Ensured ADMIN_OVERRIDE permission for role: ${r.name} (${r.code})`);
+  }
+
   console.log("Permission synchronization complete.");
 }
 

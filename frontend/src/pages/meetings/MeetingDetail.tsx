@@ -129,6 +129,17 @@ const MEETING_STATUSES: MeetingStatus[] = [
   "CANCELLED",
 ];
 
+// Options allowed in the status dropdown: APPROVED is removed so approval can ONLY be performed
+// using the formal "Approve Meeting" button with digital signature.
+const STATUS_DROPDOWN_OPTIONS: MeetingStatus[] = [
+  "SCHEDULED",
+  "IN_PROGRESS",
+  "PENDING_SIGNATURES",
+  "READY_FOR_APPROVAL",
+  "COMPLETED",
+  "CANCELLED",
+];
+
 const STATUS_CONFIG: Record<
   MeetingStatus,
   { bg: string; border: string; dot: string }
@@ -186,22 +197,26 @@ export default function MeetingDetail() {
   const [loading, setLoading] = useState(true);
 
   const isLocked = isLockedMeeting(meeting?.status);
-  const isSuperAdmin = user?.role?.code === "SYSTEM_ADMIN";
-  const canEdit = !isLocked || isSuperAdmin;
+  const isApproved = meeting?.status === "APPROVED";
+  const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
+
+  // When a meeting is APPROVED, it is strictly READ-ONLY for everyone until unlocked!
+  const canEdit = !isApproved && (!isLocked || hasAdminOverride);
   const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
+
   const canManage = useMemo(() => {
-    if (isSuperAdmin) return true;
+    if (hasAdminOverride) return true;
     if (!meeting || !user) return false;
     if (hasPermission("meetings:edit:all")) return true;
     if (hasPermission("meetings:edit:dept") && user.department?.id === meeting.department?.id) return true;
     if (hasPermission("meetings:edit:own") && isOrganizer) return true;
     return false;
-  }, [isSuperAdmin, meeting, user, isOrganizer, hasPermission]);
-  const isApproverRole = user?.role?.code === "MEETING_APPROVER" || user?.role?.code === "CHAIRPERSON";
+  }, [hasAdminOverride, meeting, user, isOrganizer, hasPermission]);
+
   const canApprove = !!(
     meeting &&
     !["APPROVED", "CANCELLED"].includes(meeting.status) &&
-    (isOrganizer || isSuperAdmin || isApproverRole || hasPermission("meetings:approve") || hasPermission("meetings:certify_lock"))
+    (isOrganizer || hasAdminOverride || hasPermission("meetings:approve") || hasPermission("meetings:certify_lock"))
   );
 
   const [isApprovalModalOpen, setIsApprovalModalOpen] = useState(false);
@@ -318,7 +333,11 @@ export default function MeetingDetail() {
   };
 
   const updateStatus = async (status: MeetingStatus) => {
-    if (!id) return;
+    if (!id || !meeting) return;
+    if (meeting.status === "APPROVED") {
+      alert("This meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission.");
+      return;
+    }
     if (status === "APPROVED") {
       setIsApprovalModalOpen(true);
       return;
@@ -327,8 +346,8 @@ export default function MeetingDetail() {
       handleRequestSignatures();
       return;
     }
-    if (isLocked && !isSuperAdmin) {
-      alert("This meeting is locked. Only Super Admins can alter status.");
+    if (isLocked && !hasAdminOverride) {
+      alert("This meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status.");
       return;
     }
     try {
@@ -400,14 +419,14 @@ export default function MeetingDetail() {
                     <span>Print Minutes</span>
                   </Button>
 
-                  {/* Super Admin Unlock Meeting Button */}
-                  {isLocked && isSuperAdmin && (
+                  {/* Unlock Meeting Button (Exclusive to ADMIN_OVERRIDE) */}
+                  {isLocked && hasAdminOverride && (
                     <Button
                       variant="secondary"
                       type="button"
                       onClick={() => setIsUnlockModalOpen(true)}
                       className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-300 font-semibold text-amber-900 shadow-2xs"
-                      title="Super Admin Exclusive: Unlock and reopen meeting for editing"
+                      title="Unlock and reopen meeting for editing (requires ADMIN_OVERRIDE)"
                     >
                       <Unlock size={13} className="text-amber-700" />
                       <span>Unlock Meeting</span>
@@ -427,7 +446,7 @@ export default function MeetingDetail() {
                   )}
                 </div>
                 <div className="flex flex-row items-center gap-3 justify-end">
-                  {isLocked && isSuperAdmin && (
+                  {isLocked && hasAdminOverride && (
                     <span className="rounded bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 border border-amber-200 shadow-2xs">
                       Admin Override
                     </span>
@@ -441,11 +460,20 @@ export default function MeetingDetail() {
                     </span>
                   )}
                   <PriorityBadge priority={meeting.priority} />
-                  {canManage ? (
+                  {meeting.status === "APPROVED" ? (
+                    <div
+                      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border ${STATUS_CONFIG.APPROVED.bg} ${STATUS_CONFIG.APPROVED.border} shadow-2xs`}
+                      title="Meeting approved & certified (Read-only)"
+                    >
+                      <span className={`h-2 w-2 rounded-full shrink-0 ${STATUS_CONFIG.APPROVED.dot}`} />
+                      <span>Approved</span>
+                      <Lock size={11} className="text-inherit opacity-70 ml-0.5" />
+                    </div>
+                  ) : canManage ? (
                     <div
                       className={`group relative inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border transition-all ${STATUS_CONFIG[meeting.status]?.bg || "bg-slate2-100 text-slate2-700"
                         } ${STATUS_CONFIG[meeting.status]?.border || "border-slate2-200"
-                        } ${isLocked && !isSuperAdmin
+                        } ${isLocked && !hasAdminOverride
                           ? "opacity-75 cursor-not-allowed"
                           : "cursor-pointer hover:shadow-xs shadow-2xs"
                         }`}
@@ -457,15 +485,15 @@ export default function MeetingDetail() {
                       <select
                         value={meeting.status}
                         onChange={(e) => updateStatus(e.target.value as MeetingStatus)}
-                        disabled={isLocked && !isSuperAdmin}
+                        disabled={isLocked && !hasAdminOverride}
                         title={
-                          isLocked && !isSuperAdmin
-                            ? "Meeting is locked. Only Super Admins can alter status."
+                          isLocked && !hasAdminOverride
+                            ? "Meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status."
                             : "Click to change status"
                         }
                         className="bg-transparent text-inherit font-semibold text-xs border-0 outline-none p-0 pr-4 cursor-pointer disabled:cursor-not-allowed appearance-none focus:ring-0 select-none"
                       >
-                        {MEETING_STATUSES.map((s) => (
+                        {STATUS_DROPDOWN_OPTIONS.map((s) => (
                           <option
                             key={s}
                             value={s}
@@ -475,7 +503,7 @@ export default function MeetingDetail() {
                           </option>
                         ))}
                       </select>
-                      {isLocked && !isSuperAdmin ? (
+                      {isLocked && !hasAdminOverride ? (
                         <Lock
                           size={11}
                           className="pointer-events-none absolute right-2 text-inherit opacity-70"
@@ -618,18 +646,16 @@ export default function MeetingDetail() {
                 <span className="rounded-full bg-white/80 border border-current px-2 py-0.5 text-[10px] font-bold tracking-wider">
                   {meeting.status === "COMPLETED" ? "COMPLETED" : "LOCKED"}
                 </span>
-                {isSuperAdmin && (
+                {hasAdminOverride && (
                   <span className="rounded-full bg-amber-100 border border-amber-300 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
-                    Super Admin Override Active
+                    Admin Override Active
                   </span>
                 )}
               </div>
               <div className="mt-1 text-xs text-slate2-600 space-y-0.5">
                 <p>
                   {meeting.status === "APPROVED"
-                    ? isSuperAdmin
-                      ? "This meeting is certified and locked for general users. As Super Admin, you have exclusive override privileges to unlock or edit records when required."
-                      : "This meeting has been officially approved & certified. All documents, decisions, attendance records, and minutes are permanently locked in Read-Only mode for all users."
+                    ? "This meeting has been officially approved & certified. All documents, decisions, attendance records, and minutes are strictly locked in Read-Only mode for all users. Users with the ADMIN_OVERRIDE permission can unlock this meeting using the button above to reopen it for modification."
                     : meeting.status === "CANCELLED"
                       ? "This meeting was cancelled. All records, including action item status, are locked from editing."
                       : "This meeting has been completed. Meeting records are archived; action items run independently and their status can be updated."}
@@ -656,7 +682,7 @@ export default function MeetingDetail() {
                 )}
               </div>
             </div>
-            {isSuperAdmin && (
+            {hasAdminOverride && (
               <div className="shrink-0 self-start sm:self-center">
                 <Button
                   variant="secondary"
@@ -697,7 +723,6 @@ export default function MeetingDetail() {
         <MinutesTab
           meeting={meeting}
           canManage={canManage && canEdit}
-          isSuperAdmin={isSuperAdmin}
           onChange={load}
           canApprove={canApprove}
           onApproveClick={() => setIsApprovalModalOpen(true)}
@@ -714,15 +739,13 @@ export default function MeetingDetail() {
         <DecisionsTab
           meeting={meeting}
           canManage={canManage && canEdit}
-          isSuperAdmin={isSuperAdmin}
           onChange={load}
         />
       )}
       {tab === "actions" && (
         <ActionsTab
           meeting={meeting}
-          canCreate={canManage && (!isLocked || isSuperAdmin)}
-          isSuperAdmin={isSuperAdmin}
+          canCreate={canManage && canEdit}
           onChange={load}
         />
       )}
@@ -738,7 +761,6 @@ export default function MeetingDetail() {
         <DocumentsTab
           meeting={meeting}
           canManage={canManage && canEdit}
-          isSuperAdmin={isSuperAdmin}
           onChange={load}
         />
       )}
@@ -776,12 +798,12 @@ export default function MeetingDetail() {
         />
       )}
 
-      {/* Super Admin Unlock Meeting Modal Dialog */}
+      {/* Administrator Unlock Meeting Modal Dialog */}
       {isUnlockModalOpen && meeting && (
         <Modal
           open={isUnlockModalOpen}
           onClose={unlocking ? () => {} : () => setIsUnlockModalOpen(false)}
-          title="Super Admin Override: Unlock Meeting"
+          title="Administrator Override: Unlock Meeting"
         >
           <div className="space-y-4 text-xs text-slate2-700">
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5">
@@ -789,7 +811,7 @@ export default function MeetingDetail() {
                 <ShieldAlert size={20} className="text-amber-700 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <p className="font-semibold text-amber-950">
-                    Exclusive Super Admin Override Action
+                    Exclusive Administrator Override Action
                   </p>
                   <p className="text-amber-900/90 leading-relaxed">
                     This meeting is officially certified and locked ({meeting.status}). Unlocking it will
@@ -817,7 +839,7 @@ export default function MeetingDetail() {
 
             <div>
               <label className="block font-semibold text-slate2-800 mb-1">
-                Reason for Super Admin Override / Unlock <span className="text-rose-500">*</span>
+                Reason for Administrator Override / Unlock <span className="text-rose-500">*</span>
               </label>
               <textarea
                 rows={3}
@@ -1298,7 +1320,6 @@ function AgendaTab({
 function MinutesTab({
   meeting,
   canManage,
-  isSuperAdmin = false,
   onChange,
   canApprove,
   onApproveClick,
@@ -1312,7 +1333,6 @@ function MinutesTab({
 }: {
   meeting: MeetingDetailType;
   canManage: boolean;
-  isSuperAdmin?: boolean;
   onChange: () => void;
   canApprove?: boolean;
   onApproveClick?: () => void;
@@ -1349,7 +1369,7 @@ function MinutesTab({
   const isApproved = meeting.status === "APPROVED";
   const isCompleted = meeting.status === "COMPLETED";
   const isCancelled = meeting.status === "CANCELLED";
-  const isReadOnly = isCompleted || isCancelled || (isApproved && !isSuperAdmin) || !canManage;
+  const isReadOnly = isCompleted || isCancelled || isApproved || !canManage;
 
   const [isEditing, setIsEditing] = useState(false);
   const [summaryContent, setSummaryContent] = useState("");
@@ -1729,12 +1749,7 @@ function MinutesTab({
               </>
             )}
 
-            {isApproved && isSuperAdmin && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs font-semibold text-amber-800">
-                <ShieldAlert size={12} className="text-amber-600" /> Super Admin Override
-              </span>
-            )}
-            {isApproved && !isSuperAdmin && (
+            {isApproved && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
                 <Lock size={12} /> Certified & Locked (Read-only)
               </span>
@@ -2017,12 +2032,10 @@ function MinutesTab({
 function DecisionsTab({
   meeting,
   canManage,
-  isSuperAdmin = false,
   onChange,
 }: {
   meeting: MeetingDetailType;
   canManage: boolean;
-  isSuperAdmin?: boolean;
   onChange: () => void;
 }) {
   const [title, setTitle] = useState("");
@@ -2125,36 +2138,16 @@ function DecisionsTab({
         title="Decisions"
         subtitle="Formal outcomes reached in this meeting"
       />
-      {meeting.status === "APPROVED" && isSuperAdmin && (
-        <div className="mx-5 mb-3 rounded-xl border border-amber-300 bg-amber-50/80 p-3.5 shadow-2xs">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-2.5">
-              <ShieldAlert size={18} className="text-amber-600 mt-0.5 shrink-0" />
-              <div>
-                <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider">
-                  Super Admin Override Active
-                </h4>
-                <p className="mt-0.5 text-xs text-amber-800 leading-relaxed">
-                  This meeting is certified and locked for general users. As Super Admin, you have exclusive administrative authority to create, edit, or remove decisions.
-                </p>
-              </div>
-            </div>
-            <span className="rounded-full bg-amber-200/80 border border-amber-300 px-2.5 py-0.5 text-[10px] font-bold text-amber-900 uppercase tracking-wider shrink-0">
-              Override Permission
-            </span>
-          </div>
-        </div>
-      )}
-      {meeting.status === "APPROVED" && !isSuperAdmin && (
+      {meeting.status === "APPROVED" && (
         <div className="mx-5 mb-3 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
           <div className="flex items-start gap-2.5">
             <Lock size={18} className="text-slate2-500 mt-0.5 shrink-0" />
             <div>
               <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
-                Decisions Permanently Certified & Locked (Read-Only)
+                Decisions Officially Certified & Locked (Read-Only)
               </h4>
               <p className="mt-0.5 text-xs text-slate2-600 leading-relaxed">
-                This meeting has been officially approved and certified. In accordance with compliance and governance rules, all decisions are permanently locked in Read-Only mode. Only the Super Admin can unlock or override this record.
+                This meeting has been officially approved and certified. In accordance with compliance and governance rules, all decisions are permanently locked in Read-Only mode. An authorized administrator with ADMIN_OVERRIDE permission must unlock the meeting before decisions can be modified.
               </p>
             </div>
           </div>
@@ -2360,12 +2353,10 @@ function DecisionsTab({
 function ActionsTab({
   meeting,
   canCreate,
-  isSuperAdmin,
   onChange,
 }: {
   meeting: MeetingDetailType;
   canCreate: boolean;
-  isSuperAdmin: boolean;
   onChange: () => void;
 }) {
   const { user, hasPermission, hasAnyPermission } = useAuth();
@@ -2397,7 +2388,7 @@ function ActionsTab({
     if (isMeetingCancelled) {
       return false;
     }
-    if (isSuperAdmin) return true;
+    if (hasPermission("ADMIN_OVERRIDE")) return true;
     if (user && user.id === item.assignedTo.id) return true;
     if (user && user.id === meeting.organizer.id) return true;
     if (hasPermission("action_items:edit:all") || hasPermission("meetings:edit:all")) return true;
@@ -2690,12 +2681,10 @@ function InlineDocViewer({
 function DocumentsTab({
   meeting,
   canManage,
-  isSuperAdmin = false,
   onChange,
 }: {
   meeting: MeetingDetailType;
   canManage: boolean;
-  isSuperAdmin?: boolean;
   onChange: () => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
@@ -2779,36 +2768,16 @@ function DocumentsTab({
           title="Documents"
           subtitle="Upload and manage files attached to this meeting"
         />
-        {meeting.status === "APPROVED" && isSuperAdmin && (
-          <div className="mx-5 mb-3 rounded-xl border border-amber-300 bg-amber-50/80 p-3.5 shadow-2xs">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-2.5">
-                <ShieldAlert size={18} className="text-amber-600 mt-0.5 shrink-0" />
-                <div>
-                  <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider">
-                    Super Admin Override Active
-                  </h4>
-                  <p className="mt-0.5 text-xs text-amber-800 leading-relaxed">
-                    This meeting is certified and locked for general users. As Super Admin, you retain exclusive permission to upload or remove document attachments when required.
-                  </p>
-                </div>
-              </div>
-              <span className="rounded-full bg-amber-200/80 border border-amber-300 px-2.5 py-0.5 text-[10px] font-bold text-amber-900 uppercase tracking-wider shrink-0">
-                Override Permission
-              </span>
-            </div>
-          </div>
-        )}
-        {meeting.status === "APPROVED" && !isSuperAdmin && (
+        {meeting.status === "APPROVED" && (
           <div className="mx-5 mb-3 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
             <div className="flex items-start gap-2.5">
               <Lock size={18} className="text-slate2-500 mt-0.5 shrink-0" />
               <div>
                 <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
-                  Documents Permanently Certified & Locked (Read-Only)
+                  Documents Officially Certified & Locked (Read-Only)
                 </h4>
                 <p className="mt-0.5 text-xs text-slate2-600 leading-relaxed">
-                  This meeting has been officially approved and certified. All meeting documents and attachments are permanently locked in Read-Only mode. Only the Super Admin can unlock or attach additional documents.
+                  This meeting has been officially approved and certified. All meeting documents and attachments are permanently locked in Read-Only mode. An authorized administrator with ADMIN_OVERRIDE permission must unlock the meeting before documents can be added or deleted.
                 </p>
               </div>
             </div>
@@ -2961,12 +2930,10 @@ function ParticipantsTab({
   } | null>(null);
 
   // Authorization & Meeting State
-  const isSuperAdmin = user?.role?.code === "SYSTEM_ADMIN";
-  const isSecretary = user?.role?.code === "MEETING_SECRETARY";
+  const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
   const canManage =
-    isSuperAdmin ||
-    isSecretary ||
+    hasAdminOverride ||
     isOrganizer ||
     hasPermission("meetings:manage_participants") ||
     hasPermission("meetings:edit:all") ||
@@ -2977,7 +2944,7 @@ function ParticipantsTab({
   const isAttendanceFinalized = !!meeting.attendanceFinalized;
   const canEditAttendance = !isAttendanceFinalized
     ? meetingEnded && canManage
-    : isSuperAdmin;
+    : hasAdminOverride;
 
   useEffect(() => {
     api

@@ -10,7 +10,7 @@ import { StatusBadge } from "../components/ui/Badge";
 
 export default function DecisionsPage() {
   const { hasPermission, user } = useAuth();
-  const isSuperAdmin = user?.role?.code === "SYSTEM_ADMIN";
+  const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const [items, setItems] = useState<DecisionOverviewItem[]>([]);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
@@ -42,7 +42,7 @@ export default function DecisionsPage() {
   };
 
   const canEditDecision = (d: DecisionOverviewItem) => {
-    if (isSuperAdmin) return true;
+    if (hasAdminOverride) return true;
     if (hasPermission("decisions:edit:all")) return true;
     const deptId = d.meeting?.departmentId || d.meeting?.department?.id;
     if (hasPermission("decisions:edit:dept") && user?.department?.id && deptId === user.department.id) {
@@ -80,8 +80,10 @@ export default function DecisionsPage() {
         <div className="divide-y divide-slate2-100">
           {items.map((d) => {
             const completed = d.actionItems.filter((a) => a.status === "COMPLETED").length;
+            const isApproved = d.meeting?.status === "APPROVED";
             const isMeetingLocked = isLockedMeeting(d.meeting?.status);
-            const canModifyDecision = canEditDecision(d) && (!isMeetingLocked || isSuperAdmin);
+            // Approved meetings are strictly read-only until unlocked
+            const canModifyDecision = !isApproved && canEditDecision(d) && (!isMeetingLocked || hasAdminOverride);
 
             return (
               <div key={d.id} className="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
@@ -89,11 +91,15 @@ export default function DecisionsPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-semibold text-slate2-800">{d.title}</p>
                     <CodeChip>{d.code}</CodeChip>
-                    {isMeetingLocked && (
+                    {isApproved ? (
+                      <span className="inline-flex items-center gap-1 rounded bg-slate2-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate2-500 border border-slate2-200">
+                        <Lock size={10} /> Approved (Locked)
+                      </span>
+                    ) : isMeetingLocked ? (
                       <span className="inline-flex items-center gap-1 rounded bg-slate2-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate2-500 border border-slate2-200">
                         <Lock size={10} /> Certified Lock
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   {d.description && <p className="mt-1 text-sm text-slate2-600">{d.description}</p>}
                   <Link to={`/meetings/${d.meeting.id}?tab=decisions`} className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-slate2-500 hover:text-brand transition-colors font-medium">

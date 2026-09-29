@@ -50,8 +50,9 @@ export function requirePermission(...permissions: string[]) {
         req.userPermissions = rolePerms.map((rp) => rp.permission);
       }
 
-      const isSuperAdmin = req.user.roleCode === "SYSTEM_ADMIN";
-      const hasPermission = isSuperAdmin || permissions.some((p) => req.userPermissions!.includes(p));
+      const hasPermission =
+        req.userPermissions!.includes("ADMIN_OVERRIDE") ||
+        permissions.some((p) => req.userPermissions!.includes(p));
       if (!hasPermission) {
         return res.status(403).json({ error: "You do not have permission to perform this action." });
       }

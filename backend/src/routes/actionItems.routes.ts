@@ -27,17 +27,11 @@ router.get("/", async (req: AuthedRequest, res) => {
   if (mine === "true") where.assignedToId = req.user!.userId;
 
   // 3-Tier Ownership Access Filter
-  if (req.user && req.user.roleCode !== "SYSTEM_ADMIN") {
-    if (!req.userPermissions) {
-      const rolePerms = await prisma.rolePermission.findMany({
-        where: { roleId: req.user.roleId },
-        select: { permission: true },
-      });
-      req.userPermissions = rolePerms.map((rp) => rp.permission);
-    }
-    const canViewAll = req.userPermissions.includes("action_items:view:all");
-    const canViewDept = req.userPermissions.includes("action_items:view:dept");
-    const canViewOwn = req.userPermissions.includes("action_items:view:own");
+  if (req.user) {
+    await ensureUserPermissions(req);
+    const canViewAll = req.userPermissions?.includes("ADMIN_OVERRIDE") || req.userPermissions?.includes("action_items:view:all");
+    const canViewDept = req.userPermissions?.includes("action_items:view:dept");
+    const canViewOwn = req.userPermissions?.includes("action_items:view:own");
 
     if (!canViewAll) {
       if (canViewDept && req.user.departmentId && mine !== "true") {
@@ -76,9 +70,11 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
     where: { id: parsed.data.meetingId },
     select: { status: true },
   });
-  if (meeting && isLockedMeetingStatus(meeting.status) && req.user?.roleCode !== "SYSTEM_ADMIN") {
+  await ensureUserPermissions(req);
+  const hasOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+  if (meeting && isLockedMeetingStatus(meeting.status) && !hasOverride) {
     return res.status(403).json({
-      error: `Meeting is locked (${meeting.status.replace("_", " ")}). Cannot assign new action items unless authorized by Super Admin.`,
+      error: `Meeting is locked (${meeting.status.replace("_", " ")}). Cannot assign new action items unless authorized with ADMIN_OVERRIDE permission.`,
     });
   }
 
@@ -150,17 +146,12 @@ router.put("/:id", async (req: AuthedRequest, res) => {
   if (!existing) return res.status(404).json({ error: "Action item not found." });
 
   // 3-Tier Ownership Permission Check for editing action items
-  if (req.user?.roleCode !== "SYSTEM_ADMIN") {
-    if (!req.userPermissions) {
-      const rolePerms = await prisma.rolePermission.findMany({
-        where: { roleId: req.user!.roleId },
-        select: { permission: true },
-      });
-      req.userPermissions = rolePerms.map((rp) => rp.permission);
-    }
-    const hasEditAll = req.userPermissions.includes("action_items:edit:all");
-    const hasEditDept = req.userPermissions.includes("action_items:edit:dept") && req.user?.departmentId === existing.departmentId;
-    const hasEditOwn = req.userPermissions.includes("action_items:edit:own") && (existing.assignedToId === req.user?.userId || existing.meeting?.organizerId === req.user?.userId);
+  await ensureUserPermissions(req);
+  const hasOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+  if (!hasOverride) {
+    const hasEditAll = req.userPermissions?.includes("action_items:edit:all");
+    const hasEditDept = req.userPermissions?.includes("action_items:edit:dept") && req.user?.departmentId === existing.departmentId;
+    const hasEditOwn = req.userPermissions?.includes("action_items:edit:own") && (existing.assignedToId === req.user?.userId || existing.meeting?.organizerId === req.user?.userId);
 
     if (!hasEditAll && !hasEditDept && !hasEditOwn) {
       return res.status(403).json({ error: "You do not have permission to edit this action item." });
@@ -177,7 +168,7 @@ router.put("/:id", async (req: AuthedRequest, res) => {
     });
   }
 
-  if (existing.meeting && req.user?.roleCode !== "SYSTEM_ADMIN") {
+  if (existing.meeting && !hasOverride) {
     if (existing.meeting.status === "COMPLETED" || existing.meeting.status === "APPROVED") {
       const { priority, deadline, title, description, assignedToId } = parsed.data;
       if (
@@ -245,9 +236,11 @@ router.delete(
       });
     }
 
-    if (existing.meeting && isLockedMeetingStatus(existing.meeting.status) && req.user?.roleCode !== "SYSTEM_ADMIN") {
+    await ensureUserPermissions(req);
+    const hasDeleteOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+    if (existing.meeting && isLockedMeetingStatus(existing.meeting.status) && !hasDeleteOverride) {
       return res.status(403).json({
-        error: `Meeting is locked (${existing.meeting.status.replace("_", " ")}). Cannot delete action items unless authorized by Super Admin.`,
+        error: `Meeting is locked (${existing.meeting.status.replace("_", " ")}). Cannot delete action items unless authorized with ADMIN_OVERRIDE permission.`,
       });
     }
 
