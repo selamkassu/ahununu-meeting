@@ -207,13 +207,19 @@ router.get("/", async (req: AuthedRequest, res) => {
 
     if (!canViewAll) {
       if (canViewDept && req.user.departmentId && mine !== "true") {
-        // Enforce user's department and override any requested departmentId
+        // Enforce user's department or meetings they are participating in
         for (let i = conditions.length - 1; i >= 0; i--) {
           if (conditions[i].departmentId) {
             conditions.splice(i, 1);
           }
         }
-        conditions.push({ departmentId: req.user.departmentId });
+        conditions.push({
+          OR: [
+            { departmentId: req.user.departmentId },
+            { organizerId: req.user.userId },
+            { participants: { some: { userId: req.user.userId } } },
+          ],
+        });
       } else {
         conditions.push({
           OR: [

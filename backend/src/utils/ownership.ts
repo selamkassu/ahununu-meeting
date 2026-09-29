@@ -58,14 +58,26 @@ export function checkOwnershipAccess(
   if (!tier) return false;
   if (tier === "all") return true;
 
+  const isOwner = !!(record.ownerId && record.ownerId === req.user.userId);
+  const isParticipant = !!(record.participantIds && record.participantIds.includes(req.user.userId));
+  const isSameDept = !!(req.user.departmentId && record.departmentId === req.user.departmentId);
+
+  // If viewing, being either the owner or an invited participant grants access
+  if (action === "view" && (isOwner || isParticipant)) {
+    return true;
+  }
+
+  // If editing/updating their own created record
+  if (isOwner) {
+    return true;
+  }
+
   if (tier === "dept") {
-    return !!(req.user.departmentId && record.departmentId === req.user.departmentId);
+    return isSameDept;
   }
 
   if (tier === "own") {
-    if (record.ownerId && record.ownerId === req.user.userId) return true;
-    if (record.participantIds && record.participantIds.includes(req.user.userId)) return true;
-    return false;
+    return isOwner || (action === "view" && isParticipant);
   }
 
   return false;
