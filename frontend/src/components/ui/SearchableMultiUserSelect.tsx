@@ -16,7 +16,7 @@ export function SearchableMultiUserSelect({
   users,
   selectedUserIds,
   onChange,
-  placeholder = "Search and select attendees...",
+  placeholder = "Type name, department, role, or email to search...",
   className = "",
   disabled = false,
 }: SearchableMultiUserSelectProps) {
@@ -25,7 +25,7 @@ export function SearchableMultiUserSelect({
   const [selectedDeptFilter, setSelectedDeptFilter] = useState<string>("ALL");
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Map of users for fast ID lookup
   const userMap = useMemo(() => {
@@ -54,7 +54,6 @@ export function SearchableMultiUserSelect({
   const filteredUsers = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return users.filter((u) => {
-      // Department filter check
       if (selectedDeptFilter !== "ALL" && u.department?.name !== selectedDeptFilter) {
         return false;
       }
@@ -82,26 +81,25 @@ export function SearchableMultiUserSelect({
     };
   }, [isOpen]);
 
-  // Auto-focus search input when dropdown opens
-  useEffect(() => {
-    if (isOpen) {
-      setSearchQuery("");
-      setTimeout(() => {
-        searchInputRef.current?.focus();
-      }, 50);
-    }
-  }, [isOpen]);
-
-  // Escape key listener
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen) {
-        setIsOpen(false);
+  // Keyboard navigation & Backspace deletion
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Backspace" && searchQuery === "" && selectedUserIds.length > 0) {
+      // Remove the last selected participant
+      onChange(selectedUserIds.slice(0, -1));
+    } else if (e.key === "Escape") {
+      setIsOpen(false);
+    } else if (e.key === "ArrowDown" && !isOpen) {
+      setIsOpen(true);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      // If there is an exact or first matching user, toggle them
+      if (filteredUsers.length > 0) {
+        const target = filteredUsers[0];
+        toggleUser(target.id);
+        setSearchQuery("");
       }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen]);
+    }
+  };
 
   const toggleUser = (userId: string) => {
     if (selectedUserIds.includes(userId)) {
@@ -111,14 +109,15 @@ export function SearchableMultiUserSelect({
     }
   };
 
-  const removeUser = (userId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const removeUser = (userId: string) => {
     onChange(selectedUserIds.filter((id) => id !== userId));
   };
 
   const clearAll = (e: React.MouseEvent) => {
     e.stopPropagation();
     onChange([]);
+    setSearchQuery("");
+    inputRef.current?.focus();
   };
 
   const selectAllFiltered = () => {
@@ -134,18 +133,15 @@ export function SearchableMultiUserSelect({
 
   return (
     <div ref={containerRef} className={`relative ${className}`}>
-      {/* Trigger Box */}
+      {/* Searchable Input Container Box */}
       <div
-        role="button"
-        tabIndex={disabled ? -1 : 0}
-        onClick={() => !disabled && setIsOpen(!isOpen)}
-        onKeyDown={(e) => {
-          if (!disabled && (e.key === "Enter" || e.key === " ")) {
-            e.preventDefault();
-            setIsOpen(!isOpen);
+        onClick={() => {
+          if (!disabled) {
+            inputRef.current?.focus();
+            setIsOpen(true);
           }
         }}
-        className={`w-full min-h-[44px] rounded-lg border bg-white px-3 py-1.5 text-sm flex items-center justify-between gap-2 cursor-pointer transition-all ${
+        className={`w-full min-h-[46px] rounded-lg border bg-white px-2.5 py-1.5 text-sm flex items-center justify-between gap-1.5 cursor-text transition-all ${
           disabled
             ? "opacity-60 cursor-not-allowed bg-slate2-50 border-slate2-200"
             : isOpen
@@ -153,98 +149,125 @@ export function SearchableMultiUserSelect({
             : "border-slate2-200 hover:border-slate2-300"
         }`}
       >
-        <div className="flex-1 min-w-0">
-          {selectedUsers.length === 0 ? (
-            <div className="flex items-center gap-2 text-slate2-400 py-1">
-              <Users size={15} className="text-slate2-400 shrink-0" />
-              <span className="truncate">{placeholder}</span>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-1.5 max-h-24 overflow-y-auto py-0.5">
-              {selectedUsers.map((u) => (
-                <span
-                  key={u.id}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-brand/10 border border-brand/20 pl-1.5 pr-2 py-0.5 text-xs font-medium text-brand-dark transition-all hover:bg-brand/15"
-                >
-                  <span
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white shadow-2xs"
-                    style={{ backgroundColor: u.avatarColor || "#0B7A6B" }}
-                  >
-                    {u.name.charAt(0).toUpperCase()}
-                  </span>
-                  <span className="max-w-[130px] truncate text-[11px] font-semibold text-slate2-800">
-                    {u.name}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(e) => removeUser(u.id, e)}
-                    className="text-slate2-400 hover:text-rose-600 rounded-full p-0.5 transition-colors"
-                    title={`Remove ${u.name}`}
-                  >
-                    <X size={11} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
+        <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
+          {/* Selected user chips */}
+          {selectedUsers.map((u) => (
+            <span
+              key={u.id}
+              className="inline-flex items-center gap-1.5 rounded-full bg-brand/10 border border-brand/20 pl-1.5 pr-2 py-0.5 text-xs font-medium text-brand-dark transition-all hover:bg-brand/15 shrink-0"
+            >
+              <span
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white shadow-2xs"
+                style={{ backgroundColor: u.avatarColor || "#0B7A6B" }}
+              >
+                {u.name.charAt(0).toUpperCase()}
+              </span>
+              <span className="max-w-[120px] truncate text-[11px] font-semibold text-slate2-800">
+                {u.name}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeUser(u.id);
+                }}
+                className="text-slate2-400 hover:text-rose-600 rounded-full p-0.5 transition-colors"
+                title={`Remove ${u.name}`}
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ))}
+
+          {/* Direct Search Input */}
+          <div className="flex-1 min-w-[150px] flex items-center gap-1.5">
+            {selectedUsers.length === 0 && !searchQuery && (
+              <Search size={14} className="text-slate2-400 shrink-0 pointer-events-none" />
+            )}
+            <input
+              ref={inputRef}
+              type="text"
+              disabled={disabled}
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (!isOpen) setIsOpen(true);
+              }}
+              onFocus={() => setIsOpen(true)}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                selectedUsers.length === 0
+                  ? placeholder
+                  : "Type to search more..."
+              }
+              className="w-full border-0 bg-transparent p-0.5 text-xs text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:ring-0"
+            />
+          </div>
         </div>
 
-        {/* Right Action Icons */}
-        <div className="flex items-center gap-1.5 shrink-0 text-slate2-400">
+        {/* Right Action Icons: Counter, Clear, Dropdown Chevron */}
+        <div className="flex items-center gap-1 shrink-0 text-slate2-400 ml-1">
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSearchQuery("");
+                inputRef.current?.focus();
+              }}
+              className="p-1 rounded text-slate2-400 hover:text-slate2-600"
+              title="Clear search text"
+            >
+              <X size={12} />
+            </button>
+          )}
+
           {selectedUsers.length > 0 && !disabled && (
             <>
-              <span className="rounded-full bg-slate2-100 px-2 py-0.5 text-[11px] font-bold text-slate2-700">
+              <span className="rounded-full bg-slate2-100 px-2 py-0.5 text-[10px] font-bold text-slate2-700">
                 {selectedUsers.length}
               </span>
               <button
                 type="button"
                 onClick={clearAll}
                 className="p-1 rounded-md text-slate2-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-                title="Clear all selected participants"
+                title="Clear all selected"
               >
-                <X size={14} />
+                <X size={13} />
               </button>
-              <span className="h-4 w-px bg-slate2-200" />
+              <span className="h-3.5 w-px bg-slate2-200" />
             </>
           )}
-          <ChevronDown
-            size={16}
-            className={`transition-transform duration-200 ${
-              isOpen ? "rotate-180 text-brand" : "text-slate2-400"
-            }`}
-          />
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!isOpen) {
+                inputRef.current?.focus();
+              }
+              setIsOpen(!isOpen);
+            }}
+            className="p-1 hover:text-slate2-600 transition-colors"
+            title={isOpen ? "Close dropdown" : "Open attendees dropdown"}
+          >
+            <ChevronDown
+              size={15}
+              className={`transition-transform duration-200 ${
+                isOpen ? "rotate-180 text-brand" : "text-slate2-400"
+              }`}
+            />
+          </button>
         </div>
       </div>
 
-      {/* Dropdown Menu */}
+      {/* Dropdown Menu attached directly beneath input */}
       {isOpen && (
         <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-xl border border-slate2-200 bg-white shadow-xl overflow-hidden animate-fadeIn">
-          {/* Search Header */}
-          <div className="p-2.5 border-b border-slate2-100 bg-slate2-50/70 space-y-2">
-            <div className="relative flex items-center">
-              <Search size={14} className="absolute left-3 text-slate2-400 pointer-events-none" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by name, department, role, or email..."
-                className="w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border border-slate2-200 bg-white placeholder:text-slate2-400 focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand transition-all"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery("")}
-                  className="absolute right-2.5 text-slate2-400 hover:text-slate2-600 p-0.5"
-                >
-                  <X size={12} />
-                </button>
-              )}
-            </div>
-
-            {/* Department Filter Pills (if multiple departments) */}
-            {departments.length > 1 && (
-              <div className="flex items-center gap-1 overflow-x-auto pb-0.5 text-[11px]">
+          {/* Department Filter Pills */}
+          {departments.length > 1 && (
+            <div className="p-2 border-b border-slate2-100 bg-slate2-50/70 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1 overflow-x-auto text-[11px] scrollbar-thin">
                 <span className="text-slate2-400 shrink-0 mr-1 flex items-center gap-0.5">
                   <Building2 size={11} /> Dept:
                 </span>
@@ -253,7 +276,7 @@ export function SearchableMultiUserSelect({
                   onClick={() => setSelectedDeptFilter("ALL")}
                   className={`px-2 py-0.5 rounded-full font-medium shrink-0 transition-colors ${
                     selectedDeptFilter === "ALL"
-                      ? "bg-brand text-white"
+                      ? "bg-brand text-white shadow-2xs"
                       : "bg-slate2-100 text-slate2-600 hover:bg-slate2-200"
                   }`}
                 >
@@ -268,7 +291,7 @@ export function SearchableMultiUserSelect({
                       onClick={() => setSelectedDeptFilter(dept)}
                       className={`px-2 py-0.5 rounded-full font-medium shrink-0 transition-colors ${
                         selectedDeptFilter === dept
-                          ? "bg-brand text-white"
+                          ? "bg-brand text-white shadow-2xs"
                           : "bg-slate2-100 text-slate2-600 hover:bg-slate2-200"
                       }`}
                     >
@@ -277,40 +300,49 @@ export function SearchableMultiUserSelect({
                   );
                 })}
               </div>
-            )}
-          </div>
 
-          {/* Action Toolbar */}
-          <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate2-100 bg-slate2-50/50 text-[11px] text-slate2-500">
+              <div className="flex items-center gap-1.5 shrink-0 text-[11px]">
+                <button
+                  type="button"
+                  onClick={selectAllFiltered}
+                  className="text-brand font-semibold hover:underline"
+                >
+                  Select All
+                </button>
+                <span className="text-slate2-300">|</span>
+                <button
+                  type="button"
+                  onClick={deselectAllFiltered}
+                  className="text-slate2-500 hover:text-slate2-700 hover:underline"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Search Info Bar */}
+          <div className="px-3 py-1.5 bg-slate2-50/40 border-b border-slate2-100 flex items-center justify-between text-[11px] text-slate2-500">
             <span>
-              Showing {filteredUsers.length} user{filteredUsers.length !== 1 ? "s" : ""} ·{" "}
+              {searchQuery ? (
+                <>
+                  Matching <strong className="text-slate2-700">"{searchQuery}"</strong> ·{" "}
+                </>
+              ) : null}
+              {filteredUsers.length} attendee{filteredUsers.length !== 1 ? "s" : ""} available
+            </span>
+            <span>
               <strong className="text-slate2-800">{selectedUserIds.length}</strong> selected
             </span>
-            <div className="flex items-center gap-2 font-medium">
-              <button
-                type="button"
-                onClick={selectAllFiltered}
-                className="text-brand hover:underline"
-              >
-                Select All
-              </button>
-              <span className="text-slate2-300">|</span>
-              <button
-                type="button"
-                onClick={deselectAllFiltered}
-                className="text-slate2-500 hover:text-slate2-700 hover:underline"
-              >
-                Clear
-              </button>
-            </div>
           </div>
 
-          {/* User List */}
-          <div className="max-h-56 overflow-y-auto divide-y divide-slate2-50 p-1">
+          {/* Attendees List */}
+          <div className="max-h-60 overflow-y-auto divide-y divide-slate2-50 p-1">
             {filteredUsers.length === 0 ? (
               <div className="p-6 text-center text-xs text-slate2-400">
                 <Users size={24} className="mx-auto mb-1.5 text-slate2-300" />
-                No matching participants found.
+                No attendees match "{searchQuery}"
+                {selectedDeptFilter !== "ALL" ? ` in ${selectedDeptFilter}` : ""}.
               </div>
             ) : (
               filteredUsers.map((u) => {
@@ -319,7 +351,10 @@ export function SearchableMultiUserSelect({
                   <button
                     key={u.id}
                     type="button"
-                    onClick={() => toggleUser(u.id)}
+                    onClick={() => {
+                      toggleUser(u.id);
+                      inputRef.current?.focus();
+                    }}
                     className={`w-full flex items-center justify-between px-3 py-2 text-left rounded-lg text-xs transition-colors ${
                       isSelected
                         ? "bg-brand/10 text-brand-dark"
@@ -377,12 +412,12 @@ export function SearchableMultiUserSelect({
           {/* Footer Bar */}
           <div className="p-2 border-t border-slate2-100 bg-slate2-50/70 flex items-center justify-between">
             <span className="text-[11px] text-slate2-400 pl-1">
-              Click anywhere outside or "Done" to close
+              Press Backspace to delete chip · Esc to close
             </span>
             <button
               type="button"
               onClick={() => setIsOpen(false)}
-              className="rounded-lg bg-brand px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-brand-dark transition-all"
+              className="rounded-lg bg-brand px-3.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-brand-dark transition-all"
             >
               Done ({selectedUserIds.length})
             </button>
