@@ -17,9 +17,15 @@ import { Avatar } from "../ui/Primitives";
 // Map notification types to a user-friendly label
 const TYPE_LABELS: Record<string, string> = {
   MEETING_INVITATION: "Meeting Invitation",
+  MEETING_INVITE: "Meeting Invitation",
   MEETING_UPDATED: "Meeting Updated",
   MEETING_CANCELLED: "Meeting Cancelled",
+  MEETING_SIGN_REQUEST: "Signature Requested",
   ACTION_ITEM_ASSIGNED: "Action Item Assigned",
+  ACTION_ASSIGNED: "Action Item Assigned",
+  ACTION_DUE_SOON: "Action Due Soon",
+  ACTION_OVERDUE: "Action Overdue",
+  DECISION_LOGGED: "Decision Logged",
   MEETING_REMINDER: "Meeting Reminder",
 };
 
@@ -154,16 +160,18 @@ export function Header({
                     </p>
                   </div>
                 ) : (
-                  notifications.slice(0, 10).map((n) => (
+                  notifications.slice(0, 10).map((n) => {
+                    const isCancelled = n.type === "MEETING_CANCELLED";
+                    return (
                     <div
                       key={n.id}
                       className={`group relative px-4 py-3.5 transition-colors hover:bg-slate2-50/80 ${
-                        !n.isRead ? "bg-brand/5" : ""
+                        !n.isRead ? (isCancelled ? "bg-rose-50/50" : "bg-brand/5") : ""
                       }`}
                     >
                       {/* Unread dot indicator */}
                       {!n.isRead && (
-                        <span className="absolute left-1.5 top-4 h-1.5 w-1.5 rounded-full bg-brand" />
+                        <span className={`absolute left-1.5 top-4 h-1.5 w-1.5 rounded-full ${isCancelled ? "bg-rose-500" : "bg-brand"}`} />
                       )}
 
                       <div className="flex items-start justify-between gap-3">
@@ -173,7 +181,9 @@ export function Header({
                             <span
                               className={`text-[10px] font-semibold uppercase tracking-wide ${
                                 !n.isRead
-                                  ? "text-brand"
+                                  ? isCancelled
+                                    ? "text-rose-600 font-bold"
+                                    : "text-brand"
                                   : "text-slate2-400"
                               }`}
                             >
@@ -188,7 +198,9 @@ export function Header({
                           <p
                             className={`text-xs font-semibold leading-snug ${
                               !n.isRead
-                                ? "text-slate2-900"
+                                ? isCancelled
+                                  ? "text-rose-950 font-bold"
+                                  : "text-slate2-900"
                                 : "text-slate2-600"
                             }`}
                           >
@@ -205,7 +217,9 @@ export function Header({
                             <Link
                               to={n.link}
                               onClick={() => setNotifOpen(false)}
-                              className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-brand hover:underline"
+                              className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium ${
+                                isCancelled ? "text-rose-600 hover:text-rose-700" : "text-brand"
+                              } hover:underline`}
                             >
                               <CalendarDays size={11} />
                               View Meeting
@@ -226,8 +240,9 @@ export function Header({
                         )}
                       </div>
                     </div>
-                  ))
-                )}
+                  );
+                })
+              )}
               </div>
 
               {/* Footer */}

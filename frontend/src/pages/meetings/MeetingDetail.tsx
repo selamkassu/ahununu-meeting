@@ -41,7 +41,7 @@ import {
   PenTool,
   Signature,
 } from "lucide-react";
-import { api, ApiError, getToken } from "../../api/client";
+import { api, ApiError, getToken, buildUrl } from "../../api/client";
 import { RichTextEditor } from "../../components/editor/RichTextEditor";
 import { RichTextRenderer } from "../../components/editor/RichTextRenderer";
 import { printMeetingMinutes } from "../../utils/printUtility";
@@ -79,6 +79,7 @@ import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { Toast } from "../../components/ui/Toast";
 import { useAuth } from "../../context/AuthContext";
+import { useNotifications } from "../../context/NotificationContext";
 import { MeetingApprovalModal } from "../../components/meetings/MeetingApprovalModal";
 import { ParticipantSigningModal } from "../../components/meetings/ParticipantSigningModal";
 import { SearchableUserSelect } from "../../components/ui/SearchableUserSelect";
@@ -186,6 +187,7 @@ export default function MeetingDetail() {
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get("tab") as TabKey | null;
   const { user, hasPermission, hasAnyPermission } = useAuth();
+  const { refresh: refreshNotifications } = useNotifications();
   const [meeting, setMeeting] = useState<MeetingDetailType | null>(null);
   const [tab, setTab] = useState<TabKey>(tabParam || "overview");
 
@@ -350,11 +352,21 @@ export default function MeetingDetail() {
       alert("This meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status.");
       return;
     }
+    if (status === "CANCELLED" && meeting.status !== "CANCELLED") {
+      if (!window.confirm("Are you sure you want to cancel this meeting? All participants and the organizer will receive a cancellation notification.")) {
+        return;
+      }
+    }
     try {
       const updated = await api.put<MeetingDetailType>(`/meetings/${id}`, {
         status,
       });
       setMeeting(updated);
+      try {
+        await refreshNotifications();
+      } catch {
+        // ignore
+      }
     } catch (err: any) {
       alert(err.message || "Failed to update status.");
     }
@@ -2577,9 +2589,10 @@ const INLINE_VIEWABLE_EXTS = ["pdf", "png", "jpg", "jpeg", "gif", "webp", "svg",
 
 function buildMeetingDocViewUrl(meetingId: string, docId: string) {
   const token = getToken();
+  const base = buildUrl(`/meetings/${meetingId}/documents/${docId}/view`);
   return token
-    ? `/api/meetings/${meetingId}/documents/${docId}/view?token=${encodeURIComponent(token)}`
-    : `/api/meetings/${meetingId}/documents/${docId}/view`;
+    ? `${base}?token=${encodeURIComponent(token)}`
+    : base;
 }
 
 function InlineDocViewer({
@@ -2727,11 +2740,15 @@ function DocumentsTab({
   const download = async (documentId: string, fileName: string) => {
     try {
       const token = getToken();
+      const downloadUrl = buildUrl(`/meetings/${meeting.id}/documents/${documentId}/download`);
       const response = await fetch(
-        `/api/meetings/${meeting.id}/documents/${documentId}/download`,
+        downloadUrl,
         { headers: token ? { Authorization: `Bearer ${token}` } : {} },
       );
-      if (!response.ok) throw new Error("Download failed");
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => null);
+        throw new Error(errJson?.error || "Download failed");
+      }
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -2743,7 +2760,7 @@ function DocumentsTab({
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
       console.error("Download error:", err);
-      setError("Failed to download file");
+      setError(err.message || "Failed to download file");
     }
   };
 

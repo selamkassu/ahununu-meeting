@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { FileText, Eye, Download, X, ExternalLink } from "lucide-react";
-import { api, getToken } from "../api/client";
+import { api, getToken, buildUrl } from "../api/client";
 import type { DocumentItem } from "../types";
 import { Card, CardHeader, EmptyState, CodeChip } from "../components/ui/Primitives";
 
@@ -21,9 +21,10 @@ function getExt(fileName: string) {
 
 function buildViewUrl(meetingId: string, docId: string) {
   const token = getToken();
+  const baseViewUrl = buildUrl(`/meetings/${meetingId}/documents/${docId}/view`);
   return token
-    ? `/api/meetings/${meetingId}/documents/${docId}/view?token=${encodeURIComponent(token)}`
-    : `/api/meetings/${meetingId}/documents/${docId}/view`;
+    ? `${baseViewUrl}?token=${encodeURIComponent(token)}`
+    : baseViewUrl;
 }
 
 async function triggerDownload(
@@ -34,11 +35,15 @@ async function triggerDownload(
 ) {
   try {
     const token = getToken();
+    const downloadUrl = buildUrl(`/meetings/${meetingId}/documents/${docId}/download`);
     const res = await fetch(
-      `/api/meetings/${meetingId}/documents/${docId}/download`,
+      downloadUrl,
       { headers: token ? { Authorization: `Bearer ${token}` } : {} },
     );
-    if (!res.ok) throw new Error("Download failed");
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => null);
+      throw new Error(errJson?.error || "Download failed");
+    }
     const blob = await res.blob();
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -48,8 +53,8 @@ async function triggerDownload(
     a.click();
     document.body.removeChild(a);
     window.URL.revokeObjectURL(url);
-  } catch {
-    onError("Failed to download file.");
+  } catch (err: any) {
+    onError(err.message || "Failed to download file.");
   }
 }
 

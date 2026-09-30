@@ -1,13 +1,13 @@
 const TOKEN_KEY = "ahununu_token";
 const rawBase = (import.meta.env.VITE_API_URL || "").trim();
 
-function getApiBaseUrl(): string {
+export function getApiBaseUrl(): string {
   if (!rawBase) return "/api";
   const cleanBase = rawBase.replace(/\/+$/, "");
   return cleanBase.endsWith("/api") ? cleanBase : `${cleanBase}/api`;
 }
 
-function buildUrl(path: string): string {
+export function buildUrl(path: string): string {
   const base = getApiBaseUrl();
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${cleanPath}`;

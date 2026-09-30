@@ -571,6 +571,19 @@ router.get("/documents-overview/all", async (req: AuthedRequest, res) => {
 // ---------- Documents (real file upload) ----------
 const uploadDir = path.join(process.cwd(), "uploads");
 fs.mkdirSync(uploadDir, { recursive: true });
+
+function resolveFilePath(storedName: string): string {
+  const candidates = [
+    path.join(__dirname, "../../uploads", storedName),
+    path.join(process.cwd(), "uploads", storedName),
+    path.join(process.cwd(), "backend", "uploads", storedName),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return path.join(uploadDir, storedName);
+}
+
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
   filename: (_req, file, cb) => {
@@ -667,7 +680,7 @@ router.get(
       return res.status(403).json({ error: "You do not have permission to download this document outside your ownership scope." });
     }
 
-    const filePath = path.join(uploadDir, doc.storedName);
+    const filePath = resolveFilePath(doc.storedName);
     if (!fs.existsSync(filePath))
       return res.status(404).json({ error: "File is no longer available." });
     res.download(filePath, doc.fileName);
@@ -705,7 +718,7 @@ router.get(
       return res.status(403).json({ error: "You do not have permission to view this document outside your ownership scope." });
     }
 
-    const filePath = path.join(uploadDir, doc.storedName);
+    const filePath = resolveFilePath(doc.storedName);
     if (!fs.existsSync(filePath))
       return res.status(404).json({ error: "File is no longer available." });
     // Serve inline so browser can preview PDFs, images, etc.
@@ -744,7 +757,7 @@ router.delete(
     }
 
     if (doc.storedName) {
-      const filePath = path.join(uploadDir, doc.storedName);
+      const filePath = resolveFilePath(doc.storedName);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
     await prisma.document.delete({ where: { id: doc.id } });
@@ -861,6 +874,60 @@ router.put(
       data: dataToUpdate,
       include: detailInclude,
     });
+
+    // Notify participants and organizer if meeting status was transitioned to CANCELLED
+    if (existing.status !== "CANCELLED" && status === "CANCELLED") {
+      try {
+        const userIdsToNotify = new Set<string>();
+
+        if (meeting.participants && Array.isArray(meeting.participants)) {
+          for (const p of meeting.participants) {
+            if (p.userId) userIdsToNotify.add(p.userId);
+          }
+        }
+
+        if (meeting.organizerId) {
+          userIdsToNotify.add(meeting.organizerId);
+        }
+
+        if (meeting.actionItems && Array.isArray(meeting.actionItems)) {
+          for (const a of meeting.actionItems) {
+            if (a.assignedToId) userIdsToNotify.add(a.assignedToId);
+          }
+        }
+
+        const meetingDate = new Date(meeting.date).toLocaleDateString("en-US", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        });
+
+        const timeRange =
+          meeting.startTime && meeting.endTime
+            ? ` from ${meeting.startTime} to ${meeting.endTime}`
+            : "";
+
+        const notifications = Array.from(userIdsToNotify).map((userId) => ({
+          userId,
+          meetingId: meeting.id,
+          type: "MEETING_CANCELLED",
+          title: "Meeting Cancelled",
+          message: `The meeting "${meeting.title}" (${meeting.code}) scheduled for ${meetingDate}${timeRange} has been cancelled.`,
+          link: `/meetings/${meeting.id}`,
+          isRead: false,
+        }));
+
+        if (notifications.length > 0) {
+          await prisma.notification.createMany({
+            data: notifications,
+          });
+        }
+      } catch (notifErr) {
+        console.error("Failed to generate cancellation notifications:", notifErr);
+      }
+    }
+
     res.json(meeting);
   } catch {
     res.status(404).json({ error: "Meeting not found." });
