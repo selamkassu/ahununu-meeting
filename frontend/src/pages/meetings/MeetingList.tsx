@@ -14,7 +14,7 @@ import { api } from "../../api/client";
 import type { MeetingListItem, Department } from "../../types";
 import { Card, EmptyState, Button, inputClass, Avatar } from "../../components/ui/Primitives";
 import { CodeChip } from "../../components/ui/Primitives";
-import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
+import { StatusBadge, PriorityBadge, ForceApprovedBadge } from "../../components/ui/Badge";
 import { useAuth } from "../../context/AuthContext";
 import MeetingCreateModal from "./MeetingCreateModal";
 
@@ -107,7 +107,7 @@ export default function MeetingList() {
   const filteredMeetings = useMemo(() => {
     let result = meetings;
     if (status === "FORCE_APPROVED") {
-      result = result.filter((m) => m.forceApproved === true);
+      result = result.filter((m) => m.forceApproved === true || Boolean(m.bypassReason));
     } else if (status) {
       result = result.filter((m) => m.status === status);
     }
@@ -123,8 +123,8 @@ export default function MeetingList() {
       const matchBypassReason = m.bypassReason?.toLowerCase().includes(query);
       const matchStatus = m.status?.toLowerCase().includes(query);
       const matchForce =
-        m.forceApproved &&
-        ("force approved".includes(query) || "override".includes(query) || "force".includes(query));
+        (m.forceApproved || Boolean(m.bypassReason)) &&
+        ("force approved".includes(query) || "override".includes(query) || "force".includes(query) || "administrative override".includes(query));
       const matchParticipant = m.participants?.some((p) =>
         p.user?.name?.toLowerCase().includes(query)
       );
@@ -227,9 +227,10 @@ export default function MeetingList() {
                 {items.map((m) => (
                   <Link key={m.id} to={`/meetings/${m.id}`} className="block">
                     <Card
-                      className={`flex flex-col gap-3 p-4 transition-all hover:shadow-md sm:flex-row sm:items-center sm:justify-between ${m.forceApproved
-                        ? "border-l-4 border-l-amber-500 bg-linear-to-r from-amber-50/20 to-white"
-                        : ""
+                      className={`flex flex-col gap-3 p-4 transition-all hover:shadow-md sm:flex-row sm:items-center sm:justify-between ${
+                        (m.forceApproved || Boolean(m.bypassReason))
+                          ? "border-l-4 border-l-amber-500 bg-linear-to-r from-amber-50/20 to-white"
+                          : ""
                         }`}
                     >
                       <div className="flex-1 min-w-0">
@@ -289,26 +290,27 @@ export default function MeetingList() {
                           {/* Approval Status Indicator in metadata */}
                           {m.approvedBy && (
                             <span
-                              className={`inline-flex items-center gap-1 font-medium ${m.forceApproved ? "text-amber-800" : "text-brand"
-                                }`}
+                              className={`inline-flex items-center gap-1 font-medium ${
+                                (m.forceApproved || Boolean(m.bypassReason)) ? "text-amber-800" : "text-brand"
+                              }`}
                               title={m.approvedAt ? `Formally certified on ${new Date(m.approvedAt).toLocaleString()}` : undefined}
                             >
-                              <ShieldCheck size={13} className={m.forceApproved ? "text-amber-600" : "text-brand"} />
-                              <span>{m.forceApproved ? "Force certified by" : "Approved by"} {m.approvedBy.name}</span>
+                              <ShieldCheck size={13} className={(m.forceApproved || Boolean(m.bypassReason)) ? "text-amber-600" : "text-brand"} />
+                              <span>{(m.forceApproved || Boolean(m.bypassReason)) ? "Force certified by" : "Approved by"} {m.approvedBy.name}</span>
                             </span>
                           )}
                         </div>
 
-                        {/* Dedicated Administrative Override Notice if Force Approved */}
-                        {m.forceApproved && (
-                          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50/90 border border-amber-200/80 px-2.5 py-1 text-xs text-amber-900">
-                            <div className="flex items-center gap-1 font-semibold text-amber-900 shrink-0">
-                              <AlertTriangle size={13} className="text-amber-600 shrink-0" />
-                              <span>Administrative Override:</span>
+                        {/* Dedicated Administrative Override Notice when an Admin / Force Override is performed */}
+                        {(m.forceApproved || Boolean(m.bypassReason)) && (
+                          <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-xs text-amber-900 shadow-2xs">
+                            <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
+                            <div className="flex-1 min-w-0 leading-relaxed">
+                              <span className="font-bold text-amber-950">Administrative Override: </span>
+                              <span className="text-amber-900 font-medium">
+                                {m.bypassReason || "Administrative override: approved before all attendee signatures collected"}
+                              </span>
                             </div>
-                            <span className="text-amber-800 line-clamp-1">
-                              {m.bypassReason || "Approved before all participant pre-signatures were collected"}
-                            </span>
                           </div>
                         )}
                       </div>
@@ -319,6 +321,9 @@ export default function MeetingList() {
                           <span>{m.startTime} – {m.endTime}</span>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+                          {(m.forceApproved || Boolean(m.bypassReason)) && (
+                            <ForceApprovedBadge reason={m.bypassReason || "Administrative override: approved before all attendee signatures collected"} />
+                          )}
                           <PriorityBadge priority={m.priority} />
                           <StatusBadge status={m.status} />
                         </div>

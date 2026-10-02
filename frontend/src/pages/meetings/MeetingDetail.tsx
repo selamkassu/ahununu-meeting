@@ -78,7 +78,7 @@ import {
   CodeChip,
   EmptyState,
 } from "../../components/ui/Primitives";
-import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
+import { StatusBadge, PriorityBadge, ForceApprovedBadge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { Toast } from "../../components/ui/Toast";
 import { useAuth } from "../../context/AuthContext";
@@ -635,13 +635,8 @@ export default function MeetingDetail() {
                       Admin Override
                     </span>
                   )}
-                  {meeting.forceApproved && (
-                    <span
-                      className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300 shadow-2xs"
-                      title={meeting.bypassReason || "Approved with force submit override"}
-                    >
-                      Force Approved
-                    </span>
+                  {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
+                    <ForceApprovedBadge reason={meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"} />
                   )}
                   <PriorityBadge priority={meeting.priority} />
                   {meeting.status === "APPROVED" && !hasAdminOverride ? (
@@ -790,6 +785,19 @@ export default function MeetingDetail() {
               </div>
             </div>
           </div>
+
+          {/* Dedicated Administrative Override Notice in Detail Card */}
+          {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-xs text-amber-900 shadow-2xs">
+              <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
+              <div className="flex-1 min-w-0 leading-relaxed">
+                <span className="font-bold text-amber-950">Administrative Override: </span>
+                <span className="text-amber-900 font-medium">
+                  {meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </Card>
 
@@ -862,6 +870,17 @@ export default function MeetingDetail() {
                         />
                       </div>
                     )}
+                  </div>
+                )}
+                {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
+                  <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-100/90 border border-amber-300 px-3 py-2 text-xs text-amber-950 shadow-2xs">
+                    <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
+                    <div className="flex-1 min-w-0 leading-relaxed">
+                      <span className="font-bold text-amber-950">Administrative Override: </span>
+                      <span className="text-amber-950 font-medium">
+                        {meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"}
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1987,7 +2006,7 @@ function MinutesTab({
                   <span className="rounded-full bg-brand/15 text-brand px-2.5 py-0.5 text-[10px] font-bold tracking-wide uppercase">
                     Locked & Verified
                   </span>
-                  {meeting.forceApproved && (
+                  {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
                     <span className="rounded-full bg-amber-100 border border-amber-300 text-amber-800 px-2.5 py-0.5 text-[10px] font-bold tracking-wide uppercase">
                       Admin Force Approved (Override)
                     </span>
@@ -2003,17 +2022,15 @@ function MinutesTab({
                     {new Date(meeting.approvedAt).toLocaleString()}
                   </p>
                 )}
-                {meeting.forceApproved && (
-                  <div className="text-xs text-amber-900 bg-amber-50/90 border border-amber-200/90 rounded-md p-2 mt-1 max-w-xl">
-                    <p className="font-semibold text-amber-950">Administrative Override Notice:</p>
-                    <p className="text-amber-800/90 mt-0.5">
-                      This meeting was certified by the administrator before all participant pre-signatures were collected.
-                    </p>
-                    {meeting.bypassReason && (
-                      <p className="mt-1 text-[11px] text-amber-900 font-medium">
-                        <strong>Reason:</strong> {meeting.bypassReason}
-                      </p>
-                    )}
+                {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
+                  <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-300 p-3 text-xs text-amber-900 shadow-2xs max-w-xl">
+                    <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
+                    <div className="flex-1 min-w-0 leading-relaxed">
+                      <span className="font-bold text-amber-950">Administrative Override: </span>
+                      <span className="text-amber-900 font-medium">
+                        {meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"}
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
