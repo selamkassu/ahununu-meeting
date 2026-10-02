@@ -429,7 +429,19 @@ export default function MeetingDetail() {
         {}
       );
       setMeeting(updated);
+      setPageToast({
+        message: "Digital signature collection initiated.",
+        type: "success",
+      });
+      try {
+        await refreshNotifications();
+      } catch {}
     } catch (err: any) {
+      // Re-fetch latest meeting state from server to guarantee sync
+      try {
+        const fresh = await api.get<MeetingDetailType>(`/meetings/${id}`);
+        if (fresh) setMeeting(fresh);
+      } catch {}
       await alert({
         title: "Signature Initiation Failed",
         message: err.message || "Failed to initiate participant signatures.",
@@ -1028,6 +1040,7 @@ export default function MeetingDetail() {
           canApprove={canApprove}
           onApproveClick={() => setIsApprovalModalOpen(true)}
           onRequestSignaturesClick={handleRequestSignatures}
+          requestingSignatures={requestingSignatures}
           onParticipantSignClick={() => setIsParticipantSignModalOpen(true)}
           isEligibleSigner={isEligibleSigner}
           hasUserSigned={hasUserSigned}
@@ -1832,6 +1845,7 @@ function MinutesTab({
   canApprove,
   onApproveClick,
   onRequestSignaturesClick,
+  requestingSignatures,
   onParticipantSignClick,
   isEligibleSigner,
   hasUserSigned,
@@ -1845,6 +1859,7 @@ function MinutesTab({
   canApprove?: boolean;
   onApproveClick?: () => void;
   onRequestSignaturesClick?: () => void;
+  requestingSignatures?: boolean;
   onParticipantSignClick?: () => void;
   isEligibleSigner?: boolean;
   hasUserSigned?: boolean;
@@ -2155,9 +2170,10 @@ function MinutesTab({
             variant="secondary"
             type="button"
             onClick={onRequestSignaturesClick}
-            className="border-brand/30 text-brand hover:bg-brand/10 text-xs py-1.5 px-3 shrink-0 inline-flex items-center gap-1.5 font-medium bg-white"
+            disabled={requestingSignatures}
+            className="border-brand/30 text-brand hover:bg-brand/10 text-xs py-1.5 px-3 shrink-0 inline-flex items-center gap-1.5 font-medium bg-white disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Signature size={13} /> Request Participant Signatures
+            <Signature size={13} /> {requestingSignatures ? "Requesting Signatures..." : "Request Participant Signatures"}
           </Button>
         </div>
       )}

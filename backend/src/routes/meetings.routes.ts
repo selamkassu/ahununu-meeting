@@ -1133,11 +1133,18 @@ router.delete(
 
 // ---------- Signing Workflow ----------
 
-// POST /:id/request-signatures  — move meeting to PENDING_SIGNATURES phase
+// POST /:id/request-signatures  — move meeting to PENDING_SIGNATURES phase (idempotent)
 router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
   const meeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
-    select: { id: true, status: true, organizerId: true, title: true, participants: { select: { userId: true } } },
+    select: {
+      id: true,
+      status: true,
+      organizerId: true,
+      title: true,
+      participants: { select: { userId: true } },
+      participantSignatures: { select: { userId: true } },
+    },
   });
   if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
@@ -1146,8 +1153,15 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
 
   if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
   if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot request signatures for a cancelled meeting." });
-  if (meeting.status === "PENDING_SIGNATURES") return res.status(400).json({ error: "Signatures already being collected." });
-  if (meeting.status === "READY_FOR_APPROVAL") return res.status(400).json({ error: "All signatures already collected." });
+
+  // If already ready for approval, return current meeting state cleanly
+  if (meeting.status === "READY_FOR_APPROVAL") {
+    const fullMeeting = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      include: detailInclude,
+    });
+    return res.json(fullMeeting);
+  }
 
   const updated = await (prisma.meeting as any).update({
     where: { id: req.params.id },
@@ -1155,9 +1169,10 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
     include: detailInclude,
   });
 
-  // Notify all participants via in-app notification only (NO email dispatched for signature requests)
+  // Notify participants who haven't signed yet via in-app notification only (NO email dispatched for signature requests)
+  const signedUserIds = new Set((meeting.participantSignatures || []).map((s: any) => s.userId));
   const notifData = meeting.participants
-    .filter(p => p.userId !== req.user!.userId)
+    .filter(p => p.userId !== req.user!.userId && !signedUserIds.has(p.userId))
     .map(p => ({
       userId: p.userId,
       meetingId: meeting.id,
