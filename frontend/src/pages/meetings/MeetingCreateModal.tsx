@@ -114,6 +114,7 @@ export default function MeetingCreateModal({
   const [users, setUsers] = useState<User[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attemptedSubmit, setAttemptedSubmit] = useState(false);
 
   useEffect(() => {
     api.get<User[]>("/users").then(setUsers).catch(() => {});
@@ -230,10 +231,16 @@ export default function MeetingCreateModal({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAttemptedSubmit(true);
     setError(null);
 
     if (!title.trim() || !departmentId) {
       setError("Title and department are required.");
+      return;
+    }
+
+    if (!participantIds || participantIds.length === 0) {
+      setError("Please select at least one participant to schedule the meeting.");
       return;
     }
 
@@ -440,13 +447,25 @@ export default function MeetingCreateModal({
           </Field>
         </div>
 
-        <Field label="Participants" hint="Search and multi-select attendees to invite">
-          <SearchableMultiUserSelect
-            users={users}
-            selectedUserIds={participantIds}
-            onChange={setParticipantIds}
-            placeholder="Search attendees by name, department, role, or email..."
-          />
+        <Field
+          label="Participants"
+          required
+          hint="Search and multi-select attendees to invite"
+          error={attemptedSubmit && participantIds.length === 0 ? "Please select at least one participant to schedule the meeting." : null}
+        >
+          <div className={attemptedSubmit && participantIds.length === 0 ? "rounded-lg ring-2 ring-danger/40 transition-all" : ""}>
+            <SearchableMultiUserSelect
+              users={users}
+              selectedUserIds={participantIds}
+              onChange={(ids) => {
+                setParticipantIds(ids);
+                if (ids.length > 0 && error === "Please select at least one participant to schedule the meeting.") {
+                  setError(null);
+                }
+              }}
+              placeholder="Search attendees by name, department, role, or email..."
+            />
+          </div>
         </Field>
 
         <Field label="Agenda items">

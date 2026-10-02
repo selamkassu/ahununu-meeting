@@ -320,7 +320,7 @@ const createSchema = z.object({
   onlineLink: z.string().optional(),
   priority: z.enum(PRIORITIES).default("MEDIUM"),
   departmentId: z.string().min(1),
-  participantIds: z.array(z.string()).default([]),
+  participantIds: z.array(z.string()).min(1, "Please select at least one participant to schedule the meeting."),
   agendaItems: z
     .array(
       z.object({
@@ -339,12 +339,21 @@ router.post(
   async (req: AuthedRequest, res) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {
+      const issues = parsed.error.issues;
+      const participantIssue = issues.find((i) => i.path.includes("participantIds"));
       return res.status(400).json({
-        error: "Check the meeting title, date, time and department.",
+        error: participantIssue?.message || "Check the meeting title, date, time, department, and participants.",
         details: parsed.error.flatten(),
       });
     }
     const data = parsed.data;
+
+    // Strict validation: At least one participant required to schedule the meeting
+    if (!data.participantIds || data.participantIds.length === 0) {
+      return res.status(400).json({
+        error: "Please select at least one participant to schedule the meeting.",
+      });
+    }
 
     // Strict validation: Start time and End time format
     const startParsed = parseTimeString(data.startTime);
