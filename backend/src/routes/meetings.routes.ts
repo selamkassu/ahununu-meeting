@@ -15,10 +15,8 @@ import {
 import { checkOwnershipAccess, ensureUserPermissions } from "../utils/ownership";
 import { makeCode } from "../utils/codes";
 import {
-  sendMeetingCreatedEmail,
   sendMeetingInvitationEmail,
   sendMeetingCancellationEmail,
-  sendRsvpResponseEmail,
 } from "../utils/email";
 
 const router = Router();
@@ -432,48 +430,36 @@ router.post(
       });
     }
 
-    // Send emails in background sequentially to preserve connection stability & reliability
+    // Send invitation emails strictly to invited attendees (excluding the organizer / creator)
     (async () => {
       try {
         const organizer = await prisma.user.findUnique({
           where: { id: req.user!.userId },
-          select: { name: true, email: true },
+          select: { id: true, name: true, email: true },
         });
         const meetingDateStr = new Date(meeting.date).toLocaleDateString("en-US", {
           weekday: "long", year: "numeric", month: "long", day: "numeric",
         });
 
-        // 1. Send Meeting Created confirmation to Organizer
-        if (organizer?.email) {
-          try {
-            await sendMeetingCreatedEmail({
-              toEmail: organizer.email,
-              toName: organizer.name || "Organizer",
-              meetingTitle: meeting.title,
-              meetingDate: meetingDateStr,
-              startTime: meeting.startTime,
-              endTime: meeting.endTime,
-              location: meeting.location || undefined,
-              meetingId: meeting.id,
-              participantCount: data.participantIds.length,
-            });
-          } catch (orgErr: any) {
-            console.error("[Email] Failed organizer confirmation email:", orgErr?.message || orgErr);
-          }
-        }
+        // Send Invitation email strictly to invited attendees (never to the organizer/creator)
+        const invitedIds = (data.participantIds || []).filter(
+          (id) => id !== req.user!.userId && id !== organizer?.id
+        );
 
-        // 2. Send Invitation email to each invited participant sequentially
-        if (data.participantIds && data.participantIds.length > 0) {
+        if (invitedIds.length > 0) {
           const invitedUsers = await prisma.user.findMany({
-            where: { id: { in: data.participantIds } },
+            where: { id: { in: invitedIds } },
             select: { id: true, name: true, email: true },
           });
 
           console.log(`[Meeting Create] Initiating invitation emails for ${invitedUsers.length} attendee(s)...`);
 
           for (const u of invitedUsers) {
-            if (!u.email) {
-              console.warn(`[Meeting Create] Participant "${u.name}" has NO email configured — skipping invitation email.`);
+            if (
+              !u.email ||
+              u.id === req.user!.userId ||
+              (organizer?.email && u.email.trim().toLowerCase() === organizer.email.trim().toLowerCase())
+            ) {
               continue;
             }
 
@@ -502,7 +488,7 @@ router.post(
           }
         }
       } catch (err: any) {
-        console.error("[Meeting Create] Email notification loop failed:", err?.message || err);
+        console.error("[Meeting Create] Email invitation loop failed:", err?.message || err);
       }
     })();
 
@@ -1065,16 +1051,18 @@ router.put(
       }
     }
 
-    // ── Email: Cancellation — sent to ALL participants who received an invite ──
+    // ── Email: Cancellation — sent to participants (excluding the user cancelling) ──
     if (existing.status !== "CANCELLED" && status === "CANCELLED") {
       const cancelledByUser = await prisma.user.findUnique({
         where: { id: req.user!.userId },
-        select: { name: true },
+        select: { name: true, email: true },
       });
       const allRecipientIds = new Set<string>();
-      if (meeting.organizerId) allRecipientIds.add(meeting.organizerId);
+      if (meeting.organizerId && meeting.organizerId !== req.user!.userId) allRecipientIds.add(meeting.organizerId);
       if (meeting.participants && Array.isArray(meeting.participants)) {
-        for (const p of meeting.participants) { if (p.userId) allRecipientIds.add(p.userId); }
+        for (const p of meeting.participants) {
+          if (p.userId && p.userId !== req.user!.userId) allRecipientIds.add(p.userId);
+        }
       }
       const cancelRecipients = await prisma.user.findMany({
         where: { id: { in: Array.from(allRecipientIds) } },
@@ -1084,7 +1072,9 @@ router.put(
         weekday: "long", year: "numeric", month: "long", day: "numeric",
       });
       sendMeetingCancellationEmail({
-        recipients: cancelRecipients.filter(u => !!u.email).map(u => ({ email: u.email!, name: u.name || "" })),
+        recipients: cancelRecipients
+          .filter(u => !!u.email && (!cancelledByUser?.email || u.email.trim().toLowerCase() !== cancelledByUser.email.trim().toLowerCase()))
+          .map(u => ({ email: u.email!, name: u.name || "" })),
         meetingTitle: meeting.title,
         meetingDate: cancelDateStr,
         startTime: meeting.startTime,
@@ -1530,7 +1520,7 @@ router.post(
         endTime: true,
         departmentId: true,
         organizerId: true,
-        organizer: { select: { id: true, name: true } },
+        organizer: { select: { id: true, name: true, email: true } },
       },
     });
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
@@ -1589,31 +1579,39 @@ router.post(
       });
     }
 
-    // Send invitation emails to newly added participants (non-blocking)
+    // Send invitation emails to newly added participants (excluding inviter / organizer)
+    const newRecipientIds = (parsed.data.userIds || []).filter(
+      (id) => id !== req.user!.userId && id !== meeting.organizerId
+    );
     const newUsers = await prisma.user.findMany({
-      where: { id: { in: parsed.data.userIds } },
-      select: { name: true, email: true },
+      where: { id: { in: newRecipientIds } },
+      select: { id: true, name: true, email: true },
     });
     const meetingDateStrForEmail = new Date(meeting.date).toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     (async () => {
       for (const u of newUsers) {
-        if (u.email) {
-          try {
-            await sendMeetingInvitationEmail({
-              toEmail: u.email,
-              toName: u.name || "Participant",
-              organizerName: meeting.organizer.name || "Organizer",
-              meetingTitle: meeting.title,
-              meetingDate: meetingDateStrForEmail,
-              startTime: meeting.startTime,
-              endTime: meeting.endTime,
-              meetingId: meeting.id,
-            });
-          } catch (err: any) {
-            console.error(`[Add Participant] Error sending invitation email to ${u.email}:`, err?.message || err);
-          }
+        if (
+          !u.email ||
+          u.id === req.user!.userId ||
+          (meeting.organizer?.email && u.email.trim().toLowerCase() === meeting.organizer.email.trim().toLowerCase())
+        ) {
+          continue;
+        }
+        try {
+          await sendMeetingInvitationEmail({
+            toEmail: u.email,
+            toName: u.name || "Participant",
+            organizerName: meeting.organizer.name || "Organizer",
+            meetingTitle: meeting.title,
+            meetingDate: meetingDateStrForEmail,
+            startTime: meeting.startTime,
+            endTime: meeting.endTime,
+            meetingId: meeting.id,
+          });
+        } catch (err: any) {
+          console.error(`[Add Participant] Error sending invitation email to ${u.email}:`, err?.message || err);
         }
       }
     })();
@@ -1745,30 +1743,7 @@ router.patch("/:id/rsvp", async (req: AuthedRequest, res) => {
       },
     });
 
-    // Send RSVP email to organizer (non-blocking)
-    const organizer = await prisma.user.findUnique({
-      where: { id: meeting.organizerId },
-      select: { name: true, email: true },
-    });
-    const fullMeeting = await prisma.meeting.findUnique({
-      where: { id: req.params.id },
-      select: { date: true, startTime: true },
-    });
-    if (organizer?.email && fullMeeting) {
-      sendRsvpResponseEmail({
-        organizerEmail: organizer.email,
-        organizerName: organizer.name || "Organizer",
-        participantName: participant.user.name || "Participant",
-        meetingTitle: meeting.title,
-        meetingDate: new Date(fullMeeting.date).toLocaleDateString("en-US", {
-          weekday: "long", year: "numeric", month: "long", day: "numeric",
-        }),
-        startTime: fullMeeting.startTime,
-        response: normalizedStatus as "ACCEPTED" | "REJECTED",
-        reason: reason || undefined,
-        meetingId: meeting.id,
-      }).catch(console.error);
-    }
+    // Note: RSVP update uses in-app notification only; email notification omitted to avoid inbox clutter
   }
 
   const updatedMeeting = await prisma.meeting.findUnique({

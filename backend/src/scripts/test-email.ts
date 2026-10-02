@@ -5,11 +5,9 @@
  */
 import "dotenv/config";
 import {
-  sendMeetingCreatedEmail,
   sendMeetingInvitationEmail,
   sendMeetingCancellationEmail,
   sendActionItemAssignedEmail,
-  sendRsvpResponseEmail,
 } from "../utils/email";
 
 const DEMO_EMAIL = "selamkassu690@gmail.com";
