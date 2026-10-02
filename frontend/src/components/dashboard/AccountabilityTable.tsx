@@ -1,6 +1,7 @@
 import React from "react";
 import { AlertTriangle } from "lucide-react";
 import type { ActionItem } from "../../types";
+import { getActionItemAssignees } from "../../types";
 import { Avatar, ProgressBar, CodeChip, EmptyState } from "../ui/Primitives";
 import { PriorityBadge, StatusBadge } from "../ui/Badge";
 import { Link } from "react-router-dom";
@@ -56,13 +57,48 @@ export function AccountabilityTable({
                 </div>
               </td>
               <td className="px-5 py-3">
-                <div className="flex items-center gap-2">
-                  <Avatar name={item.assignedTo.name} color={item.assignedTo.avatarColor} />
-                  <div>
-                    <p className="text-xs font-medium text-slate2-700">{item.assignedTo.name}</p>
-                    <p className="text-[11px] text-slate2-400">{item.department.name}</p>
-                  </div>
-                </div>
+                {(() => {
+                  const assignees = getActionItemAssignees(item);
+                  if (assignees.length === 0) {
+                    return <span className="text-xs text-slate2-400">Unassigned</span>;
+                  }
+                  if (assignees.length === 1) {
+                    const u = assignees[0];
+                    return (
+                      <div className="flex items-center gap-2">
+                        <Avatar name={u.name} color={u.avatarColor} />
+                        <div>
+                          <p className="text-xs font-medium text-slate2-700">{u.name}</p>
+                          <p className="text-[11px] text-slate2-400">{item.department.name}</p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="flex items-center gap-2">
+                      <div className="flex -space-x-2 overflow-hidden shrink-0">
+                        {assignees.slice(0, 3).map((u) => (
+                          <div key={u.id} className="ring-2 ring-white rounded-full">
+                            <Avatar name={u.name} color={u.avatarColor} />
+                          </div>
+                        ))}
+                        {assignees.length > 3 && (
+                          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-slate2-100 text-[10px] font-bold text-slate2-600 ring-2 ring-white">
+                            +{assignees.length - 3}
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0 max-w-[200px]">
+                        <p className="text-xs font-medium text-slate2-700 truncate" title={assignees.map((u) => u.name).join(", ")}>
+                          {assignees.map((u) => u.name).join(", ")}
+                        </p>
+                        <p className="text-[11px] text-slate2-400">
+                          {item.department.name} · <span className="text-[#005f56] font-semibold">{assignees.length} assignees</span>
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })()}
               </td>
               <td className="px-5 py-3">
                 <span className={`text-xs font-medium ${item.overdue ? "text-danger" : "text-slate2-600"}`}>

@@ -336,6 +336,7 @@ export interface ActionItem {
   title: string;
   description?: string | null;
   assignedTo: UserLite;
+  assignees?: UserLite[] | { id: string; userId: string; user: UserLite }[];
   department: { id: string; name: string };
   meeting?: { id: string; title: string; code: string };
   decision?: { id: string; title: string; code: string } | null;
@@ -347,12 +348,24 @@ export interface ActionItem {
   overdue: boolean;
 }
 
+export function getActionItemAssignees(item: { assignedTo?: UserLite | null; assignees?: any }): UserLite[] {
+  if (Array.isArray(item.assignees) && item.assignees.length > 0) {
+    const list = item.assignees
+      .map((a: any) => (a && typeof a === "object" && "user" in a ? a.user : a))
+      .filter((u): u is UserLite => Boolean(u && u.id));
+    if (list.length > 0) return list;
+  }
+  return item.assignedTo && item.assignedTo.id ? [item.assignedTo] : [];
+}
+
 export interface MeetingParticipant {
   id: string;
   meetingId: string;
   status: string;
   isRequired: boolean;
   participated: boolean;
+  rejectionReason?: string | null;
+  respondedAt?: string | null;
   user: UserLite;
 }
 
@@ -369,7 +382,7 @@ export interface MeetingListItem {
   priority: Priority;
   status: MeetingStatus;
   organizer: UserLite;
-  participants?: { user: UserLite }[];
+  participants?: { status?: string; rejectionReason?: string | null; user: UserLite }[];
   approvedById?: string | null;
   approvedAt?: string | null;
   approvedBy?: UserLite | null;

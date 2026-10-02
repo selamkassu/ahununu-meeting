@@ -1,6 +1,15 @@
 import React, { useEffect, useState, useMemo } from "react";
-import { Link } from "react-router-dom";
-import { Plus, Search, MapPin, Video, Users, Clock } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  Plus,
+  Search,
+  MapPin,
+  Video,
+  Users,
+  Clock,
+  ShieldCheck,
+  AlertTriangle,
+} from "lucide-react";
 import { api } from "../../api/client";
 import type { MeetingListItem, Department } from "../../types";
 import { Card, EmptyState, Button, inputClass, Avatar } from "../../components/ui/Primitives";
@@ -9,16 +18,27 @@ import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { useAuth } from "../../context/AuthContext";
 import MeetingCreateModal from "./MeetingCreateModal";
 
-const STATUSES = ["SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"];
+const STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "All statuses" },
+  { value: "SCHEDULED", label: "Scheduled" },
+  { value: "IN_PROGRESS", label: "In Progress" },
+  { value: "PENDING_SIGNATURES", label: "Pending Signatures" },
+  { value: "READY_FOR_APPROVAL", label: "Ready for Approval" },
+  { value: "APPROVED", label: "Approved" },
+  { value: "FORCE_APPROVED", label: "Force Approved" },
+  { value: "COMPLETED", label: "Completed" },
+  { value: "CANCELLED", label: "Cancelled" },
+];
 
 export default function MeetingList() {
   const { user, hasPermission } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("");
-  const [departmentId, setDepartmentId] = useState("");
-  const [q, setQ] = useState("");
+  const [status, setStatus] = useState(() => searchParams.get("status") || "");
+  const [departmentId, setDepartmentId] = useState(() => searchParams.get("departmentId") || "");
+  const [q, setQ] = useState(() => searchParams.get("q") || "");
   const [createOpen, setCreateOpen] = useState(false);
 
   const canCreate = hasPermission("meetings:create");
@@ -45,14 +65,66 @@ export default function MeetingList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, departmentId, q]);
 
+  const handleStatusChange = (newStatus: string) => {
+    setStatus(newStatus);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (newStatus) next.set("status", newStatus);
+        else next.delete("status");
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
+  const handleDepartmentChange = (newDept: string) => {
+    setDepartmentId(newDept);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (newDept) next.set("departmentId", newDept);
+        else next.delete("departmentId");
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
+  const handleQueryChange = (newQ: string) => {
+    setQ(newQ);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (newQ.trim()) next.set("q", newQ);
+        else next.delete("q");
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
   const filteredMeetings = useMemo(() => {
-    if (!q.trim()) return meetings;
+    let result = meetings;
+    if (status === "FORCE_APPROVED") {
+      result = result.filter((m) => m.forceApproved === true);
+    } else if (status) {
+      result = result.filter((m) => m.status === status);
+    }
+
+    if (!q.trim()) return result;
     const query = q.trim().toLowerCase();
-    return meetings.filter((m) => {
+    return result.filter((m) => {
       const matchTitle = m.title?.toLowerCase().includes(query);
       const matchDescription = m.description?.toLowerCase().includes(query);
       const matchCode = m.code?.toLowerCase().includes(query);
       const matchOrganizer = m.organizer?.name?.toLowerCase().includes(query);
+      const matchApprover = m.approvedBy?.name?.toLowerCase().includes(query);
+      const matchBypassReason = m.bypassReason?.toLowerCase().includes(query);
+      const matchStatus = m.status?.toLowerCase().includes(query);
+      const matchForce =
+        m.forceApproved &&
+        ("force approved".includes(query) || "override".includes(query) || "force".includes(query));
       const matchParticipant = m.participants?.some((p) =>
         p.user?.name?.toLowerCase().includes(query)
       );
@@ -61,10 +133,14 @@ export default function MeetingList() {
         matchDescription ||
         matchCode ||
         matchOrganizer ||
+        matchApprover ||
+        matchBypassReason ||
+        matchStatus ||
+        matchForce ||
         matchParticipant
       );
     });
-  }, [meetings, q]);
+  }, [meetings, q, status]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, MeetingListItem[]>();
@@ -84,8 +160,8 @@ export default function MeetingList() {
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400" />
           <input
             value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search meetings…"
+            onChange={(e) => handleQueryChange(e.target.value)}
+            placeholder="Search meetings by title, code, approver, force status…"
             className={`${inputClass} pl-8 w-full`}
           />
         </div>
@@ -93,13 +169,12 @@ export default function MeetingList() {
         {/* Status dropdown */}
         <select
           value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className={`${inputClass} w-full sm:w-36 shrink-0`}
+          onChange={(e) => handleStatusChange(e.target.value)}
+          className={`${inputClass} w-full sm:w-48 shrink-0`}
         >
-          <option value="">All statuses</option>
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s.replace("_", " ")}
+          {STATUS_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
             </option>
           ))}
         </select>
@@ -108,8 +183,8 @@ export default function MeetingList() {
         {(hasPermission("meetings:view:all") || hasPermission("ADMIN_OVERRIDE")) && (
           <select
             value={departmentId}
-            onChange={(e) => setDepartmentId(e.target.value)}
-            className={`${inputClass} w-full sm:w-40 shrink-0`}
+            onChange={(e) => handleDepartmentChange(e.target.value)}
+            className={`${inputClass} w-full sm:w-44 shrink-0`}
           >
             <option value="">All departments</option>
             {departments.map((d) => (
@@ -151,7 +226,12 @@ export default function MeetingList() {
               <div className="flex flex-col gap-4">
                 {items.map((m) => (
                   <Link key={m.id} to={`/meetings/${m.id}`} className="block">
-                    <Card className="flex flex-col gap-3 p-4 transition-shadow hover:shadow-md sm:flex-row sm:items-center sm:justify-between">
+                    <Card
+                      className={`flex flex-col gap-3 p-4 transition-all hover:shadow-md sm:flex-row sm:items-center sm:justify-between ${m.forceApproved
+                        ? "border-l-4 border-l-amber-500 bg-linear-to-r from-amber-50/20 to-white"
+                        : ""
+                        }`}
+                    >
                       <div className="flex-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="font-display text-sm font-semibold text-slate2-800">{m.title}</p>
@@ -171,12 +251,22 @@ export default function MeetingList() {
                                     className="inline-block h-2 w-2 rounded-full"
                                     style={{ backgroundColor: p.user.avatarColor || "#94a3b8" }}
                                   />
-                                  {p.user.name}
+                                  <span>{p.user.name}</span>
+                                  {p.status === "ACCEPTED" && (
+                                    <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1 rounded-sm">
+                                      (Accepted)
+                                    </span>
+                                  )}
+                                  {(p.status === "REJECTED" || p.status === "DECLINED") && (
+                                    <span className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-1 rounded-sm">
+                                      (Rejected){p.rejectionReason ? ` ➜ '${p.rejectionReason}'` : ""}
+                                    </span>
+                                  )}
                                 </span>
                               ))}
                           </div>
                         )}
-                        <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate2-500">
+                        <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-slate2-500">
                           <span className="flex items-center gap-1">
                             <Avatar name={m.organizer.name} color={m.organizer.avatarColor} />
                             {m.organizer.name}
@@ -195,14 +285,40 @@ export default function MeetingList() {
                           <span className="flex items-center gap-1">
                             <Users size={12} /> {m._count.participants}
                           </span>
+
+                          {/* Approval Status Indicator in metadata */}
+                          {m.approvedBy && (
+                            <span
+                              className={`inline-flex items-center gap-1 font-medium ${m.forceApproved ? "text-amber-800" : "text-brand"
+                                }`}
+                              title={m.approvedAt ? `Formally certified on ${new Date(m.approvedAt).toLocaleString()}` : undefined}
+                            >
+                              <ShieldCheck size={13} className={m.forceApproved ? "text-amber-600" : "text-brand"} />
+                              <span>{m.forceApproved ? "Force certified by" : "Approved by"} {m.approvedBy.name}</span>
+                            </span>
+                          )}
                         </div>
+
+                        {/* Dedicated Administrative Override Notice if Force Approved */}
+                        {m.forceApproved && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50/90 border border-amber-200/80 px-2.5 py-1 text-xs text-amber-900">
+                            <div className="flex items-center gap-1 font-semibold text-amber-900 shrink-0">
+                              <AlertTriangle size={13} className="text-amber-600 shrink-0" />
+                              <span>Administrative Override:</span>
+                            </div>
+                            <span className="text-amber-800 line-clamp-1">
+                              {m.bypassReason || "Approved before all participant pre-signatures were collected"}
+                            </span>
+                          </div>
+                        )}
                       </div>
+
                       <div className="flex flex-wrap items-center justify-between gap-2.5 sm:flex-col sm:items-end sm:justify-center shrink-0">
                         <div className="flex items-center gap-1.5 rounded-lg bg-slate2-50 border border-slate2-200/80 px-2.5 py-1 text-xs font-semibold text-slate2-800 shadow-2xs">
                           <Clock size={13} className="text-brand shrink-0" />
                           <span>{m.startTime} – {m.endTime}</span>
                         </div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
                           <PriorityBadge priority={m.priority} />
                           <StatusBadge status={m.status} />
                         </div>
@@ -229,3 +345,4 @@ export default function MeetingList() {
     </div>
   );
 }
+

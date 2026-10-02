@@ -21,6 +21,7 @@ import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Primitives";
 import { RichTextRenderer } from "../editor/RichTextRenderer";
 import type { MeetingDetail } from "../../types";
+import { getActionItemAssignees } from "../../types";
 import { useAuth } from "../../context/AuthContext";
 import { api } from "../../api/client";
 
@@ -390,7 +391,11 @@ export function ParticipantSigningModal({ open, onClose, meeting, onSignSuccess 
                         <div className="min-w-0">
                           <span className="font-semibold text-slate2-800 truncate block">{a.title}</span>
                           <span className="text-[10px] text-slate2-500">
-                            Assigned to: <strong className="text-slate2-700">{a.assignedTo.name}</strong> · Due: {new Date(a.deadline).toLocaleDateString()}
+                            Assigned to:{" "}
+                            <strong className="text-slate2-700">
+                              {getActionItemAssignees(a).map((u) => u.name).join(", ") || a.assignedTo?.name || "Unassigned"}
+                            </strong>
+                            {" "}· Due: {new Date(a.deadline).toLocaleDateString()}
                           </span>
                         </div>
                         <span className="rounded bg-slate2-100 px-2 py-0.5 text-[10px] font-medium text-slate2-700 shrink-0">

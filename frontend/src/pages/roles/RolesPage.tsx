@@ -24,9 +24,11 @@ import { Card, CardHeader, Button, Field, inputClass, EmptyState } from "../../c
 import { Badge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { useAuth } from "../../context/AuthContext";
+import { useAlert } from "../../components/ui/AlertDialog";
 
 export default function RolesPage() {
   const { hasPermission } = useAuth();
+  const { alert } = useAlert();
   const canCreate = hasPermission("roles:create");
   const canEdit = hasPermission("roles:edit");
   const canDelete = hasPermission("roles:delete");
@@ -76,7 +78,11 @@ export default function RolesPage() {
       setDeleteConfirm(null);
       load();
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to delete role.");
+      await alert({
+        title: "Delete Role Failed",
+        message: err instanceof ApiError ? err.message : "Failed to delete role.",
+        tone: "danger",
+      });
     }
   };
 
@@ -250,9 +256,13 @@ export default function RolesPage() {
                         )}
                         {canDelete && (
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               if (role.userCount > 0) {
-                                alert(`Cannot delete role "${role.name}": ${role.userCount} user(s) are currently assigned to this role. Please reassign them to another role first.`);
+                                await alert({
+                                  title: "Cannot Delete Role",
+                                  message: `Cannot delete role "${role.name}": ${role.userCount} user(s) are currently assigned to this role. Please reassign them to another role first.`,
+                                  tone: "warning",
+                                });
                                 return;
                               }
                               setDeleteConfirm(role);

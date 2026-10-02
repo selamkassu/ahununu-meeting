@@ -14,6 +14,12 @@ import {
 } from "../utils/enums";
 import { checkOwnershipAccess, ensureUserPermissions } from "../utils/ownership";
 import { makeCode } from "../utils/codes";
+import {
+  sendMeetingCreatedEmail,
+  sendMeetingInvitationEmail,
+  sendMeetingCancellationEmail,
+  sendRsvpResponseEmail,
+} from "../utils/email";
 
 const router = Router();
 router.use(requireAuth);
@@ -63,7 +69,12 @@ const detailInclude = {
   decisions: { orderBy: { decisionDate: "desc" as const } },
   actionItems: {
     include: {
-      assignedTo: { select: { id: true, name: true, avatarColor: true } },
+      assignedTo: { select: { id: true, name: true, avatarColor: true, email: true } },
+      assignees: {
+        include: {
+          user: { select: { id: true, name: true, avatarColor: true, email: true } },
+        },
+      },
       department: { select: { id: true, name: true } },
     },
     orderBy: { deadline: "asc" as const },
@@ -170,7 +181,13 @@ router.get("/", async (req: AuthedRequest, res) => {
   const { status, departmentId, priority, from, to, q, mine } = req.query;
   const conditions: any[] = [];
 
-  if (typeof status === "string" && status) conditions.push({ status });
+  if (typeof status === "string" && status) {
+    if (status === "FORCE_APPROVED") {
+      conditions.push({ forceApproved: true });
+    } else {
+      conditions.push({ status });
+    }
+  }
   if (typeof departmentId === "string" && departmentId)
     conditions.push({ departmentId });
   if (typeof priority === "string" && priority) conditions.push({ priority });
@@ -224,29 +241,39 @@ router.get("/", async (req: AuthedRequest, res) => {
     }
   }
 
-  // Case-insensitive search across: Meeting title, Meeting description, and Participant name (and Organizer name)
+  // Case-insensitive search across: Meeting title, Meeting description, and Participant name (and Organizer name, Approver, Bypass Reason)
   if (typeof q === "string" && q.trim()) {
     const searchTerm = q.trim();
-    conditions.push({
-      OR: [
-        { title: { contains: searchTerm, mode: "insensitive" } },
-        { description: { contains: searchTerm, mode: "insensitive" } },
-        { code: { contains: searchTerm, mode: "insensitive" } },
-        {
-          participants: {
-            some: {
-              user: {
-                name: { contains: searchTerm, mode: "insensitive" },
-              },
+    const searchConditions: any[] = [
+      { title: { contains: searchTerm, mode: "insensitive" } },
+      { description: { contains: searchTerm, mode: "insensitive" } },
+      { code: { contains: searchTerm, mode: "insensitive" } },
+      {
+        participants: {
+          some: {
+            user: {
+              name: { contains: searchTerm, mode: "insensitive" },
             },
           },
         },
-        {
-          organizer: {
-            name: { contains: searchTerm, mode: "insensitive" },
-          },
+      },
+      {
+        organizer: {
+          name: { contains: searchTerm, mode: "insensitive" },
         },
-      ],
+      },
+      {
+        approvedBy: {
+          name: { contains: searchTerm, mode: "insensitive" },
+        },
+      },
+      { bypassReason: { contains: searchTerm, mode: "insensitive" } },
+    ];
+    if (searchTerm.toLowerCase().includes("force")) {
+      searchConditions.push({ forceApproved: true });
+    }
+    conditions.push({
+      OR: searchConditions,
     });
   }
 
@@ -260,6 +287,8 @@ router.get("/", async (req: AuthedRequest, res) => {
       department: { select: { id: true, name: true } },
       participants: {
         select: {
+          status: true,
+          rejectionReason: true,
           user: { select: { id: true, name: true, avatarColor: true } },
         },
       },
@@ -390,7 +419,7 @@ router.post(
       include: detailInclude,
     });
 
-    // Notify invited participants.
+    // Notify invited participants (in-app).
     if (data.participantIds.length) {
       await prisma.notification.createMany({
         data: data.participantIds.map((userId) => ({
@@ -402,6 +431,80 @@ router.post(
         })),
       });
     }
+
+    // Send emails in background sequentially to preserve connection stability & reliability
+    (async () => {
+      try {
+        const organizer = await prisma.user.findUnique({
+          where: { id: req.user!.userId },
+          select: { name: true, email: true },
+        });
+        const meetingDateStr = new Date(meeting.date).toLocaleDateString("en-US", {
+          weekday: "long", year: "numeric", month: "long", day: "numeric",
+        });
+
+        // 1. Send Meeting Created confirmation to Organizer
+        if (organizer?.email) {
+          try {
+            await sendMeetingCreatedEmail({
+              toEmail: organizer.email,
+              toName: organizer.name || "Organizer",
+              meetingTitle: meeting.title,
+              meetingDate: meetingDateStr,
+              startTime: meeting.startTime,
+              endTime: meeting.endTime,
+              location: meeting.location || undefined,
+              meetingId: meeting.id,
+              participantCount: data.participantIds.length,
+            });
+          } catch (orgErr: any) {
+            console.error("[Email] Failed organizer confirmation email:", orgErr?.message || orgErr);
+          }
+        }
+
+        // 2. Send Invitation email to each invited participant sequentially
+        if (data.participantIds && data.participantIds.length > 0) {
+          const invitedUsers = await prisma.user.findMany({
+            where: { id: { in: data.participantIds } },
+            select: { id: true, name: true, email: true },
+          });
+
+          console.log(`[Meeting Create] Initiating invitation emails for ${invitedUsers.length} attendee(s)...`);
+
+          for (const u of invitedUsers) {
+            if (!u.email) {
+              console.warn(`[Meeting Create] Participant "${u.name}" has NO email configured — skipping invitation email.`);
+              continue;
+            }
+
+            if (u.email.endsWith("@ahununulogistics.com")) {
+              console.warn(
+                `[Meeting Create] NOTICE: "${u.name}" has demo email "${u.email}". Gmail cannot deliver to non-existent domain ahununulogistics.com.`
+              );
+            }
+
+            try {
+              console.log(`[Meeting Create] Sending invitation to ${u.name} <${u.email}>...`);
+              await sendMeetingInvitationEmail({
+                toEmail: u.email,
+                toName: u.name || "Participant",
+                organizerName: organizer?.name || "Organizer",
+                meetingTitle: meeting.title,
+                meetingDate: meetingDateStr,
+                startTime: meeting.startTime,
+                endTime: meeting.endTime,
+                location: meeting.location || undefined,
+                meetingId: meeting.id,
+              });
+            } catch (partErr: any) {
+              console.error(`[Meeting Create] Error sending invitation to ${u.email}:`, partErr?.message || partErr);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.error("[Meeting Create] Email notification loop failed:", err?.message || err);
+      }
+    })();
 
     res.status(201).json(meeting);
   },
@@ -824,7 +927,7 @@ router.put(
   const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
 
   // Once a meeting is APPROVED, it is strictly READ-ONLY for everyone until unlocked!
-  if (existing.status === "APPROVED") {
+  if (existing.status === "APPROVED" && !hasAdminOverride) {
     return res.status(403).json({
       error: "Meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission before any edits can be made.",
     });
@@ -865,6 +968,35 @@ router.put(
         error: "Meetings cannot be set to APPROVED via status update. Approval must be performed using the 'Approve Meeting' workflow with digital certification.",
       });
     }
+
+    if (status === "COMPLETED" && existing.status !== "COMPLETED") {
+      const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+        (prisma as any).meetingMinutes.findMany({
+          where: { meetingId: req.params.id },
+          select: { content: true },
+        }),
+        prisma.decision.count({ where: { meetingId: req.params.id } }),
+        prisma.actionItem.count({ where: { meetingId: req.params.id } }),
+      ]);
+
+      const stripHtml = (html: string) =>
+        (html || "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .trim();
+
+      const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+      const hasDecisions = decisionsCount > 0;
+      const hasActionItems = actionItemsCount > 0;
+
+      if (!hasSummary && !hasDecisions && !hasActionItems) {
+        return res.status(400).json({
+          error:
+            "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+        });
+      }
+    }
+
     dataToUpdate.status = status;
   }
 
@@ -893,6 +1025,11 @@ router.put(
         if (meeting.actionItems && Array.isArray(meeting.actionItems)) {
           for (const a of meeting.actionItems) {
             if (a.assignedToId) userIdsToNotify.add(a.assignedToId);
+            if ((a as any).assignees && Array.isArray((a as any).assignees)) {
+              for (const asg of (a as any).assignees) {
+                if (asg.userId) userIdsToNotify.add(asg.userId);
+              }
+            }
           }
         }
 
@@ -926,6 +1063,35 @@ router.put(
       } catch (notifErr) {
         console.error("Failed to generate cancellation notifications:", notifErr);
       }
+    }
+
+    // ── Email: Cancellation — sent to ALL participants who received an invite ──
+    if (existing.status !== "CANCELLED" && status === "CANCELLED") {
+      const cancelledByUser = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { name: true },
+      });
+      const allRecipientIds = new Set<string>();
+      if (meeting.organizerId) allRecipientIds.add(meeting.organizerId);
+      if (meeting.participants && Array.isArray(meeting.participants)) {
+        for (const p of meeting.participants) { if (p.userId) allRecipientIds.add(p.userId); }
+      }
+      const cancelRecipients = await prisma.user.findMany({
+        where: { id: { in: Array.from(allRecipientIds) } },
+        select: { name: true, email: true },
+      });
+      const cancelDateStr = new Date(meeting.date).toLocaleDateString("en-US", {
+        weekday: "long", year: "numeric", month: "long", day: "numeric",
+      });
+      sendMeetingCancellationEmail({
+        recipients: cancelRecipients.filter(u => !!u.email).map(u => ({ email: u.email!, name: u.name || "" })),
+        meetingTitle: meeting.title,
+        meetingDate: cancelDateStr,
+        startTime: meeting.startTime,
+        endTime: meeting.endTime,
+        cancelledByName: cancelledByUser?.name || "Administrator",
+        meetingId: meeting.id,
+      }).catch(console.error);
     }
 
     res.json(meeting);
@@ -1229,9 +1395,37 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
   }
 
   const { targetStatus = "IN_PROGRESS", reason } = req.body || {};
-  const validTargetStatus = ["IN_PROGRESS", "DRAFT", "SCHEDULED"].includes(targetStatus)
+  const validTargetStatus = ["IN_PROGRESS", "COMPLETED", "DRAFT", "SCHEDULED"].includes(targetStatus)
     ? targetStatus
     : "IN_PROGRESS";
+
+  if (validTargetStatus === "COMPLETED") {
+    const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+      (prisma as any).meetingMinutes.findMany({
+        where: { meetingId: req.params.id },
+        select: { content: true },
+      }),
+      prisma.decision.count({ where: { meetingId: req.params.id } }),
+      prisma.actionItem.count({ where: { meetingId: req.params.id } }),
+    ]);
+
+    const stripHtml = (html: string) =>
+      (html || "")
+        .replace(/<[^>]*>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .trim();
+
+    const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+    const hasDecisions = decisionsCount > 0;
+    const hasActionItems = actionItemsCount > 0;
+
+    if (!hasSummary && !hasDecisions && !hasActionItems) {
+      return res.status(400).json({
+        error:
+          "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+      });
+    }
+  }
 
   const recordedReason =
     typeof reason === "string" && reason.trim()
@@ -1249,6 +1443,76 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
 
   res.json(updated);
 });
+
+// ---------- Complete Meeting (POST /:id/complete) ----------
+router.post(
+  "/:id/complete",
+  requirePermission("meetings:edit:all", "meetings:edit:dept", "meetings:edit:own"),
+  async (req: AuthedRequest, res) => {
+    const existing = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, status: true, organizerId: true, departmentId: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Meeting not found." });
+
+    if (!checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: existing.departmentId,
+      ownerId: existing.organizerId,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to complete this meeting." });
+    }
+
+    await ensureUserPermissions(req);
+    const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+
+    if (existing.status === "APPROVED" && !hasAdminOverride) {
+      return res.status(403).json({
+        error: "Meeting is approved and strictly read-only. Modifications require ADMIN_OVERRIDE permission.",
+      });
+    }
+
+    const wasLocked = isLockedMeetingStatus(existing.status);
+    if (wasLocked && existing.status !== "APPROVED" && !hasAdminOverride) {
+      return res.status(403).json({
+        error: `Meeting is locked (${existing.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE permission.`,
+      });
+    }
+
+    const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+      (prisma as any).meetingMinutes.findMany({
+        where: { meetingId: req.params.id },
+        select: { content: true },
+      }),
+      prisma.decision.count({ where: { meetingId: req.params.id } }),
+      prisma.actionItem.count({ where: { meetingId: req.params.id } }),
+    ]);
+
+    const stripHtml = (html: string) =>
+      (html || "")
+        .replace(/<[^>]*>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .trim();
+
+    const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+    const hasDecisions = decisionsCount > 0;
+    const hasActionItems = actionItemsCount > 0;
+
+    if (!hasSummary && !hasDecisions && !hasActionItems) {
+      return res.status(400).json({
+        error:
+          "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+      });
+    }
+
+    const updated = await prisma.meeting.update({
+      where: { id: req.params.id },
+      data: { status: "COMPLETED" },
+      include: detailInclude,
+    });
+
+    res.json(updated);
+  }
+);
 
 // ---------- Participants Management ----------
 router.post(
@@ -1319,12 +1583,40 @@ router.post(
       }));
 
     if (notificationData.length > 0) {
-      // Use createMany and skip if the record already exists for idempotency
       await prisma.notification.createMany({
         data: notificationData,
         skipDuplicates: false,
       });
     }
+
+    // Send invitation emails to newly added participants (non-blocking)
+    const newUsers = await prisma.user.findMany({
+      where: { id: { in: parsed.data.userIds } },
+      select: { name: true, email: true },
+    });
+    const meetingDateStrForEmail = new Date(meeting.date).toLocaleDateString("en-US", {
+      weekday: "long", year: "numeric", month: "long", day: "numeric",
+    });
+    (async () => {
+      for (const u of newUsers) {
+        if (u.email) {
+          try {
+            await sendMeetingInvitationEmail({
+              toEmail: u.email,
+              toName: u.name || "Participant",
+              organizerName: meeting.organizer.name || "Organizer",
+              meetingTitle: meeting.title,
+              meetingDate: meetingDateStrForEmail,
+              startTime: meeting.startTime,
+              endTime: meeting.endTime,
+              meetingId: meeting.id,
+            });
+          } catch (err: any) {
+            console.error(`[Add Participant] Error sending invitation email to ${u.email}:`, err?.message || err);
+          }
+        }
+      }
+    })();
 
     const updated = await prisma.meeting.findUnique({
       where: { id: req.params.id },
@@ -1381,6 +1673,174 @@ router.delete(
     res.json(updated);
   },
 );
+
+// ---------- Participant RSVP (Accept / Reject invitation with reason) ----------
+const rsvpSchema = z.object({
+  status: z.enum(["ACCEPTED", "REJECTED", "DECLINED", "INVITED"]),
+  rejectionReason: z.string().optional().nullable(),
+});
+
+router.patch("/:id/rsvp", async (req: AuthedRequest, res) => {
+  if (!req.user) return res.status(401).json({ error: "Not authenticated" });
+  const meeting = await prisma.meeting.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, title: true, organizerId: true, status: true },
+  });
+  if (!meeting) return res.status(404).json({ error: "Meeting not found" });
+
+  const participant = await prisma.meetingParticipant.findUnique({
+    where: {
+      meetingId_userId: {
+        meetingId: req.params.id,
+        userId: req.user.userId,
+      },
+    },
+    include: {
+      user: {
+        select: { id: true, name: true, email: true, avatarColor: true, role: true },
+      },
+    },
+  });
+  if (!participant) {
+    return res.status(403).json({ error: "You are not an invited participant for this meeting." });
+  }
+
+  const parsed = rsvpSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid RSVP status or payload." });
+  }
+
+  const normalizedStatus =
+    parsed.data.status === "DECLINED" || parsed.data.status === "REJECTED"
+      ? "REJECTED"
+      : parsed.data.status;
+
+  const reason =
+    normalizedStatus === "REJECTED"
+      ? parsed.data.rejectionReason?.trim() || "Due to another meeting"
+      : null;
+
+  await prisma.meetingParticipant.update({
+    where: { id: participant.id },
+    data: {
+      status: normalizedStatus,
+      rejectionReason: reason,
+      respondedAt: new Date(),
+    },
+  });
+
+  // Notify meeting organizer (in-app)
+  if (meeting.organizerId && meeting.organizerId !== req.user.userId) {
+    const isRejected = normalizedStatus === "REJECTED";
+    await prisma.notification.create({
+      data: {
+        userId: meeting.organizerId,
+        meetingId: meeting.id,
+        type: "MEETING_UPDATED",
+        title: isRejected ? "Participant Rejected Invitation" : "Participant Accepted Invitation",
+        message: isRejected
+          ? `${participant.user.name} rejected the invitation to "${meeting.title}": '${reason}'`
+          : `${participant.user.name} accepted the invitation to "${meeting.title}".`,
+        link: `/meetings/${meeting.id}`,
+      },
+    });
+
+    // Send RSVP email to organizer (non-blocking)
+    const organizer = await prisma.user.findUnique({
+      where: { id: meeting.organizerId },
+      select: { name: true, email: true },
+    });
+    const fullMeeting = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      select: { date: true, startTime: true },
+    });
+    if (organizer?.email && fullMeeting) {
+      sendRsvpResponseEmail({
+        organizerEmail: organizer.email,
+        organizerName: organizer.name || "Organizer",
+        participantName: participant.user.name || "Participant",
+        meetingTitle: meeting.title,
+        meetingDate: new Date(fullMeeting.date).toLocaleDateString("en-US", {
+          weekday: "long", year: "numeric", month: "long", day: "numeric",
+        }),
+        startTime: fullMeeting.startTime,
+        response: normalizedStatus as "ACCEPTED" | "REJECTED",
+        reason: reason || undefined,
+        meetingId: meeting.id,
+      }).catch(console.error);
+    }
+  }
+
+  const updatedMeeting = await prisma.meeting.findUnique({
+    where: { id: req.params.id },
+    include: detailInclude,
+  });
+  res.json(updatedMeeting);
+});
+
+router.patch("/:id/participants/:participantId/rsvp", async (req: AuthedRequest, res) => {
+  if (!req.user) return res.status(401).json({ error: "Not authenticated" });
+  const meeting = await prisma.meeting.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, title: true, organizerId: true, departmentId: true },
+  });
+  if (!meeting) return res.status(404).json({ error: "Meeting not found" });
+
+  await ensureUserPermissions(req);
+  const isOrganizer = meeting.organizerId === req.user.userId;
+  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+  const canManage =
+    isOrganizer ||
+    hasAdminOverride ||
+    req.userPermissions?.includes("meetings:manage_participants") ||
+    req.userPermissions?.includes("meetings:edit:all");
+
+  const participant = await prisma.meetingParticipant.findFirst({
+    where: {
+      meetingId: req.params.id,
+      OR: [{ id: req.params.participantId }, { userId: req.params.participantId }],
+    },
+    include: {
+      user: {
+        select: { id: true, name: true, email: true },
+      },
+    },
+  });
+  if (!participant) return res.status(404).json({ error: "Participant not found in this meeting." });
+
+  const isSelf = participant.userId === req.user.userId;
+  if (!canManage && !isSelf) {
+    return res.status(403).json({ error: "You are not authorized to update this participant's RSVP." });
+  }
+
+  const parsed = rsvpSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid RSVP status or payload." });
+
+  const normalizedStatus =
+    parsed.data.status === "DECLINED" || parsed.data.status === "REJECTED"
+      ? "REJECTED"
+      : parsed.data.status;
+
+  const reason =
+    normalizedStatus === "REJECTED"
+      ? parsed.data.rejectionReason?.trim() || "Due to another meeting"
+      : null;
+
+  await prisma.meetingParticipant.update({
+    where: { id: participant.id },
+    data: {
+      status: normalizedStatus,
+      rejectionReason: reason,
+      respondedAt: new Date(),
+    },
+  });
+
+  const updatedMeeting = await prisma.meeting.findUnique({
+    where: { id: req.params.id },
+    include: detailInclude,
+  });
+  res.json(updatedMeeting);
+});
 
 router.patch(
   "/:id/participants/:participantId/attendance",

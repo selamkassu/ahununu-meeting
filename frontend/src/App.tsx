@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { NotificationProvider } from "./context/NotificationContext";
+import { AlertProvider } from "./components/ui/AlertDialog";
 import { AppLayout } from "./components/layout/AppLayout";
 
 import Login from "./pages/Login";
@@ -26,7 +27,8 @@ export default function App() {
     <BrowserRouter>
       <AuthProvider>
         <NotificationProvider>
-          <Routes>
+          <AlertProvider>
+            <Routes>
             <Route path="/login" element={<Login />} />
             <Route element={<AppLayout />}>
               <Route path="/" element={<Dashboard />} />
@@ -49,7 +51,8 @@ export default function App() {
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </NotificationProvider>
+        </AlertProvider>
+      </NotificationProvider>
       </AuthProvider>
     </BrowserRouter>
   );

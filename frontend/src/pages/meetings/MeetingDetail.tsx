@@ -62,8 +62,11 @@ import type {
   AgendaStatus,
   Decision,
   DecisionStatus,
+  ActionItem,
+  ActionItemStatus,
+  Priority,
 } from "../../types";
-import { isLockedMeeting } from "../../types";
+import { isLockedMeeting, getActionItemAssignees } from "../../types";
 import {
   Card,
   CardHeader,
@@ -83,6 +86,7 @@ import { useNotifications } from "../../context/NotificationContext";
 import { MeetingApprovalModal } from "../../components/meetings/MeetingApprovalModal";
 import { ParticipantSigningModal } from "../../components/meetings/ParticipantSigningModal";
 import { SearchableUserSelect } from "../../components/ui/SearchableUserSelect";
+import { useAlert } from "../../components/ui/AlertDialog";
 
 export function hasMeetingEnded(meeting: MeetingDetailType): boolean {
   if (meeting.status === "COMPLETED") return true;
@@ -184,10 +188,11 @@ const STATUS_CONFIG: Record<
 
 export default function MeetingDetail() {
   const { id } = useParams();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get("tab") as TabKey | null;
   const { user, hasPermission, hasAnyPermission } = useAuth();
   const { refresh: refreshNotifications } = useNotifications();
+  const { alert, confirm } = useAlert();
   const [meeting, setMeeting] = useState<MeetingDetailType | null>(null);
   const [tab, setTab] = useState<TabKey>(tabParam || "overview");
 
@@ -225,6 +230,41 @@ export default function MeetingDetail() {
   const [isParticipantSignModalOpen, setIsParticipantSignModalOpen] = useState(false);
   const [requestingSignatures, setRequestingSignatures] = useState(false);
 
+  // Participant RSVP State & Actions
+  const [isDeclineModalOpen, setIsDeclineModalOpen] = useState(false);
+  const [declineReason, setDeclineReason] = useState("Due to another meeting");
+  const [isSubmittingRsvp, setIsSubmittingRsvp] = useState(false);
+  const [pageToast, setPageToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  const myParticipant = useMemo(() => {
+    return meeting?.participants?.find((p) => p.user.id === user?.id);
+  }, [meeting?.participants, user?.id]);
+
+  const handleRsvp = async (status: "ACCEPTED" | "REJECTED", reason?: string) => {
+    if (!meeting) return;
+    setIsSubmittingRsvp(true);
+    try {
+      await api.patch(`/meetings/${meeting.id}/rsvp`, {
+        status,
+        rejectionReason: status === "REJECTED" ? (reason || declineReason || "Due to another meeting") : null,
+      });
+      setIsDeclineModalOpen(false);
+      await load();
+      refreshNotifications();
+      setPageToast({
+        message: status === "ACCEPTED" ? "RSVP updated: Accepted invitation." : "RSVP updated: Declined invitation.",
+        type: "success",
+      });
+    } catch (err: any) {
+      setPageToast({
+        message: err.message || "Failed to submit RSVP response.",
+        type: "error",
+      });
+    } finally {
+      setIsSubmittingRsvp(false);
+    }
+  };
+
   // Super Admin Exclusive Unlock State
   const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
   const [unlockReason, setUnlockReason] = useState("");
@@ -232,8 +272,37 @@ export default function MeetingDetail() {
   const [unlocking, setUnlocking] = useState(false);
   const [unlockError, setUnlockError] = useState<string | null>(null);
 
+  // Completion Validation: At least one of Meeting Summary, Decisions, or Action Items must contain content
+  const hasSummaryContent = useMemo(() => {
+    return Boolean(
+      (meeting?.minutes || []).some((m) => {
+        const plain = (m.content || "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .trim();
+        return plain.length > 0;
+      })
+    );
+  }, [meeting?.minutes]);
+
+  const hasDecisionsContent = useMemo(() => {
+    return Boolean(meeting?.decisions && meeting.decisions.length > 0);
+  }, [meeting?.decisions]);
+
+  const hasActionItemsContent = useMemo(() => {
+    return Boolean(meeting?.actionItems && meeting.actionItems.length > 0);
+  }, [meeting?.actionItems]);
+
+  const canCompleteMeeting = hasSummaryContent || hasDecisionsContent || hasActionItemsContent;
+
   const handleUnlockMeeting = async () => {
     if (!meeting) return;
+    if (unlockTargetStatus === "COMPLETED" && !canCompleteMeeting) {
+      setUnlockError(
+        "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time."
+      );
+      return;
+    }
     setUnlocking(true);
     setUnlockError(null);
     try {
@@ -318,6 +387,39 @@ export default function MeetingDetail() {
 
   useEffect(load, [id]);
 
+  // Handle RSVP action triggered from Email action buttons (?rsvp=ACCEPTED or ?rsvp=REJECTED)
+  const rsvpHandledRef = useRef(false);
+  useEffect(() => {
+    if (!meeting || !user || rsvpHandledRef.current) return;
+    const rsvpQuery = searchParams.get("rsvp");
+    if (!rsvpQuery) return;
+
+    const myPart = meeting.participants?.find((p) => p.user.id === user.id);
+    if (!myPart) return; // User is not an invited attendee for this meeting
+
+    rsvpHandledRef.current = true;
+
+    if (rsvpQuery === "ACCEPTED") {
+      if (myPart.status !== "ACCEPTED") {
+        handleRsvp("ACCEPTED");
+      } else {
+        setPageToast({
+          message: "You have already accepted this meeting invitation.",
+          type: "success",
+        });
+      }
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("rsvp");
+      setSearchParams(nextParams, { replace: true });
+    } else if (rsvpQuery === "REJECTED" || rsvpQuery === "DECLINE") {
+      // Automatically pop open the Decline Modal to prompt user for required reason
+      setIsDeclineModalOpen(true);
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("rsvp");
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [meeting, user, searchParams, setSearchParams]);
+
   const handleRequestSignatures = async () => {
     if (!id || requestingSignatures) return;
     setRequestingSignatures(true);
@@ -328,7 +430,11 @@ export default function MeetingDetail() {
       );
       setMeeting(updated);
     } catch (err: any) {
-      alert(err.message || "Failed to initiate participant signatures.");
+      await alert({
+        title: "Signature Initiation Failed",
+        message: err.message || "Failed to initiate participant signatures.",
+        tone: "danger",
+      });
     } finally {
       setRequestingSignatures(false);
     }
@@ -336,8 +442,13 @@ export default function MeetingDetail() {
 
   const updateStatus = async (status: MeetingStatus) => {
     if (!id || !meeting) return;
-    if (meeting.status === "APPROVED") {
-      alert("This meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission.");
+    if (meeting.status === "APPROVED" && !hasAdminOverride) {
+      await alert({
+        title: "Meeting is Locked",
+        message:
+          "This meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission.",
+        tone: "warning",
+      });
       return;
     }
     if (status === "APPROVED") {
@@ -349,11 +460,36 @@ export default function MeetingDetail() {
       return;
     }
     if (isLocked && !hasAdminOverride) {
-      alert("This meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status.");
+      await alert({
+        title: "Status Change Blocked",
+        message:
+          "This meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status.",
+        tone: "warning",
+      });
       return;
     }
     if (status === "CANCELLED" && meeting.status !== "CANCELLED") {
-      if (!window.confirm("Are you sure you want to cancel this meeting? All participants and the organizer will receive a cancellation notification.")) {
+      const confirmed = await confirm({
+        title: "Cancel Meeting",
+        message:
+          "Are you sure you want to cancel this meeting? All participants and the organizer will receive a cancellation notification.",
+        tone: "danger",
+        confirmLabel: "Yes, Cancel Meeting",
+        cancelLabel: "Keep Meeting",
+      });
+      if (!confirmed) {
+        return;
+      }
+    }
+    if (status === "COMPLETED") {
+      if (!canCompleteMeeting) {
+        await alert({
+          title: "Completion Blocked",
+          message:
+            "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+          tone: "warning",
+          confirmLabel: "Understood",
+        });
         return;
       }
     }
@@ -368,7 +504,11 @@ export default function MeetingDetail() {
         // ignore
       }
     } catch (err: any) {
-      alert(err.message || "Failed to update status.");
+      await alert({
+        title: "Status Update Error",
+        message: err.message || "Failed to update status.",
+        tone: "danger",
+      });
     }
   };
 
@@ -445,6 +585,26 @@ export default function MeetingDetail() {
                     </Button>
                   )}
 
+                  {/* Complete Meeting Button */}
+                  {meeting.status !== "COMPLETED" && meeting.status !== "CANCELLED" && (canManage || hasAdminOverride) && (
+                    <Button
+                      variant="secondary"
+                      type="button"
+                      onClick={() => updateStatus("COMPLETED")}
+                      className={`text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 font-semibold text-emerald-900 shadow-2xs transition-all ${
+                        !canCompleteMeeting ? "opacity-75 cursor-not-allowed" : ""
+                      }`}
+                      title={
+                        canCompleteMeeting
+                          ? "Complete meeting (Content verified in Summary, Decision, or Action Items)"
+                          : "To complete the meeting, at least one section (Meeting Summary, Decision, or Action Item) must contain content."
+                      }
+                    >
+                      <CheckCircle2 size={13} className="text-emerald-700" />
+                      <span>Complete Meeting</span>
+                    </Button>
+                  )}
+
                   {/* Approve Meeting */}
                   {canApprove && (
                     <Button
@@ -472,7 +632,7 @@ export default function MeetingDetail() {
                     </span>
                   )}
                   <PriorityBadge priority={meeting.priority} />
-                  {meeting.status === "APPROVED" ? (
+                  {meeting.status === "APPROVED" && !hasAdminOverride ? (
                     <div
                       className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border ${STATUS_CONFIG.APPROVED.bg} ${STATUS_CONFIG.APPROVED.border} shadow-2xs`}
                       title="Meeting approved & certified (Read-only)"
@@ -481,7 +641,7 @@ export default function MeetingDetail() {
                       <span>Approved</span>
                       <Lock size={11} className="text-inherit opacity-70 ml-0.5" />
                     </div>
-                  ) : canManage ? (
+                  ) : canManage || hasAdminOverride ? (
                     <div
                       className={`group relative inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border transition-all ${STATUS_CONFIG[meeting.status]?.bg || "bg-slate2-100 text-slate2-700"
                         } ${STATUS_CONFIG[meeting.status]?.border || "border-slate2-200"
@@ -505,7 +665,7 @@ export default function MeetingDetail() {
                         }
                         className="bg-transparent text-inherit font-semibold text-xs border-0 outline-none p-0 pr-4 cursor-pointer disabled:cursor-not-allowed appearance-none focus:ring-0 select-none"
                       >
-                        {STATUS_DROPDOWN_OPTIONS.map((s) => (
+                        {(meeting.status === "APPROVED" ? ["APPROVED", ...STATUS_DROPDOWN_OPTIONS] : STATUS_DROPDOWN_OPTIONS).map((s) => (
                           <option
                             key={s}
                             value={s}
@@ -711,6 +871,133 @@ export default function MeetingDetail() {
         </div>
       )}
 
+      {/* Global Page Feedback Toast */}
+      {pageToast && (
+        <Toast
+          message={pageToast.message}
+          type={pageToast.type}
+          onClose={() => setPageToast(null)}
+        />
+      )}
+
+      {/* Participant RSVP Banner for Invited Users */}
+      {myParticipant && meeting.status !== "CANCELLED" && (
+        <div className="rounded-2xl border border-slate2-200/90 bg-white p-4 sm:p-5 shadow-xs transition-all">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start sm:items-center gap-3.5 min-w-0">
+              <div
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${
+                  myParticipant.status === "ACCEPTED"
+                    ? "bg-emerald-50 text-emerald-600 border-emerald-200"
+                    : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED"
+                    ? "bg-rose-50 text-rose-600 border-rose-200"
+                    : "bg-amber-50 text-amber-600 border-amber-200"
+                }`}
+              >
+                {myParticipant.status === "ACCEPTED" ? (
+                  <CheckCircle2 size={20} />
+                ) : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED" ? (
+                  <XCircle size={20} />
+                ) : (
+                  <Clock size={20} />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-sm text-slate2-900">
+                    Meeting Invitation
+                  </span>
+                  {myParticipant.status === "ACCEPTED" ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
+                      <CheckCircle2 size={12} className="text-emerald-600" />
+                      <span>(Accepted)</span>
+                    </span>
+                  ) : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED" ? (
+                    <div className="inline-flex items-center gap-1.5 flex-wrap">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
+                        <XCircle size={12} className="text-rose-600" />
+                        <span>(Rejected)</span>
+                      </span>
+                      {myParticipant.rejectionReason && (
+                        <span className="text-xs text-rose-700 font-medium">
+                          ➜ &lsquo;{myParticipant.rejectionReason}&rsquo;
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 text-xs font-medium">
+                      <Clock size={11} className="text-amber-600" />
+                      <span>(Awaiting Response)</span>
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate2-500 mt-0.5">
+                  {myParticipant.status === "ACCEPTED"
+                    ? "You confirmed that you will attend this meeting."
+                    : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED"
+                    ? `You declined this invitation.${
+                        myParticipant.rejectionReason ? ` Reason: '${myParticipant.rejectionReason}'` : ""
+                      }`
+                    : "You are invited to this meeting. Please respond to let the organizer know if you can attend."}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-center shrink-0">
+              {myParticipant.status === "INVITED" || !myParticipant.status ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={isSubmittingRsvp}
+                    onClick={() => handleRsvp("ACCEPTED")}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-2 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                  >
+                    {isSubmittingRsvp ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={14} />
+                    )}
+                    <span>Accept (Will Attend)</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmittingRsvp}
+                    onClick={() => setIsDeclineModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 px-3.5 py-2 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <XCircle size={14} />
+                    <span>Decline / Reject</span>
+                  </button>
+                </>
+              ) : (
+                <div className="flex items-center gap-2">
+                  {myParticipant.status === "ACCEPTED" ? (
+                    <button
+                      type="button"
+                      disabled={isSubmittingRsvp}
+                      onClick={() => setIsDeclineModalOpen(true)}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate2-200 bg-white hover:bg-slate2-50 text-slate2-700 px-3 py-1.5 text-xs font-medium shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <span>Change to Decline</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isSubmittingRsvp}
+                      onClick={() => handleRsvp("ACCEPTED")}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-3 py-1.5 text-xs font-medium shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <CheckCircle2 size={13} className="text-emerald-600" />
+                      <span>Change to Accepted</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex gap-1 overflow-x-auto border-b border-slate2-200">
         {TABS.map((t) => (
@@ -727,7 +1014,9 @@ export default function MeetingDetail() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab meeting={meeting} />}
+      {tab === "overview" && (
+        <OverviewTab meeting={meeting} onNavigateTab={setTab} />
+      )}
       {tab === "agenda" && (
         <AgendaTab meeting={meeting} canManage={canManage && canEdit} onChange={load} />
       )}
@@ -810,6 +1099,94 @@ export default function MeetingDetail() {
         />
       )}
 
+      {/* Decline Meeting Invitation Modal Dialog */}
+      {isDeclineModalOpen && (
+        <Modal
+          open={isDeclineModalOpen}
+          onClose={() => {
+            if (!isSubmittingRsvp) setIsDeclineModalOpen(false);
+          }}
+          title="Decline Meeting Invitation"
+        >
+          <div className="space-y-4 text-xs text-slate2-700">
+            <p className="text-xs text-slate2-600">
+              Please provide a reason so the meeting organizer knows why you cannot attend:
+            </p>
+
+            {/* Quick reason suggestions */}
+            <div>
+              <label className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider block mb-1.5">
+                Common Reasons
+              </label>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  "Due to another meeting",
+                  "Schedule conflict",
+                  "Out of office / Annual leave",
+                  "Prior business commitment",
+                  "Field visit / Traveling",
+                ].map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => setDeclineReason(chip)}
+                    className={`rounded-full px-2.5 py-1 text-xs font-medium border transition-colors cursor-pointer ${
+                      declineReason === chip
+                        ? "bg-rose-100 border-rose-300 text-rose-800"
+                        : "bg-slate2-50 border-slate2-200 text-slate2-700 hover:bg-slate2-100"
+                    }`}
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-medium text-slate2-700 block mb-1">
+                Reason / Explanation
+              </label>
+              <input
+                type="text"
+                value={declineReason}
+                onChange={(e) => setDeclineReason(e.target.value)}
+                placeholder="e.g. Due to another meeting"
+                className="w-full rounded-xl border border-slate2-200 bg-white px-3.5 py-2.5 text-xs text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:border-rose-400"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate2-100">
+              <Button
+                variant="secondary"
+                type="button"
+                disabled={isSubmittingRsvp}
+                onClick={() => setIsDeclineModalOpen(false)}
+                className="text-xs"
+              >
+                Cancel
+              </Button>
+              <button
+                type="button"
+                disabled={isSubmittingRsvp || !declineReason.trim()}
+                onClick={() => handleRsvp("REJECTED", declineReason.trim())}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-semibold text-xs px-4 py-2 transition-colors cursor-pointer shadow-2xs"
+              >
+                {isSubmittingRsvp ? (
+                  <>
+                    <Loader2 size={13} className="animate-spin" /> Submitting...
+                  </>
+                ) : (
+                  <>
+                    <XCircle size={14} />
+                    <span>Confirm Decline</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {/* Administrator Unlock Meeting Modal Dialog */}
       {isUnlockModalOpen && meeting && (
         <Modal
@@ -844,6 +1221,7 @@ export default function MeetingDetail() {
                 className="w-full rounded-lg border border-slate2-300 bg-white px-3 py-2 text-xs text-slate2-800 focus:border-brand focus:outline-none"
               >
                 <option value="IN_PROGRESS">IN_PROGRESS (Recommended — Active & Editable)</option>
+                <option value="COMPLETED">COMPLETED (Conclude & Complete Meeting)</option>
                 <option value="DRAFT">DRAFT (Drafting Mode)</option>
                 <option value="SCHEDULED">SCHEDULED (Scheduled Session)</option>
               </select>
@@ -900,7 +1278,27 @@ export default function MeetingDetail() {
   );
 }
 
-function OverviewTab({ meeting }: { meeting: MeetingDetailType }) {
+function OverviewTab({
+  meeting,
+  onNavigateTab,
+}: {
+  meeting: MeetingDetailType;
+  onNavigateTab?: (tab: TabKey) => void;
+}) {
+  const totalParticipants = meeting.participants.length;
+  const acceptedCount = meeting.participants.filter(
+    (p) => p.status === "ACCEPTED",
+  ).length;
+  const rejectedCount = meeting.participants.filter(
+    (p) => p.status === "REJECTED" || p.status === "DECLINED",
+  ).length;
+  const awaitingCount = meeting.participants.filter(
+    (p) =>
+      p.status !== "ACCEPTED" &&
+      p.status !== "REJECTED" &&
+      p.status !== "DECLINED",
+  ).length;
+
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
       <Card className="p-4 text-center">
@@ -921,6 +1319,96 @@ function OverviewTab({ meeting }: { meeting: MeetingDetailType }) {
         </p>
         <p className="text-xs text-slate2-500">Action items</p>
       </Card>
+
+      {/* View for Meeting Organizer: Participant Invitations & RSVP Breakdown */}
+      <Card className="p-5 lg:col-span-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate2-100">
+          <div className="flex items-center gap-2">
+            <Users size={16} className="text-brand" />
+            <h4 className="text-sm font-bold text-slate2-900">
+              Participant Invitation Status
+            </h4>
+          </div>
+          <div className="flex items-center gap-2 text-xs flex-wrap">
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
+              <CheckCircle2 size={12} className="text-emerald-600" />
+              {acceptedCount} Accepted
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
+              <XCircle size={12} className="text-rose-600" />
+              {rejectedCount} Rejected
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 text-xs font-medium">
+              <Clock size={11} className="text-amber-600" />
+              {awaitingCount} Awaiting
+            </span>
+            {onNavigateTab && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab("participants")}
+                className="text-xs text-brand hover:underline font-semibold ml-2 cursor-pointer"
+              >
+                View all in Participants Tab →
+              </button>
+            )}
+          </div>
+        </div>
+
+        {meeting.participants.length === 0 ? (
+          <p className="py-4 text-xs text-slate2-400 text-center">
+            No participants invited yet.
+          </p>
+        ) : (
+          <div className="divide-y divide-slate2-100 mt-2">
+            {meeting.participants.map((p) => (
+              <div
+                key={p.id}
+                className="py-2.5 flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span
+                    className="inline-block h-2.5 w-2.5 rounded-full shrink-0"
+                    style={{ backgroundColor: p.user.avatarColor || "#0b2545" }}
+                  />
+                  <span className="text-xs font-semibold text-slate2-900 truncate">
+                    {p.user.name}
+                  </span>
+                  <span className="text-xs text-slate2-400 truncate hidden sm:inline">
+                    {p.user.email}
+                  </span>
+                </div>
+
+                <div className="shrink-0">
+                  {p.status === "ACCEPTED" ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
+                      <CheckCircle2 size={12} className="text-emerald-600" />
+                      <span>(Accepted)</span>
+                    </span>
+                  ) : p.status === "REJECTED" || p.status === "DECLINED" ? (
+                    <div className="inline-flex items-center gap-1.5 flex-wrap justify-end">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
+                        <XCircle size={12} className="text-rose-600" />
+                        <span>(Rejected)</span>
+                      </span>
+                      {p.rejectionReason && (
+                        <span className="text-xs text-rose-700 font-medium">
+                          ➜ &lsquo;{p.rejectionReason}&rsquo;
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 text-xs font-medium">
+                      <Clock size={11} className="text-amber-600" />
+                      <span>(Awaiting Response)</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
       <Card className="p-5 lg:col-span-3">
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate2-400">
           Workflow
@@ -960,6 +1448,7 @@ function AgendaTab({
   canManage: boolean;
   onChange: () => void;
 }) {
+  const { confirm } = useAlert();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [presenter, setPresenter] = useState("");
@@ -1042,7 +1531,14 @@ function AgendaTab({
   };
 
   const deleteItem = async (agendaId: string) => {
-    if (!window.confirm("Are you sure you want to remove this agenda item?")) return;
+    const confirmed = await confirm({
+      title: "Remove Agenda Item",
+      message: "Are you sure you want to remove this agenda item?",
+      tone: "danger",
+      confirmLabel: "Remove",
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) return;
     try {
       await api.delete(`/meetings/agenda/${agendaId}`);
       onChange();
@@ -2050,6 +2546,7 @@ function DecisionsTab({
   canManage: boolean;
   onChange: () => void;
 }) {
+  const { alert, confirm } = useAlert();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -2076,7 +2573,11 @@ function DecisionsTab({
       setDescription("");
       onChange();
     } catch (err: any) {
-      alert(err.message || "Failed to create decision.");
+      await alert({
+        title: "Creation Failed",
+        message: err.message || "Failed to create decision.",
+        tone: "danger",
+      });
     } finally {
       setSubmitting(false);
     }
@@ -2122,12 +2623,23 @@ function DecisionsTab({
       await api.put(`/meetings/decisions/${decisionId}`, { status: newStatus });
       onChange();
     } catch (err: any) {
-      alert(err.message || "Failed to update status.");
+      await alert({
+        title: "Status Update Failed",
+        message: err.message || "Failed to update status.",
+        tone: "danger",
+      });
     }
   };
 
   const deleteDecision = async (decisionId: string, code: string) => {
-    if (!window.confirm(`Are you sure you want to delete decision "${code}"? Any linked action items will be unlinked.`)) {
+    const confirmed = await confirm({
+      title: "Delete Decision",
+      message: `Are you sure you want to delete decision "${code}"? Any linked action items will be unlinked.`,
+      tone: "danger",
+      confirmLabel: "Delete Decision",
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) {
       return;
     }
     setDeletingId(decisionId);
@@ -2138,7 +2650,11 @@ function DecisionsTab({
       }
       onChange();
     } catch (err: any) {
-      alert(err.message || "Failed to delete decision.");
+      await alert({
+        title: "Delete Failed",
+        message: err.message || "Failed to delete decision.",
+        tone: "danger",
+      });
     } finally {
       setDeletingId(null);
     }
@@ -2371,13 +2887,43 @@ function ActionsTab({
   canCreate: boolean;
   onChange: () => void;
 }) {
-  const { user, hasPermission, hasAnyPermission } = useAuth();
+  const { user, hasPermission } = useAuth();
+  const { alert, confirm } = useAlert();
   const [users, setUsers] = useState<User[]>([]);
+  const [editingItem, setEditingItem] = useState<ActionItem | null>(null);
+
+  // Filter by Assignee state: "ALL" | "MINE" | userId
+  const [assigneeFilter, setAssigneeFilter] = useState<string>("ALL");
+
+  // Creation form state
+  const [creationMode, setCreationMode] = useState<"SINGLE" | "BATCH">("SINGLE");
   const [title, setTitle] = useState("");
-  const [assignedToId, setAssignedToId] = useState("");
-  const [deadline, setDeadline] = useState("");
+  const [assignedUserIds, setAssignedUserIds] = useState<string[]>([]);
+  const [priority, setPriority] = useState<Priority>("MEDIUM");
   const [decisionId, setDecisionId] = useState("");
+  const [assignmentMode, setAssignmentMode] = useState<"SHARED" | "INDIVIDUAL">("SHARED");
+  const [keepAssignees, setKeepAssignees] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+
+  // Default deadline: 7 days from today
+  const defaultDeadlineStr = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }, []);
+
+  const [deadline, setDeadline] = useState(defaultDeadlineStr);
+
+  // Batch task rows state
+  const [batchTasks, setBatchTasks] = useState<
+    Array<{ id: string; title: string; deadline: string; priority: Priority }>
+  >([
+    { id: "1", title: "", deadline: defaultDeadlineStr, priority: "MEDIUM" },
+    { id: "2", title: "", deadline: defaultDeadlineStr, priority: "MEDIUM" },
+  ]);
 
   // Today's date string in YYYY-MM-DD format to lock past dates in calendar picker
   const todayDateStr = useMemo(() => {
@@ -2393,16 +2939,17 @@ function ActionsTab({
   }, []);
 
   const isMeetingCancelled = meeting.status === "CANCELLED";
+  // Completed meetings: action items are view-only (status, edit, delete all locked)
+  const isActionItemsLocked = meeting.status === "COMPLETED";
 
-  // Check if current user can update status for a specific action item
-  const canUpdateItemStatus = (item: (typeof meeting.actionItems)[number]) => {
-    // If meeting is cancelled, everything is locked, even action item status
-    if (isMeetingCancelled) {
-      return false;
-    }
+  // Check if current user can update status / edit for a specific action item
+  const canUpdateItem = (item: (typeof meeting.actionItems)[number]) => {
+    if (isMeetingCancelled) return false;
     if (hasPermission("ADMIN_OVERRIDE")) return true;
-    if (user && user.id === item.assignedTo.id) return true;
-    if (user && user.id === meeting.organizer.id) return true;
+    const assignees = getActionItemAssignees(item);
+    if (user && assignees.some((u) => u.id === user.id)) return true;
+    if (user && item.assignedTo && user.id === item.assignedTo.id) return true;
+    if (user && user.id === meeting.organizer?.id) return true;
     if (hasPermission("action_items:edit:all") || hasPermission("meetings:edit:all")) return true;
     if (
       (hasPermission("action_items:edit:dept") || hasPermission("meetings:edit:dept")) &&
@@ -2413,32 +2960,189 @@ function ActionsTab({
     return false;
   };
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title.trim() || !assignedToId || !deadline) return;
+  const canDeleteItem = (item: (typeof meeting.actionItems)[number]) => {
+    if (isActionItemsLocked) return false;
+    if (isMeetingCancelled) return false;
+    if (hasPermission("ADMIN_OVERRIDE")) return true;
+    if (user && user.id === meeting.organizer?.id) return true;
+    if (hasPermission("action_items:delete:all") || hasPermission("meetings:edit:all")) return true;
+    if (
+      (hasPermission("action_items:delete:dept") || hasPermission("meetings:edit:dept")) &&
+      user?.department?.id === meeting.department?.id
+    ) {
+      return true;
+    }
+    return false;
+  };
 
+  // Grouped assignee stats for the filter bar
+  const assigneeStats = useMemo(() => {
+    const map = new Map<string, { user: { id: string; name: string; avatarColor?: string }; count: number }>();
+    meeting.actionItems.forEach((item) => {
+      const assignees = getActionItemAssignees(item);
+      assignees.forEach((u) => {
+        if (!map.has(u.id)) {
+          map.set(u.id, { user: u, count: 0 });
+        }
+        map.get(u.id)!.count++;
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+  }, [meeting.actionItems]);
+
+  const myTasksCount = useMemo(() => {
+    if (!user) return 0;
+    return meeting.actionItems.filter((i) => {
+      const assignees = getActionItemAssignees(i);
+      return assignees.some((u) => u.id === user.id);
+    }).length;
+  }, [meeting.actionItems, user]);
+
+  // Filtered action items based on active assignee tab
+  const displayedActionItems = useMemo(() => {
+    if (assigneeFilter === "ALL") return meeting.actionItems;
+    if (assigneeFilter === "MINE") {
+      if (!user) return meeting.actionItems;
+      return meeting.actionItems.filter((i) =>
+        getActionItemAssignees(i).some((u) => u.id === user.id)
+      );
+    }
+    return meeting.actionItems.filter((i) =>
+      getActionItemAssignees(i).some((u) => u.id === assigneeFilter)
+    );
+  }, [meeting.actionItems, assigneeFilter, user]);
+
+  // Single task submit
+  const submitSingle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) {
+      await alert({
+        title: "Task Description Required",
+        message: "Please enter a description for the action item.",
+        tone: "warning",
+      });
+      return;
+    }
+    if (assignedUserIds.length === 0) {
+      await alert({
+        title: "Assignee Required",
+        message: "Please select at least one team member to assign this action item to.",
+        tone: "warning",
+      });
+      return;
+    }
+    if (!deadline) {
+      await alert({
+        title: "Due Date Required",
+        message: "Please select a due date for this action item.",
+        tone: "warning",
+      });
+      return;
+    }
     if (deadline < todayDateStr) {
-      alert("Action item deadline cannot be in the past. Please select today or a future date.");
+      await alert({
+        title: "Invalid Deadline",
+        message: "Action item deadline cannot be in the past. Please select today or a future date.",
+        tone: "warning",
+      });
       return;
     }
 
-    const assignee = users.find((u) => u.id === assignedToId);
     setSubmitting(true);
     try {
       await api.post("/action-items", {
         meetingId: meeting.id,
         decisionId: decisionId || undefined,
-        title,
-        assignedToId,
-        departmentId: assignee?.departmentId,
+        title: title.trim(),
+        assigneeIds: assignedUserIds,
+        assignedToId: assignedUserIds[0],
+        departmentId: meeting.department?.id,
+        priority,
         deadline,
+        assignmentMode: assignedUserIds.length > 1 ? assignmentMode : "SHARED",
       });
+
       setTitle("");
-      setAssignedToId("");
-      setDeadline("");
+      setDeadline(defaultDeadlineStr);
+      setDecisionId("");
+      if (!keepAssignees) {
+        setAssignedUserIds([]);
+      }
       onChange();
     } catch (err: any) {
-      alert(err.message || "Failed to create action item.");
+      await alert({
+        title: "Action Item Error",
+        message: err.message || "Failed to create action item.",
+        tone: "danger",
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Batch tasks submit
+  const submitBatch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (assignedUserIds.length === 0) {
+      await alert({
+        title: "Assignee Required",
+        message: "Please select at least one assignee for these action items.",
+        tone: "warning",
+      });
+      return;
+    }
+
+    const validTasks = batchTasks.filter((t) => t.title.trim().length > 0);
+    if (validTasks.length === 0) {
+      await alert({
+        title: "Tasks Required",
+        message: "Please enter at least one task title to assign.",
+        tone: "warning",
+      });
+      return;
+    }
+
+    for (const t of validTasks) {
+      if (t.deadline < todayDateStr) {
+        await alert({
+          title: "Invalid Deadline",
+          message: `The deadline for task "${t.title}" cannot be in the past.`,
+          tone: "warning",
+        });
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    try {
+      await api.post("/action-items/batch", {
+        meetingId: meeting.id,
+        items: validTasks.map((t) => ({
+          title: t.title.trim(),
+          assigneeIds: assignedUserIds,
+          deadline: t.deadline || defaultDeadlineStr,
+          priority: t.priority,
+          decisionId: decisionId || undefined,
+          assignmentMode: assignedUserIds.length > 1 ? assignmentMode : "SHARED",
+        })),
+      });
+
+      setBatchTasks([
+        { id: "1", title: "", deadline: defaultDeadlineStr, priority: "MEDIUM" },
+        { id: "2", title: "", deadline: defaultDeadlineStr, priority: "MEDIUM" },
+      ]);
+      setDecisionId("");
+      if (!keepAssignees) {
+        setAssignedUserIds([]);
+      }
+      setCreationMode("SINGLE");
+      onChange();
+    } catch (err: any) {
+      await alert({
+        title: "Batch Action Items Error",
+        message: err.message || "Failed to create batch action items.",
+        tone: "danger",
+      });
     } finally {
       setSubmitting(false);
     }
@@ -2449,139 +3153,982 @@ function ActionsTab({
       await api.put(`/action-items/${id}`, { status });
       onChange();
     } catch (err: any) {
-      alert(err.message || "Failed to update action item status.");
+      await alert({
+        title: "Status Update Error",
+        message: err.message || "Failed to update action item status.",
+        tone: "danger",
+      });
     }
   };
+
+  const handleDeleteItem = async (item: ActionItem) => {
+    const ok = await confirm({
+      title: "Delete Action Item?",
+      message: `Are you sure you want to permanently delete "${item.title}" (${item.code})? This action cannot be undone.`,
+      tone: "danger",
+      confirmLabel: "Delete Action Item",
+    });
+    if (!ok) return;
+
+    try {
+      await api.delete(`/action-items/${item.id}`);
+      onChange();
+    } catch (err: any) {
+      await alert({
+        title: "Delete Error",
+        message: err.message || "Failed to delete action item.",
+        tone: "danger",
+      });
+    }
+  };
+
+  const selectedUsers = users.filter((u) => assignedUserIds.includes(u.id));
 
   return (
     <Card>
       <CardHeader
-        title="Action Items"
-        subtitle="Tasks assigned from this meeting's decisions"
+        title={
+          <span className="flex items-center gap-2">
+            Action Items
+            {isActionItemsLocked && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-500 border border-slate2-200 px-2.5 py-0.5 text-xs font-semibold">
+                <Lock size={11} />
+                View Only
+              </span>
+            )}
+          </span>
+        }
+        subtitle="Manage single or multiple task assignments across team members"
+        action={
+          canCreate && !isActionItemsLocked && (
+            <div className="flex items-center gap-1.5 bg-slate2-100 p-0.5 rounded-lg text-xs">
+              <button
+                type="button"
+                onClick={() => setCreationMode("SINGLE")}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                  creationMode === "SINGLE"
+                    ? "bg-white text-brand shadow-2xs"
+                    : "text-slate2-600 hover:text-slate2-900"
+                }`}
+              >
+                Standard Task
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreationMode("BATCH")}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                  creationMode === "BATCH"
+                    ? "bg-white text-brand shadow-2xs"
+                    : "text-slate2-600 hover:text-slate2-900"
+                }`}
+              >
+                Batch Multiple Tasks
+              </button>
+            </div>
+          )
+        }
       />
+
+      {/* Assignee Filter Tabs Bar (Instant visibility for multiple actions per user) */}
+      {meeting.actionItems.length > 0 && (
+        <div className="flex items-center gap-1.5 px-5 py-2.5 bg-slate2-50/70 border-b border-slate2-100 overflow-x-auto text-xs">
+          <span className="font-semibold text-slate2-500 text-[11px] uppercase tracking-wider mr-1 shrink-0">
+            Filter:
+          </span>
+          <button
+            type="button"
+            onClick={() => setAssigneeFilter("ALL")}
+            className={`px-2.5 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
+              assigneeFilter === "ALL"
+                ? "bg-[#005f56] text-white shadow-2xs"
+                : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+            }`}
+          >
+            All Tasks ({meeting.actionItems.length})
+          </button>
+
+          {user && myTasksCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setAssigneeFilter("MINE")}
+              className={`px-2.5 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
+                assigneeFilter === "MINE"
+                  ? "bg-[#005f56] text-white shadow-2xs"
+                  : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+              }`}
+            >
+              My Tasks ({myTasksCount})
+            </button>
+          )}
+
+          {assigneeStats.map(({ user: u, count }) => (
+            <button
+              key={u.id}
+              type="button"
+              onClick={() => setAssigneeFilter(u.id)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
+                assigneeFilter === u.id
+                  ? "bg-[#005f56] text-white shadow-2xs"
+                  : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+              }`}
+            >
+              <span
+                className="h-2 w-2 rounded-full shrink-0"
+                style={{ backgroundColor: u.avatarColor || "#005f56" }}
+              />
+              <span>{u.name.split(" ")[0]}</span>
+              <span
+                className={`text-[10px] font-bold rounded-full px-1.5 py-0.2 ${
+                  assigneeFilter === u.id ? "bg-white/20 text-white" : "bg-slate2-100 text-slate2-600"
+                }`}
+              >
+                {count}
+              </span>
+            </button>
+          ))}
+
+          {assigneeFilter !== "ALL" && (
+            <button
+              type="button"
+              onClick={() => setAssigneeFilter("ALL")}
+              className="text-[11px] font-semibold text-brand hover:underline shrink-0 ml-2"
+            >
+              Reset filter
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Action Items List */}
       <div className="divide-y divide-slate2-100">
-        {meeting.actionItems.length === 0 ? (
+        {displayedActionItems.length === 0 ? (
           <EmptyState
-            title="No action items yet"
-            description="Turn a decision into a tracked task with an owner and deadline."
+            title={assigneeFilter !== "ALL" ? "No matching action items" : "No action items yet"}
+            description={
+              assigneeFilter !== "ALL"
+                ? "No tasks assigned to the selected assignee filter."
+                : "Turn meeting decisions into tracked tasks with single or multi-user accountability."
+            }
           />
         ) : (
-          meeting.actionItems.map((a) => (
-            <div
-              key={a.id}
-              className="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div className="flex items-center gap-3">
-                <Avatar
-                  name={a.assignedTo.name}
-                  color={a.assignedTo.avatarColor}
-                />
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-slate2-800">
-                      {a.title}
-                    </p>
-                    <CodeChip>{a.code}</CodeChip>
-                  </div>
-                  <p className="text-xs text-slate2-400">
-                    {a.assignedTo.name} · Due{" "}
-                    {new Date(a.deadline).toLocaleDateString()}
-                    {a.overdue && (
-                      <span className="ml-1 font-medium text-danger">
-                        · Overdue
-                      </span>
+          displayedActionItems.map((a) => {
+            const assignees = getActionItemAssignees(a);
+            const userCanUpdate = canUpdateItem(a);
+            const userCanDelete = canDeleteItem(a);
+
+            return (
+              <div
+                key={a.id}
+                className="flex flex-col gap-3 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between hover:bg-slate2-50/50 transition-colors"
+              >
+                <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+                  {/* Avatar stack */}
+                  <div className="shrink-0 mt-0.5 sm:mt-0">
+                    {assignees.length <= 1 ? (
+                      <Avatar
+                        name={assignees[0]?.name || a.assignedTo?.name || "Unassigned"}
+                        color={assignees[0]?.avatarColor || a.assignedTo?.avatarColor}
+                      />
+                    ) : (
+                      <div className="flex -space-x-2 overflow-hidden shrink-0">
+                        {assignees.slice(0, 3).map((u) => (
+                          <div key={u.id} className="ring-2 ring-white rounded-full">
+                            <Avatar name={u.name} color={u.avatarColor} />
+                          </div>
+                        ))}
+                        {assignees.length > 3 && (
+                          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-slate2-100 text-[10px] font-bold text-slate2-600 ring-2 ring-white">
+                            +{assignees.length - 3}
+                          </div>
+                        )}
+                      </div>
                     )}
-                  </p>
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-semibold text-slate2-800">
+                        {a.title}
+                      </p>
+                      <CodeChip>{a.code}</CodeChip>
+                      <PriorityBadge priority={a.priority} />
+                      {a.decisionId && (
+                        <span className="rounded bg-teal-50 border border-teal-200 px-1.5 py-0.5 text-[10px] font-semibold text-teal-800">
+                          Linked Decision
+                        </span>
+                      )}
+                    </div>
+                    {a.description && (
+                      <p className="text-xs text-slate2-500 mt-0.5 line-clamp-1">
+                        {a.description}
+                      </p>
+                    )}
+                    <p className="text-xs text-slate2-500 truncate max-w-xl mt-1">
+                      <span className="text-slate2-400">Assigned: </span>
+                      <strong className="text-slate2-700 font-semibold">
+                        {assignees.length > 0
+                          ? assignees.map((u) => u.name).join(", ")
+                          : a.assignedTo?.name || "Unassigned"}
+                      </strong>
+                      {assignees.length > 1 && (
+                        <span className="ml-1.5 text-[10px] font-semibold text-[#005f56] bg-[#e6f4f1] border border-[#c2e7df] px-1.5 py-0.2 rounded-full">
+                          {assignees.length} assignees
+                        </span>
+                      )}
+                      {" "}· Due {new Date(a.deadline).toLocaleDateString()}
+                      {a.overdue && (
+                        <span className="ml-1.5 font-bold text-danger bg-red-50 border border-red-200 px-1.5 py-0.2 rounded text-[10px]">
+                          Overdue
+                        </span>
+                      )}
+                    </p>
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-3 sm:w-56">
-                <ProgressBar
-                  percent={a.progressPercent}
-                  tone={
-                    a.overdue
-                      ? "danger"
-                      : a.status === "COMPLETED"
-                        ? "success"
-                        : "brand"
-                  }
-                />
-                <select
-                  value={a.status}
-                  onChange={(e) => updateStatus(a.id, e.target.value)}
-                  disabled={!canUpdateItemStatus(a)}
-                  title={
-                    isMeetingCancelled
-                      ? "Meeting is cancelled. Action items are locked from editing."
-                      : !canUpdateItemStatus(a)
+
+                {/* Status & Actions Hub */}
+                <div className="flex items-center gap-2.5 sm:w-auto shrink-0 justify-between sm:justify-end">
+                  <div className="w-24 sm:w-28 hidden md:block">
+                    <div className="flex items-center justify-between text-[10px] text-slate2-500 mb-1">
+                      <span>Progress</span>
+                      <span className="font-semibold">{a.progressPercent}%</span>
+                    </div>
+                    <ProgressBar
+                      percent={a.progressPercent}
+                      tone={
+                        a.overdue
+                          ? "danger"
+                          : a.status === "COMPLETED"
+                          ? "success"
+                          : "brand"
+                      }
+                    />
+                  </div>
+
+                  <select
+                    value={a.status}
+                    onChange={(e) => updateStatus(a.id, e.target.value)}
+                    disabled={!userCanUpdate}
+                    title={
+                      isMeetingCancelled
+                        ? "Meeting is cancelled. Action items are locked from editing."
+                        : !userCanUpdate
                         ? "You do not have permission to update this action item status."
-                        : undefined
-                  }
-                  className={`${inputClass} w-auto text-xs ${!canUpdateItemStatus(a) ? "opacity-60 cursor-not-allowed bg-slate2-100" : ""
+                        : "Change status"
+                    }
+                    className={`${inputClass} w-auto text-xs py-1 px-2 ${
+                      !userCanUpdate ? "opacity-60 cursor-not-allowed bg-slate2-100" : "cursor-pointer"
                     }`}
-                >
-                  {["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"].map(
-                    (s) => (
+                  >
+                    {["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"].map((s) => (
                       <option key={s} value={s}>
                         {s.replace("_", " ")}
                       </option>
-                    ),
+                    ))}
+                  </select>
+
+                  {/* Edit button — hidden when meeting is completed or no update permission */}
+                  {userCanUpdate && !isActionItemsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingItem(a)}
+                      className="p-1.5 text-slate2-500 hover:text-brand hover:bg-slate2-100 rounded-md transition-colors cursor-pointer"
+                      title="Edit action item, assignees & progress"
+                    >
+                      <Pencil size={14} />
+                    </button>
                   )}
-                </select>
+
+                  {/* Delete button */}
+                  {userCanDelete && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteItem(a)}
+                      className="p-1.5 text-slate2-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+                      title="Delete action item"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
-      {canCreate && (
+
+      {/* Creation Form: Single Mode */}
+      {canCreate && !isActionItemsLocked && creationMode === "SINGLE" && (
         <form
-          onSubmit={submit}
-          className="space-y-2 border-t border-slate2-100 p-4"
+          onSubmit={submitSingle}
+          className="space-y-3 border-t border-slate2-100 p-4 bg-slate2-50/40"
         >
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Task description"
-              className={`${inputClass} sm:col-span-2`}
-            />
-            <SearchableUserSelect
-              users={users}
-              selectedUserId={assignedToId}
-              onSelect={setAssignedToId}
-              meetingParticipants={meeting.participants}
-              organizerId={meeting.organizer?.id}
-              placeholder="Assign to…"
-            />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+            <div className="sm:col-span-5">
+              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                Task Description <span className="text-red-500">*</span>
+              </label>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="What needs to be done?"
+                className={`${inputClass} w-full`}
+              />
+            </div>
+            <div className="sm:col-span-4">
+              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                Assign To (One or Multiple) <span className="text-red-500">*</span>
+              </label>
+              <SearchableUserSelect
+                users={users}
+                isMulti
+                selectedUserIds={assignedUserIds}
+                onSelectMultiple={setAssignedUserIds}
+                meetingParticipants={meeting.participants}
+                organizerId={meeting.organizer?.id}
+                placeholder="Select one or multiple users…"
+              />
+            </div>
+            <div className="sm:col-span-3">
+              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                Due Date <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                min={todayDateStr}
+                value={deadline}
+                onChange={(e) => setDeadline(e.target.value)}
+                className={`${inputClass} w-full`}
+              />
+            </div>
+          </div>
+
+          {/* Multi-User Assignment Mode Choice (When 2+ users are selected) */}
+          {assignedUserIds.length > 1 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-[#eaf6f4] border border-[#bce4dc] px-3.5 py-2.5 rounded-lg text-xs">
+              <div className="flex items-center gap-1.5 text-[#005f56] font-semibold">
+                <Users size={15} />
+                <span>Multi-User Assignment Mode:</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-1.5 cursor-pointer font-medium text-slate2-800">
+                  <input
+                    type="radio"
+                    name="assignmentModeSingle"
+                    checked={assignmentMode === "SHARED"}
+                    onChange={() => setAssignmentMode("SHARED")}
+                    className="text-[#005f56] focus:ring-[#005f56]"
+                  />
+                  <span>
+                    👥 Joint Shared Task (1 task for all {assignedUserIds.length} assignees)
+                  </span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer font-medium text-slate2-800">
+                  <input
+                    type="radio"
+                    name="assignmentModeSingle"
+                    checked={assignmentMode === "INDIVIDUAL"}
+                    onChange={() => setAssignmentMode("INDIVIDUAL")}
+                    className="text-[#005f56] focus:ring-[#005f56]"
+                  />
+                  <span>
+                    📋 Separate Tasks (Creates {assignedUserIds.length} individual tasks)
+                  </span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-1">
+            <div className="sm:col-span-4">
+              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                Priority
+              </label>
+              <select
+                value={priority}
+                onChange={(e) => setPriority(e.target.value as Priority)}
+                className={`${inputClass} w-full`}
+              >
+                <option value="LOW">Low Priority</option>
+                <option value="MEDIUM">Medium Priority</option>
+                <option value="HIGH">High Priority</option>
+                <option value="CRITICAL">Critical Priority</option>
+              </select>
+            </div>
+            {meeting.decisions.length > 0 && (
+              <div className="sm:col-span-8">
+                <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                  Link to Decision (Optional)
+                </label>
+                <select
+                  value={decisionId}
+                  onChange={(e) => setDecisionId(e.target.value)}
+                  className={`${inputClass} w-full`}
+                >
+                  <option value="">No decision linked</option>
+                  {meeting.decisions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.code} — {d.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate2-200/60">
+            {/* Left: Keep assignees checkbox for rapid sequential task addition */}
+            <label className="flex items-center gap-2 text-xs text-slate2-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={keepAssignees}
+                onChange={(e) => setKeepAssignees(e.target.checked)}
+                className="rounded border-slate2-300 text-brand focus:ring-brand"
+              />
+              <span>Keep assignee(s) selected to add multiple tasks</span>
+            </label>
+
+            {/* Right: Submit Button */}
+            <Button type="submit" disabled={submitting}>
+              {submitting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> Assigning…
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 size={14} />
+                  <span>
+                    Assign action item{" "}
+                    {assignedUserIds.length > 1
+                      ? assignmentMode === "INDIVIDUAL"
+                        ? `(${assignedUserIds.length} individual tasks)`
+                        : `(${assignedUserIds.length} users)`
+                      : ""}
+                  </span>
+                </>
+              )}
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {/* Creation Form: Batch Mode (Multiple tasks to one user or multiple users) */}
+      {canCreate && !isActionItemsLocked && creationMode === "BATCH" && (
+        <form
+          onSubmit={submitBatch}
+          className="space-y-4 border-t border-slate2-100 p-4 bg-teal-50/20"
+        >
+          <div className="flex items-center justify-between pb-2 border-b border-teal-100">
+            <div>
+              <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wide">
+                Batch Task Assignment
+              </h4>
+              <p className="text-[11px] text-slate2-500">
+                Assign multiple tasks to one team member or distribute across multiple members at once.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCreationMode("SINGLE")}
+              className="text-xs font-semibold text-brand hover:underline"
+            >
+              Switch to single task
+            </button>
+          </div>
+
+          {/* Select Assignee(s) for the batch */}
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+            <div className="sm:col-span-8">
+              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                Assign All Tasks To <span className="text-red-500">*</span>
+              </label>
+              <SearchableUserSelect
+                users={users}
+                isMulti
+                selectedUserIds={assignedUserIds}
+                onSelectMultiple={setAssignedUserIds}
+                meetingParticipants={meeting.participants}
+                organizerId={meeting.organizer?.id}
+                placeholder="Select team member(s) to receive these tasks…"
+              />
+            </div>
+            {meeting.decisions.length > 0 && (
+              <div className="sm:col-span-4">
+                <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                  Link to Decision (Optional)
+                </label>
+                <select
+                  value={decisionId}
+                  onChange={(e) => setDecisionId(e.target.value)}
+                  className={`${inputClass} w-full`}
+                >
+                  <option value="">No decision linked</option>
+                  {meeting.decisions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.code} — {d.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Multi-User choice in Batch */}
+          {assignedUserIds.length > 1 && (
+            <div className="flex items-center gap-4 bg-[#eaf6f4] border border-[#bce4dc] px-3.5 py-2 rounded-lg text-xs">
+              <span className="font-semibold text-[#005f56]">Mode:</span>
+              <label className="flex items-center gap-1.5 cursor-pointer text-slate2-800">
+                <input
+                  type="radio"
+                  name="assignmentModeBatch"
+                  checked={assignmentMode === "SHARED"}
+                  onChange={() => setAssignmentMode("SHARED")}
+                  className="text-[#005f56] focus:ring-[#005f56]"
+                />
+                <span>Joint Shared Tasks (Assignees work together on each task)</span>
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer text-slate2-800">
+                <input
+                  type="radio"
+                  name="assignmentModeBatch"
+                  checked={assignmentMode === "INDIVIDUAL"}
+                  onChange={() => setAssignmentMode("INDIVIDUAL")}
+                  className="text-[#005f56] focus:ring-[#005f56]"
+                />
+                <span>Separate Individual Tasks (Each user gets a private copy)</span>
+              </label>
+            </div>
+          )}
+
+          {/* Task rows */}
+          <div className="space-y-2">
+            <label className="block text-[11px] font-semibold text-slate2-600">
+              Action Items ({batchTasks.length})
+            </label>
+            {batchTasks.map((task, idx) => (
+              <div
+                key={task.id}
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-2 bg-white rounded-lg border border-slate2-200 shadow-2xs"
+              >
+                <span className="text-xs font-bold text-slate2-400 w-5 shrink-0 text-center">
+                  #{idx + 1}
+                </span>
+                <input
+                  value={task.title}
+                  onChange={(e) => {
+                    const next = [...batchTasks];
+                    next[idx].title = e.target.value;
+                    setBatchTasks(next);
+                  }}
+                  placeholder={`Task #${idx + 1} description…`}
+                  className={`${inputClass} flex-1`}
+                />
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="date"
+                    min={todayDateStr}
+                    value={task.deadline}
+                    onChange={(e) => {
+                      const next = [...batchTasks];
+                      next[idx].deadline = e.target.value;
+                      setBatchTasks(next);
+                    }}
+                    className={`${inputClass} w-36 text-xs`}
+                  />
+                  <select
+                    value={task.priority}
+                    onChange={(e) => {
+                      const next = [...batchTasks];
+                      next[idx].priority = e.target.value as Priority;
+                      setBatchTasks(next);
+                    }}
+                    className={`${inputClass} w-24 text-xs`}
+                  >
+                    <option value="LOW">Low</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="HIGH">High</option>
+                    <option value="CRITICAL">Critical</option>
+                  </select>
+                  {batchTasks.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBatchTasks(batchTasks.filter((_, i) => i !== idx));
+                      }}
+                      className="p-1.5 text-slate2-400 hover:text-red-500 rounded cursor-pointer"
+                      title="Remove task row"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            <button
+              type="button"
+              onClick={() => {
+                setBatchTasks([
+                  ...batchTasks,
+                  {
+                    id: String(Date.now()),
+                    title: "",
+                    deadline: defaultDeadlineStr,
+                    priority: "MEDIUM",
+                  },
+                ]);
+              }}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand hover:text-brand-dark py-1 px-2 rounded hover:bg-brand/5 cursor-pointer transition-colors"
+            >
+              <Plus size={13} /> Add another task row
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate2-200">
+            <span className="text-xs text-slate2-500">
+              {assignedUserIds.length > 0 ? (
+                <span>
+                  Ready to assign to{" "}
+                  <strong className="text-[#005f56]">
+                    {selectedUsers.map((u) => u.name).join(", ")}
+                  </strong>
+                </span>
+              ) : (
+                <span className="text-slate2-400">Select assignee(s) above</span>
+              )}
+            </span>
+
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setCreationMode("SINGLE")}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={submitting}>
+                {submitting ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" /> Assigning all…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 size={14} /> Assign All Tasks ({batchTasks.filter((t) => t.title.trim()).length || batchTasks.length})
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </form>
+      )}
+
+      {/* Edit Action Item Modal Dialog */}
+      {editingItem && (
+        <ActionItemEditModal
+          item={editingItem}
+          users={users}
+          meeting={meeting}
+          todayDateStr={todayDateStr}
+          onClose={() => setEditingItem(null)}
+          onSuccess={() => {
+            setEditingItem(null);
+            onChange();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+// ---------- Action Item Edit Modal Component ----------
+function ActionItemEditModal({
+  item,
+  users,
+  meeting,
+  todayDateStr,
+  onClose,
+  onSuccess,
+}: {
+  item: ActionItem;
+  users: User[];
+  meeting: MeetingDetailType;
+  todayDateStr: string;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const { alert, confirm } = useAlert();
+  const [title, setTitle] = useState(item.title);
+  const [description, setDescription] = useState(item.description || "");
+  const [priority, setPriority] = useState<Priority>(item.priority);
+  const [status, setStatus] = useState<ActionItemStatus>(item.status);
+  const [progressPercent, setProgressPercent] = useState<number>(item.progressPercent || 0);
+
+  // Initial assignees
+  const initialAssigneeIds = useMemo(() => {
+    const list = getActionItemAssignees(item);
+    return list.map((u) => u.id);
+  }, [item]);
+
+  const [assignedUserIds, setAssignedUserIds] = useState<string[]>(initialAssigneeIds);
+
+  const initialDeadlineStr = useMemo(() => {
+    if (!item.deadline) return "";
+    const d = new Date(item.deadline);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }, [item.deadline]);
+
+  const [deadline, setDeadline] = useState(initialDeadlineStr);
+  const [decisionId, setDecisionId] = useState(item.decisionId || "");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) {
+      await alert({
+        title: "Title Required",
+        message: "Action item title cannot be empty.",
+        tone: "warning",
+      });
+      return;
+    }
+    if (assignedUserIds.length === 0) {
+      await alert({
+        title: "Assignee Required",
+        message: "Please keep at least one team member assigned to this action item.",
+        tone: "warning",
+      });
+      return;
+    }
+    if (!deadline) {
+      await alert({
+        title: "Deadline Required",
+        message: "Please choose a valid deadline date.",
+        tone: "warning",
+      });
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api.put(`/action-items/${item.id}`, {
+        title: title.trim(),
+        description: description.trim() || undefined,
+        priority,
+        status,
+        progressPercent: Number(progressPercent),
+        deadline,
+        decisionId: decisionId || undefined,
+        assigneeIds: assignedUserIds,
+      });
+      onSuccess();
+    } catch (err: any) {
+      await alert({
+        title: "Save Failed",
+        message: err.message || "Failed to update action item.",
+        tone: "danger",
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    const ok = await confirm({
+      title: "Delete Action Item?",
+      message: `Are you sure you want to delete "${item.title}" (${item.code})?`,
+      tone: "danger",
+      confirmLabel: "Delete Permanently",
+    });
+    if (!ok) return;
+
+    setDeleting(true);
+    try {
+      await api.delete(`/action-items/${item.id}`);
+      onSuccess();
+    } catch (err: any) {
+      await alert({
+        title: "Delete Failed",
+        message: err.message || "Failed to delete action item.",
+        tone: "danger",
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`Edit Action Item — ${item.code}`} wide>
+      <form onSubmit={handleSave} className="space-y-4">
+        <div>
+          <label className="block text-xs font-semibold text-slate2-700 mb-1">
+            Task Title <span className="text-red-500">*</span>
+          </label>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className={`${inputClass} w-full`}
+            placeholder="Action item title"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate2-700 mb-1">
+            Task Description / Deliverable Details (Optional)
+          </label>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={2}
+            className={`${inputClass} w-full resize-none`}
+            placeholder="Add relevant notes, links, or expectations…"
+          />
+        </div>
+
+        {/* Multi-User Assignees */}
+        <div>
+          <label className="block text-xs font-semibold text-slate2-700 mb-1">
+            Assigned Team Members (Single or Multiple) <span className="text-red-500">*</span>
+          </label>
+          <SearchableUserSelect
+            users={users}
+            isMulti
+            selectedUserIds={assignedUserIds}
+            onSelectMultiple={setAssignedUserIds}
+            meetingParticipants={meeting.participants}
+            organizerId={meeting.organizer?.id}
+            placeholder="Select assignees…"
+          />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate2-700 mb-1">
+              Due Date <span className="text-red-500">*</span>
+            </label>
             <input
               type="date"
               min={todayDateStr}
               value={deadline}
               onChange={(e) => setDeadline(e.target.value)}
-              className={inputClass}
+              className={`${inputClass} w-full`}
             />
           </div>
-          {meeting.decisions.length > 0 && (
+
+          <div>
+            <label className="block text-xs font-semibold text-slate2-700 mb-1">
+              Priority
+            </label>
+            <select
+              value={priority}
+              onChange={(e) => setPriority(e.target.value as Priority)}
+              className={`${inputClass} w-full`}
+            >
+              <option value="LOW">Low</option>
+              <option value="MEDIUM">Medium</option>
+              <option value="HIGH">High</option>
+              <option value="CRITICAL">Critical</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate2-700 mb-1">
+              Status
+            </label>
+            <select
+              value={status}
+              onChange={(e) => {
+                const s = e.target.value as ActionItemStatus;
+                setStatus(s);
+                if (s === "COMPLETED") setProgressPercent(100);
+              }}
+              className={`${inputClass} w-full`}
+            >
+              <option value="PENDING">Pending</option>
+              <option value="IN_PROGRESS">In Progress</option>
+              <option value="COMPLETED">Completed</option>
+              <option value="CANCELLED">Cancelled</option>
+            </select>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs font-semibold text-slate2-700">
+                Progress: {progressPercent}%
+              </label>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={progressPercent}
+                onChange={(e) => setProgressPercent(Number(e.target.value))}
+                className="w-full accent-brand cursor-pointer"
+              />
+              <span className="text-xs font-mono font-semibold text-slate2-700 w-10 text-right">
+                {progressPercent}%
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {meeting.decisions.length > 0 && (
+          <div>
+            <label className="block text-xs font-semibold text-slate2-700 mb-1">
+              Linked Decision (Optional)
+            </label>
             <select
               value={decisionId}
               onChange={(e) => setDecisionId(e.target.value)}
-              className={inputClass}
+              className={`${inputClass} w-full`}
             >
-              <option value="">Link to a decision (optional)</option>
+              <option value="">No decision linked</option>
               {meeting.decisions.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.code} — {d.title}
                 </option>
               ))}
             </select>
-          )}
-          <div className="flex justify-end">
-            <Button type="submit" disabled={submitting}>
-              <CheckCircle2 size={14} /> Assign action item
+          </div>
+        )}
+
+        <div className="flex items-center justify-between pt-4 border-t border-slate2-100">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={handleDelete}
+            disabled={saving || deleting}
+            className="text-red-600 hover:bg-red-50 border-red-200"
+          >
+            {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            <span>Delete Task</span>
+          </Button>
+
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> Saving…
+                </>
+              ) : (
+                <>
+                  <Save size={14} /> Save Changes
+                </>
+              )}
             </Button>
           </div>
-        </form>
-      )}
-    </Card>
+        </div>
+      </form>
+    </Modal>
   );
 }
 // Types the browser can render inline in an iframe
@@ -2700,6 +4247,7 @@ function DocumentsTab({
   canManage: boolean;
   onChange: () => void;
 }) {
+  const { confirm } = useAlert();
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -2765,7 +4313,14 @@ function DocumentsTab({
   };
 
   const remove = async (documentId: string) => {
-    if (!window.confirm("Delete this document?")) return;
+    const confirmed = await confirm({
+      title: "Delete Document",
+      message: "Are you sure you want to delete this document?",
+      tone: "danger",
+      confirmLabel: "Delete Document",
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) return;
     await api.delete(`/meetings/${meeting.id}/documents/${documentId}`);
     onChange();
   };
@@ -2946,6 +4501,46 @@ function ParticipantsTab({
     type: "success" | "error";
   } | null>(null);
 
+  // Participant RSVP update dialog state (for organizer/admin)
+  const [rsvpTarget, setRsvpTarget] = useState<MeetingParticipant | null>(null);
+  const [targetStatus, setTargetStatus] = useState<"ACCEPTED" | "REJECTED" | "INVITED">("ACCEPTED");
+  const [targetReason, setTargetReason] = useState("Due to another meeting");
+  const [savingRsvp, setSavingRsvp] = useState(false);
+
+  // RSVP Filter
+  const [rsvpFilter, setRsvpFilter] = useState<"ALL" | "ACCEPTED" | "REJECTED" | "AWAITING">("ALL");
+
+  const handleOpenRsvpModal = (p: MeetingParticipant) => {
+    setRsvpTarget(p);
+    const curr = p.status === "ACCEPTED" ? "ACCEPTED" : (p.status === "REJECTED" || p.status === "DECLINED") ? "REJECTED" : "INVITED";
+    setTargetStatus(curr);
+    setTargetReason(p.rejectionReason || "Due to another meeting");
+  };
+
+  const handleSaveParticipantRsvp = async () => {
+    if (!rsvpTarget) return;
+    setSavingRsvp(true);
+    try {
+      await api.patch(`/meetings/${meeting.id}/participants/${rsvpTarget.id}/rsvp`, {
+        status: targetStatus,
+        rejectionReason: targetStatus === "REJECTED" ? (targetReason.trim() || "Due to another meeting") : null,
+      });
+      setRsvpTarget(null);
+      onChange();
+      setToast({
+        message: `Updated RSVP for ${rsvpTarget.user.name}.`,
+        type: "success",
+      });
+    } catch (err: any) {
+      setToast({
+        message: err.message || "Failed to update participant RSVP.",
+        type: "error",
+      });
+    } finally {
+      setSavingRsvp(false);
+    }
+  };
+
   // Authorization & Meeting State
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
@@ -2962,6 +4557,9 @@ function ParticipantsTab({
   const canEditAttendance = !isAttendanceFinalized
     ? meetingEnded && canManage
     : hasAdminOverride;
+
+  // Completed meetings are fully read-only for participants
+  const isParticipantsLocked = meeting.status === "COMPLETED";
 
   useEffect(() => {
     api
@@ -3092,6 +4690,18 @@ function ParticipantsTab({
 
   // Stats calculation
   const totalParticipants = meeting.participants.length;
+  const acceptedCount = meeting.participants.filter(
+    (p) => p.status === "ACCEPTED",
+  ).length;
+  const rejectedCount = meeting.participants.filter(
+    (p) => p.status === "REJECTED" || p.status === "DECLINED",
+  ).length;
+  const awaitingCount = meeting.participants.filter(
+    (p) =>
+      p.status !== "ACCEPTED" &&
+      p.status !== "REJECTED" &&
+      p.status !== "DECLINED",
+  ).length;
   const attendedCount = meeting.participants.filter(
     (p) => p.participated || p.status === "ATTENDED",
   ).length;
@@ -3099,6 +4709,23 @@ function ParticipantsTab({
     totalParticipants > 0
       ? Math.round((attendedCount / totalParticipants) * 100)
       : 0;
+
+  const displayedParticipants = useMemo(() => {
+    if (rsvpFilter === "ACCEPTED")
+      return meeting.participants.filter((p) => p.status === "ACCEPTED");
+    if (rsvpFilter === "REJECTED")
+      return meeting.participants.filter(
+        (p) => p.status === "REJECTED" || p.status === "DECLINED",
+      );
+    if (rsvpFilter === "AWAITING")
+      return meeting.participants.filter(
+        (p) =>
+          p.status !== "ACCEPTED" &&
+          p.status !== "REJECTED" &&
+          p.status !== "DECLINED",
+      );
+    return meeting.participants;
+  }, [meeting.participants, rsvpFilter]);
 
   const invitedIds = new Set(meeting.participants.map((p) => p.user.id));
   const available = users.filter((u) => !invitedIds.has(u.id));
@@ -3123,12 +4750,94 @@ function ParticipantsTab({
       {/* Header matching screenshot: Title, Subtitle, Progress, Finalized Pill, Edit Button */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-slate2-100 bg-white">
         <div>
-          <h3 className="text-base sm:text-lg font-bold text-slate2-900 leading-tight">
-            Participants & Attendance
-          </h3>
-          <p className="mt-0.5 text-xs text-slate2-500 font-normal">
-            {totalParticipants} invited · {attendedCount} attended ({attendancePct}%)
-          </p>
+          <div className="flex items-center gap-2">
+            <h3 className="text-base sm:text-lg font-bold text-slate2-900 leading-tight">
+              Participants & Attendance
+            </h3>
+            {isParticipantsLocked && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-500 border border-slate2-200 px-2.5 py-0.5 text-xs font-semibold">
+                <Lock size={11} />
+                View Only
+              </span>
+            )}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-slate2-500 font-medium">
+              {totalParticipants} invited
+            </span>
+            <span className="text-slate2-300">·</span>
+            <button
+              type="button"
+              onClick={() =>
+                setRsvpFilter(rsvpFilter === "ACCEPTED" ? "ALL" : "ACCEPTED")
+              }
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold border transition-all cursor-pointer ${
+                rsvpFilter === "ACCEPTED"
+                  ? "bg-emerald-600 text-white border-emerald-600 shadow-2xs"
+                  : "bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100"
+              }`}
+              title="Click to filter accepted participants"
+            >
+              <CheckCircle2
+                size={11}
+                className={
+                  rsvpFilter === "ACCEPTED" ? "text-white" : "text-emerald-600"
+                }
+              />
+              <span>{acceptedCount} Accepted</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setRsvpFilter(rsvpFilter === "REJECTED" ? "ALL" : "REJECTED")
+              }
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold border transition-all cursor-pointer ${
+                rsvpFilter === "REJECTED"
+                  ? "bg-rose-600 text-white border-rose-600 shadow-2xs"
+                  : "bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100"
+              }`}
+              title="Click to filter rejected participants"
+            >
+              <XCircle
+                size={11}
+                className={
+                  rsvpFilter === "REJECTED" ? "text-white" : "text-rose-600"
+                }
+              />
+              <span>{rejectedCount} Rejected</span>
+            </button>
+            {awaitingCount > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setRsvpFilter(rsvpFilter === "AWAITING" ? "ALL" : "AWAITING")
+                }
+                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium border transition-all cursor-pointer ${
+                  rsvpFilter === "AWAITING"
+                    ? "bg-amber-600 text-white border-amber-600 shadow-2xs"
+                    : "bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100"
+                }`}
+                title="Click to filter awaiting RSVP participants"
+              >
+                <Clock
+                  size={11}
+                  className={
+                    rsvpFilter === "AWAITING" ? "text-white" : "text-amber-600"
+                  }
+                />
+                <span>{awaitingCount} Awaiting</span>
+              </button>
+            )}
+            {rsvpFilter !== "ALL" && (
+              <button
+                type="button"
+                onClick={() => setRsvpFilter("ALL")}
+                className="text-[11px] text-slate2-500 hover:text-slate2-800 underline font-medium cursor-pointer"
+              >
+                Reset filter
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -3163,7 +4872,7 @@ function ParticipantsTab({
             </span>
           )}
 
-          {canManage && (
+          {canManage && !isParticipantsLocked && (
             <button
               type="button"
               onClick={openFinalizeModal}
@@ -3179,13 +4888,21 @@ function ParticipantsTab({
 
       {/* Participants List: Every participant on ONE single row */}
       <div className="divide-y divide-slate2-100">
-        {meeting.participants.length === 0 ? (
+        {displayedParticipants.length === 0 ? (
           <EmptyState
-            title="No participants invited yet"
-            description="Add participants below to invite team members and track attendance."
+            title={
+              rsvpFilter !== "ALL"
+                ? `No participants with status '${rsvpFilter}'`
+                : "No participants invited yet"
+            }
+            description={
+              rsvpFilter !== "ALL"
+                ? "Try resetting the filter to see all participants."
+                : "Add participants below to invite team members and track attendance."
+            }
           />
         ) : (
-          meeting.participants.map((p) => {
+          displayedParticipants.map((p) => {
             const isAttended = p.participated || p.status === "ATTENDED";
             const initials = p.user.name
               ? p.user.name
@@ -3202,26 +4919,70 @@ function ParticipantsTab({
                 key={p.id}
                 className="flex items-center justify-between gap-4 px-5 py-3 hover:bg-slate2-50/50 transition-colors"
               >
-                {/* Left: Avatar + Name + Email on ONE single row */}
+                {/* Left: Avatar + Name + RSVP Badge + Email + Rejection Reason */}
                 <div className="flex items-center gap-3 min-w-0 flex-1">
                   <div
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white text-xs font-bold tracking-tight shadow-2xs"
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white text-xs font-bold tracking-tight shadow-2xs"
                     style={{ backgroundColor: p.user.avatarColor || "#0b2545" }}
                   >
                     {initials}
                   </div>
-                  <div className="flex items-baseline gap-2 min-w-0 truncate">
-                    <span className="text-sm font-bold text-slate2-900 truncate">
-                      {p.user.name}
-                    </span>
-                    <span className="text-xs text-slate2-500 font-normal truncate">
-                      {p.user.email}
-                    </span>
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-slate2-900">
+                        {p.user.name}
+                      </span>
+
+                      {/* View for the Meeting Organizer: Green Badge (ACCEPTED) & Red Badge and Reason (REJECTED) */}
+                      {p.status === "ACCEPTED" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
+                          <CheckCircle2 size={12} className="text-emerald-600" />
+                          <span>(Accepted)</span>
+                        </span>
+                      ) : p.status === "REJECTED" || p.status === "DECLINED" ? (
+                        <div className="inline-flex items-center gap-1.5 flex-wrap">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
+                            <XCircle size={12} className="text-rose-600" />
+                            <span>(Rejected)</span>
+                          </span>
+                          {p.rejectionReason && (
+                            <span className="text-xs text-rose-700 font-medium">
+                              ➜ &lsquo;{p.rejectionReason}&rsquo;
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200/80 px-2.5 py-0.5 text-xs font-medium">
+                          <Clock size={11} className="text-amber-600" />
+                          <span>(Awaiting Response)</span>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-0.5 text-xs text-slate2-500">
+                      <span className="truncate">{p.user.email}</span>
+                      {p.respondedAt && (
+                        <span className="text-[11px] text-slate2-400">
+                          · Responded {new Date(p.respondedAt).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                {/* Right: Attended/Absent Toggle + Signature Badge + Delete Action */}
-                <div className="flex items-center gap-3 shrink-0">
+                {/* Right: Organizer RSVP Button + Attended/Absent Toggle + Signature Badge + Delete Action */}
+                <div className="flex items-center gap-2.5 shrink-0">
+                  {canManage && !isParticipantsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenRsvpModal(p)}
+                      title="Update participant invitation status"
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate2-200 bg-white hover:bg-slate2-50 px-2.5 py-1 text-xs font-semibold text-slate2-700 transition-colors shadow-2xs cursor-pointer"
+                    >
+                      <ClipboardList size={12} className="text-slate2-500" />
+                      <span>Invitation</span>
+                    </button>
+                  )}
                   {/* Attendance status toggle [ Attended | Absent ] */}
                   <div className="inline-flex items-center rounded-xl bg-slate2-100/90 p-0.5 border border-slate2-200/80">
                     <button
@@ -3312,7 +5073,7 @@ function ParticipantsTab({
                   })()}
 
                   {/* Remove Participant Action */}
-                  {canManage && (
+                  {canManage && !isParticipantsLocked && (
                     <button
                       type="button"
                       onClick={() => setParticipantToDelete(p)}
@@ -3330,7 +5091,7 @@ function ParticipantsTab({
       </div>
 
       {/* Add Participant Section: Search/Select + [+ Add] Button */}
-      {canManage && (
+      {canManage && !isParticipantsLocked && (
         <div className="flex items-center gap-3 border-t border-slate2-100 p-4">
           <div className="relative flex-1">
             <select
@@ -3566,6 +5327,153 @@ function ParticipantsTab({
                   "Confirm & Finalize Attendance"
                 )}
               </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Update Participant RSVP Modal for Organizer / Admin */}
+      {rsvpTarget && (
+        <Modal
+          open
+          onClose={() => {
+            if (!savingRsvp) setRsvpTarget(null);
+          }}
+          title={`Update RSVP: ${rsvpTarget.user.name}`}
+        >
+          <div className="space-y-4 text-xs text-slate2-700">
+            <div>
+              <label className="text-xs font-semibold text-slate2-700 block mb-2">
+                Invitation Status
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTargetStatus("ACCEPTED")}
+                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                    targetStatus === "ACCEPTED"
+                      ? "bg-emerald-50 border-emerald-300 text-emerald-800 shadow-2xs ring-1 ring-emerald-400"
+                      : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
+                  }`}
+                >
+                  <CheckCircle2
+                    size={18}
+                    className={
+                      targetStatus === "ACCEPTED"
+                        ? "text-emerald-600"
+                        : "text-slate2-400"
+                    }
+                  />
+                  <span className="mt-1">Accepted</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetStatus("REJECTED")}
+                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                    targetStatus === "REJECTED"
+                      ? "bg-rose-50 border-rose-300 text-rose-800 shadow-2xs ring-1 ring-rose-400"
+                      : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
+                  }`}
+                >
+                  <XCircle
+                    size={18}
+                    className={
+                      targetStatus === "REJECTED"
+                        ? "text-rose-600"
+                        : "text-slate2-400"
+                    }
+                  />
+                  <span className="mt-1">Rejected</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetStatus("INVITED")}
+                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                    targetStatus === "INVITED"
+                      ? "bg-amber-50 border-amber-300 text-amber-800 shadow-2xs ring-1 ring-amber-400"
+                      : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
+                  }`}
+                >
+                  <Clock
+                    size={18}
+                    className={
+                      targetStatus === "INVITED"
+                        ? "text-amber-600"
+                        : "text-slate2-400"
+                    }
+                  />
+                  <span className="mt-1">Awaiting</span>
+                </button>
+              </div>
+            </div>
+
+            {targetStatus === "REJECTED" && (
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-slate2-700 block">
+                  Rejection Reason
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    "Due to another meeting",
+                    "Schedule conflict",
+                    "Out of office / Annual leave",
+                    "Prior business commitment",
+                    "Field visit / Traveling",
+                  ].map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => setTargetReason(chip)}
+                      className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition-colors cursor-pointer ${
+                        targetReason === chip
+                          ? "bg-rose-100 border-rose-300 text-rose-800"
+                          : "bg-slate2-50 border-slate2-200 text-slate2-600 hover:bg-slate2-100"
+                      }`}
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  value={targetReason}
+                  onChange={(e) => setTargetReason(e.target.value)}
+                  placeholder="e.g. Due to another meeting"
+                  className="w-full rounded-xl border border-slate2-200 bg-white px-3.5 py-2 text-xs text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:border-rose-400"
+                />
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate2-100">
+              <Button
+                variant="secondary"
+                type="button"
+                disabled={savingRsvp}
+                onClick={() => setRsvpTarget(null)}
+                className="text-xs"
+              >
+                Cancel
+              </Button>
+              <button
+                type="button"
+                disabled={
+                  savingRsvp ||
+                  (targetStatus === "REJECTED" && !targetReason.trim())
+                }
+                onClick={handleSaveParticipantRsvp}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B7A6B] hover:bg-brand-dark disabled:opacity-50 text-white font-semibold text-xs px-4 py-2 transition-colors cursor-pointer shadow-2xs"
+              >
+                {savingRsvp ? (
+                  <>
+                    <Loader2 size={13} className="animate-spin" /> Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save size={13} />
+                    <span>Save Response</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </Modal>

@@ -7,9 +7,11 @@ import type { DecisionOverviewItem, DecisionStatus } from "../types";
 import { isLockedMeeting } from "../types";
 import { Card, CardHeader, EmptyState, CodeChip, inputClass } from "../components/ui/Primitives";
 import { StatusBadge } from "../components/ui/Badge";
+import { useAlert } from "../components/ui/AlertDialog";
 
 export default function DecisionsPage() {
   const { hasPermission, user } = useAuth();
+  const { alert } = useAlert();
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const [items, setItems] = useState<DecisionOverviewItem[]>([]);
   const [status, setStatus] = useState("");
@@ -37,7 +39,11 @@ export default function DecisionsPage() {
         )
       );
     } catch (err: any) {
-      alert(err.message || "Failed to update decision status.");
+      await alert({
+        title: "Status Update Error",
+        message: err.message || "Failed to update decision status.",
+        tone: "danger",
+      });
     }
   };
 

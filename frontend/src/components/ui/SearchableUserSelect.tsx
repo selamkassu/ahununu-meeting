@@ -1,12 +1,15 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
-import { Search, ChevronDown, Check, X, Users, UserCheck } from "lucide-react";
+import { Search, ChevronDown, Check, X, Users, UserCheck, CheckSquare, Square } from "lucide-react";
 import type { User, MeetingParticipant } from "../../types";
 import { Avatar } from "./Primitives";
 
 interface SearchableUserSelectProps {
   users: User[];
-  selectedUserId: string;
-  onSelect: (userId: string) => void;
+  selectedUserId?: string;
+  onSelect?: (userId: string) => void;
+  isMulti?: boolean;
+  selectedUserIds?: string[];
+  onSelectMultiple?: (userIds: string[]) => void;
   meetingParticipants?: MeetingParticipant[];
   organizerId?: string;
   placeholder?: string;
@@ -16,11 +19,14 @@ interface SearchableUserSelectProps {
 
 export function SearchableUserSelect({
   users,
-  selectedUserId,
+  selectedUserId = "",
   onSelect,
+  isMulti = false,
+  selectedUserIds = [],
+  onSelectMultiple,
   meetingParticipants = [],
   organizerId,
-  placeholder = "Assign to…",
+  placeholder = isMulti ? "Assign to one or multiple users…" : "Assign to…",
   className = "",
   disabled = false,
 }: SearchableUserSelectProps) {
@@ -43,10 +49,17 @@ export function SearchableUserSelect({
     return ids;
   }, [meetingParticipants, organizerId]);
 
-  // Selected user object
+  // Selected users in multi mode
+  const selectedUsers = useMemo(() => {
+    if (!isMulti) return [];
+    return users.filter((u) => selectedUserIds.includes(u.id));
+  }, [isMulti, users, selectedUserIds]);
+
+  // Selected user in single mode
   const selectedUser = useMemo(() => {
+    if (isMulti) return null;
     return users.find((u) => u.id === selectedUserId) || null;
-  }, [users, selectedUserId]);
+  }, [isMulti, users, selectedUserId]);
 
   // Close on outside click
   useEffect(() => {
@@ -125,17 +138,52 @@ export function SearchableUserSelect({
   }, [filteredUsers, users, participantIds, searchQuery]);
 
   const handleSelect = (userId: string) => {
-    onSelect(userId);
-    setIsOpen(false);
+    if (isMulti) {
+      const current = new Set(selectedUserIds);
+      if (current.has(userId)) {
+        current.delete(userId);
+      } else {
+        current.add(userId);
+      }
+      onSelectMultiple?.(Array.from(current));
+    } else {
+      onSelect?.(userId);
+      setIsOpen(false);
+    }
   };
 
-  const handleClear = (e: React.MouseEvent) => {
+  const handleRemoveOne = (e: React.MouseEvent, userId: string) => {
     e.stopPropagation();
-    onSelect("");
+    if (isMulti) {
+      onSelectMultiple?.(selectedUserIds.filter((id) => id !== userId));
+    } else {
+      onSelect?.("");
+    }
+  };
+
+  const handleClearAll = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isMulti) {
+      onSelectMultiple?.([]);
+    } else {
+      onSelect?.("");
+    }
+  };
+
+  const handleSelectAllParticipants = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isMulti) return;
+    const current = new Set(selectedUserIds);
+    participantIds.forEach((id) => current.add(id));
+    onSelectMultiple?.(Array.from(current));
+  };
+
+  const isUserSelected = (userId: string) => {
+    return isMulti ? selectedUserIds.includes(userId) : selectedUserId === userId;
   };
 
   const renderUserItem = (u: User) => {
-    const isSelected = u.id === selectedUserId;
+    const isSelected = isUserSelected(u.id);
     const isParticipant = participantIds.has(u.id);
 
     return (
@@ -143,17 +191,26 @@ export function SearchableUserSelect({
         key={u.id}
         type="button"
         onClick={() => handleSelect(u.id)}
-        className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs transition-colors group ${
+        className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs transition-colors group cursor-pointer ${
           isSelected
-            ? "bg-brand/10 text-brand-dark font-medium"
+            ? "bg-[#005f56]/10 text-[#005f56] font-medium"
             : "text-slate2-700 hover:bg-slate2-50 hover:text-slate2-900"
         }`}
       >
         <div className="flex items-center gap-2.5 min-w-0">
+          {isMulti && (
+            <div className="shrink-0 text-slate2-400 group-hover:text-[#005f56]">
+              {isSelected ? (
+                <CheckSquare size={16} className="text-[#005f56]" />
+              ) : (
+                <Square size={16} className="text-slate2-300" />
+              )}
+            </div>
+          )}
           <Avatar name={u.name} color={u.avatarColor} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="font-semibold text-slate2-800 group-hover:text-brand-dark truncate">
+              <span className="font-semibold text-slate2-800 group-hover:text-[#005f56] truncate">
                 {u.name}
               </span>
               {isParticipant && (
@@ -172,7 +229,7 @@ export function SearchableUserSelect({
           </div>
         </div>
 
-        {isSelected && (
+        {!isMulti && isSelected && (
           <Check size={15} className="text-brand shrink-0 ml-2" />
         )}
       </button>
@@ -186,16 +243,54 @@ export function SearchableUserSelect({
         type="button"
         disabled={disabled}
         onClick={() => !disabled && setIsOpen(!isOpen)}
-        className={`w-full h-[38px] rounded-lg border bg-white px-3 py-2 text-sm text-left flex items-center justify-between gap-2 focus-ring transition-colors ${
+        className={`w-full min-h-[38px] rounded-lg border bg-white px-2.5 py-1.5 text-sm text-left flex items-center justify-between gap-2 focus-ring transition-colors ${
           disabled
             ? "opacity-60 cursor-not-allowed bg-slate2-50 border-slate2-200"
             : isOpen
-            ? "border-brand ring-2 ring-brand/20 shadow-sm"
+            ? "border-[#005f56] ring-2 ring-[#005f56]/20 shadow-xs"
             : "border-slate2-200 hover:border-slate2-300"
         }`}
       >
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          {selectedUser ? (
+        <div className="flex items-center gap-1.5 min-w-0 flex-1 flex-wrap">
+          {isMulti ? (
+            selectedUsers.length > 0 ? (
+              selectedUsers.slice(0, 3).map((u) => (
+                <span
+                  key={u.id}
+                  className="inline-flex items-center gap-1 rounded-md bg-[#e6f4f1] text-[#005f56] border border-[#c2e7df] px-1.5 py-0.5 text-xs font-medium"
+                >
+                  <span
+                    className="inline-block h-2 w-2 rounded-full shrink-0"
+                    style={{ backgroundColor: u.avatarColor || "#005f56" }}
+                  />
+                  <span className="truncate max-w-[100px]">{u.name.split(" ")[0]}</span>
+                  {!disabled && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => handleRemoveOne(e, u.id)}
+                      className="hover:text-red-600 rounded p-0.2"
+                    >
+                      <X size={11} />
+                    </span>
+                  )}
+                </span>
+              )).concat(
+                selectedUsers.length > 3 ? (
+                  [
+                    <span
+                      key="more"
+                      className="inline-flex items-center rounded bg-slate2-100 px-1.5 py-0.5 text-[11px] font-bold text-slate2-600"
+                    >
+                      +{selectedUsers.length - 3} more
+                    </span>,
+                  ]
+                ) : []
+              )
+            ) : (
+              <span className="text-slate2-400 text-xs truncate px-1">{placeholder}</span>
+            )
+          ) : selectedUser ? (
             <>
               <div className="scale-75 origin-left -mr-1">
                 <Avatar
@@ -203,31 +298,31 @@ export function SearchableUserSelect({
                   color={selectedUser.avatarColor}
                 />
               </div>
-              <span className="font-medium text-slate2-800 truncate">
+              <span className="font-medium text-slate2-800 text-xs truncate">
                 {selectedUser.name}
               </span>
             </>
           ) : (
-            <span className="text-slate2-400 truncate">{placeholder}</span>
+            <span className="text-slate2-400 text-xs truncate px-1">{placeholder}</span>
           )}
         </div>
 
         <div className="flex items-center gap-1 shrink-0 text-slate2-400">
-          {selectedUser && !disabled && (
+          {((isMulti && selectedUserIds.length > 0) || (!isMulti && selectedUser)) && !disabled && (
             <span
               role="button"
               tabIndex={0}
-              onClick={handleClear}
-              className="p-0.5 rounded hover:bg-slate2-100 hover:text-slate2-600 transition-colors"
-              title="Clear selection"
+              onClick={handleClearAll}
+              className="p-1 rounded hover:bg-slate2-100 hover:text-slate2-600 transition-colors"
+              title="Clear all"
             >
-              <X size={14} />
+              <X size={13} />
             </span>
           )}
           <ChevronDown
-            size={15}
+            size={14}
             className={`transition-transform duration-200 ${
-              isOpen ? "rotate-180 text-brand" : "text-slate2-400"
+              isOpen ? "rotate-180 text-[#005f56]" : "text-slate2-400"
             }`}
           />
         </div>
@@ -235,7 +330,38 @@ export function SearchableUserSelect({
 
       {/* Dropdown Menu */}
       {isOpen && (
-        <div className="absolute left-0 top-full mt-1 w-full min-w-[280px] sm:min-w-[320px] rounded-xl border border-slate2-200 bg-white shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+        <div className="absolute left-0 top-full mt-1 w-full min-w-[280px] sm:min-w-[340px] rounded-xl border border-slate2-200 bg-white shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+          {/* Quick Actions Header for Multi-select */}
+          {isMulti && (
+            <div className="px-3 py-1.5 bg-[#f0f9f7] border-b border-[#d1efe8] flex items-center justify-between text-xs">
+              <span className="font-semibold text-[#005f56]">
+                {selectedUserIds.length === 0
+                  ? "Select team assignees"
+                  : `${selectedUserIds.length} assignee${selectedUserIds.length > 1 ? "s" : ""} selected`}
+              </span>
+              <div className="flex items-center gap-2">
+                {participantIds.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleSelectAllParticipants}
+                    className="text-[11px] font-semibold text-[#005f56] hover:underline cursor-pointer"
+                  >
+                    Select participants
+                  </button>
+                )}
+                {selectedUserIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearAll}
+                    className="text-[11px] font-semibold text-slate2-400 hover:text-danger cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Search Box Header */}
           <div className="p-2 border-b border-slate2-100 bg-slate2-50/70">
             <div className="relative flex items-center">
@@ -248,8 +374,8 @@ export function SearchableUserSelect({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search user by name, title, dept..."
-                className="w-full pl-8 pr-7 py-1.5 text-xs bg-white rounded-lg border border-slate2-200 text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:ring-1 focus:ring-brand focus:border-brand"
+                placeholder="Search by name, title, department…"
+                className="w-full pl-8 pr-7 py-1.5 text-xs bg-white rounded-lg border border-slate2-200 text-slate2-800 placeholder:text-slate2-400 focus:outline-none focus:ring-1 focus:ring-[#005f56] focus:border-[#005f56]"
                 onClick={(e) => e.stopPropagation()}
               />
               {searchQuery && (
@@ -272,14 +398,12 @@ export function SearchableUserSelect({
                 No team members found matching "{searchQuery}"
               </div>
             ) : searchQuery.trim() ? (
-              // Search results view
               filteredUsers.map(renderUserItem)
             ) : (
-              // Categorized view: Meeting Participants first, then Other Users
               <>
                 {participantsList.length > 0 && (
                   <div>
-                    <div className="bg-slate2-50/80 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate2-500 border-b border-slate2-100 flex items-center justify-between">
+                    <div className="bg-slate2-50/80 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate2-500 border-b border-slate2-100 flex items-center justify-between">
                       <span>Meeting Participants</span>
                       <span>{participantsList.length}</span>
                     </div>
@@ -290,7 +414,7 @@ export function SearchableUserSelect({
                 {othersList.length > 0 && (
                   <div>
                     {participantsList.length > 0 && (
-                      <div className="bg-slate2-50/80 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate2-500 border-y border-slate2-100 flex items-center justify-between">
+                      <div className="bg-slate2-50/80 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate2-500 border-y border-slate2-100 flex items-center justify-between">
                         <span>All Other Members</span>
                         <span>{othersList.length}</span>
                       </div>
@@ -301,6 +425,19 @@ export function SearchableUserSelect({
               </>
             )}
           </div>
+
+          {/* Multi-select Done Button Footer */}
+          {isMulti && (
+            <div className="p-2 border-t border-slate2-100 bg-slate2-50/90 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="px-3 py-1 rounded-md bg-[#005f56] text-white text-xs font-semibold hover:bg-[#004740] transition-colors cursor-pointer"
+              >
+                Done ({selectedUserIds.length})
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

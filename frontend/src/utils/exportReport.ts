@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import type { MeetingDetail, MeetingMinutes, MinutesOverviewItem } from "../types";
+import { getActionItemAssignees, type MeetingDetail, type MeetingMinutes, type MinutesOverviewItem } from "../types";
 
 export interface DepartmentPerformanceItem {
   department: string;
@@ -201,7 +201,7 @@ function getDocumentHtml(meeting: MeetingDetail, contentHtml: string): string {
           (a) => `
               <tr>
                 <td><strong>${a.title}</strong></td>
-                <td>${a.assignedTo?.name || "Unassigned"}</td>
+                <td>${getActionItemAssignees(a).map(u => u.name).join(", ") || a.assignedTo?.name || "Unassigned"}</td>
                 <td>${new Date(a.deadline).toLocaleDateString()}</td>
                 <td>${a.priority}</td>
                 <td>${a.status.replace("_", " ")}</td>
@@ -533,7 +533,7 @@ export function exportMeetingMinutesToPdf(meeting: MeetingDetail, minutesContent
       head: [["Action Item", "Assignee", "Due Date", "Priority", "Status"]],
       body: meeting.actionItems.map((a) => [
         a.title,
-        a.assignedTo?.name || "Unassigned",
+        getActionItemAssignees(a).map(u => u.name).join(", ") || a.assignedTo?.name || "Unassigned",
         new Date(a.deadline).toLocaleDateString(),
         a.priority,
         a.status.replace("_", " "),
@@ -669,7 +669,7 @@ export function exportMeetingMinutesToExcel(meeting: MeetingDetail, minutesConte
   if (meeting.actionItems && meeting.actionItems.length > 0) {
     const actionRows = meeting.actionItems.map((a) => ({
       "Action Item": a.title,
-      "Assignee": a.assignedTo?.name || "Unassigned",
+      "Assignee": getActionItemAssignees(a).map(u => u.name).join(", ") || a.assignedTo?.name || "Unassigned",
       "Due Date": new Date(a.deadline).toLocaleDateString(),
       "Priority": a.priority,
       "Status": a.status,
@@ -697,10 +697,12 @@ export function exportMeetingMinutesToExcel(meeting: MeetingDetail, minutesConte
       "Name": p.user.name,
       "Email": p.user.email,
       "Role": p.user.role?.name || "Participant",
+      "RSVP": p.status === "ACCEPTED" ? "Accepted" : (p.status === "REJECTED" || p.status === "DECLINED") ? "Rejected" : "Awaiting RSVP",
+      "Rejection Reason": p.rejectionReason || "",
       "Attended": p.participated ? "Yes" : "No",
     }));
     const participantSheet = XLSX.utils.json_to_sheet(participantRows);
-    participantSheet["!cols"] = [{ wch: 25 }, { wch: 30 }, { wch: 15 }, { wch: 18 }];
+    participantSheet["!cols"] = [{ wch: 25 }, { wch: 30 }, { wch: 15 }, { wch: 16 }, { wch: 28 }, { wch: 12 }];
     XLSX.utils.book_append_sheet(workbook, participantSheet, "Attendees");
   }
 
@@ -763,7 +765,7 @@ export function exportMeetingMinutesToText(meeting: MeetingDetail, minutesConten
     text += `-------------------------------------------------------\n`;
     meeting.actionItems.forEach((a, idx) => {
       text += `${idx + 1}. [${a.status}] ${a.title}\n`;
-      text += `   Assignee: ${a.assignedTo?.name || "Unassigned"} | Priority: ${a.priority} | Due: ${new Date(
+      text += `   Assignee: ${getActionItemAssignees(a).map(u => u.name).join(", ") || a.assignedTo?.name || "Unassigned"} | Priority: ${a.priority} | Due: ${new Date(
         a.deadline
       ).toLocaleDateString()}\n\n`;
     });

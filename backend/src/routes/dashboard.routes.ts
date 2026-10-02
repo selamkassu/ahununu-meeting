@@ -45,7 +45,10 @@ router.get("/stats", async (req: AuthedRequest, res) => {
     if (actionTier === "dept" && req.user?.departmentId) {
       baseActionWhere.departmentId = req.user.departmentId;
     } else if (actionTier === "own" && req.user) {
-      baseActionWhere.assignedToId = req.user.userId;
+      baseActionWhere.OR = [
+        { assignedToId: req.user.userId },
+        { assignees: { some: { userId: req.user.userId } } },
+      ];
     }
 
     // 3-Tier Decision Scope
@@ -80,6 +83,11 @@ router.get("/stats", async (req: AuthedRequest, res) => {
         where: baseActionWhere,
         include: {
           assignedTo: { select: { id: true, name: true, avatarColor: true } },
+          assignees: {
+            include: {
+              user: { select: { id: true, name: true, avatarColor: true, email: true } },
+            },
+          },
           department: { select: { id: true, name: true } },
           meeting: { select: { id: true, title: true, code: true } },
         },
@@ -93,7 +101,16 @@ router.get("/stats", async (req: AuthedRequest, res) => {
   const departmentsTyped = departments as any[];
   const meetingsTyped = meetingsForMonthly as any[];
 
-  const shapedActions = actionItemsTyped.map((a) => ({ ...a, overdue: isOverdue(a.status, a.deadline) }));
+  const shapedActions = actionItemsTyped.map((a) => {
+    const assigneesList = (a.assignees || []).map((x: any) => x.user).filter(Boolean);
+    if (assigneesList.length === 0 && a.assignedTo) assigneesList.push(a.assignedTo);
+    return {
+      ...a,
+      assignedTo: a.assignedTo || assigneesList[0] || { id: "", name: "Unassigned", avatarColor: "#005f56" },
+      assignees: assigneesList,
+      overdue: isOverdue(a.status, a.deadline),
+    };
+  });
   const pendingActionItems = shapedActions.filter((a) => a.status === "PENDING" || a.status === "IN_PROGRESS").length;
   const overdueActionItems = shapedActions.filter((a) => a.overdue).length;
   const completedActionItems = shapedActions.filter((a) => a.status === "COMPLETED").length;

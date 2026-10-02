@@ -4,7 +4,7 @@ export function Card({ children, className = "" }: { children: React.ReactNode; 
   return <div className={`rounded-xl border border-slate2-200 bg-white shadow-card ${className}`}>{children}</div>;
 }
 
-export function CardHeader({ title, subtitle, action }: { title: string; subtitle?: string; action?: React.ReactNode }) {
+export function CardHeader({ title, subtitle, action }: { title: React.ReactNode; subtitle?: string; action?: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-4 border-b border-slate2-100 px-5 py-4">
       <div>

@@ -7,7 +7,7 @@
  */
 
 import { formatReportDateTime } from "./exportReport";
-import type { MeetingDetail, MeetingMinutes } from "../types";
+import { getActionItemAssignees, type MeetingDetail, type MeetingMinutes } from "../types";
 
 export interface PrintHtmlOptions {
   title?: string;
@@ -580,7 +580,19 @@ export function generateFullMeetingMinutesHtml(meeting: MeetingDetail, minutesCo
           ${meeting.participants
         .map((p, idx) => {
           const isPresent = p.participated;
-          const statusDisplay = isPresent ? "Attended" : (p.status ? p.status.replace("_", " ") : "Invited");
+          let statusDisplay = isPresent ? "Attended" : (p.status ? p.status.replace("_", " ") : "Invited");
+          if (!isPresent && (p.status === "REJECTED" || p.status === "DECLINED")) {
+            statusDisplay = `Rejected${p.rejectionReason ? ` ➜ '${p.rejectionReason}'` : ""}`;
+          } else if (!isPresent && p.status === "ACCEPTED") {
+            statusDisplay = "Accepted (RSVP)";
+          }
+          const statusColor = isPresent
+            ? "#15803d"
+            : p.status === "ACCEPTED"
+            ? "#16a34a"
+            : p.status === "REJECTED" || p.status === "DECLINED"
+            ? "#dc2626"
+            : "#64748b";
           const position = p.user.jobTitle || p.user.role?.name || "Participant";
           const departmentName = p.user.department?.name || meeting.department?.name || "Ahununu Logistics";
           const sigDisplay = isPresent ? "✓ Verified" : "—";
@@ -591,7 +603,7 @@ export function generateFullMeetingMinutesHtml(meeting: MeetingDetail, minutesCo
                   <td><strong>${p.user.name}</strong><br><span style="color:#64748b; font-size:7.5pt;">${p.user.email}</span></td>
                   <td>${position}</td>
                   <td>${departmentName}</td>
-                  <td><span style="font-weight: 500; color: ${isPresent ? '#15803d' : '#64748b'};">${statusDisplay}</span></td>
+                  <td><span style="font-weight: 500; color: ${statusColor};">${statusDisplay}</span></td>
                   <td style="text-align: center; font-size: 8pt; color: #64748b;">${sigDisplay}</td>
                 </tr>
               `;
@@ -701,7 +713,7 @@ export function generateFullMeetingMinutesHtml(meeting: MeetingDetail, minutesCo
                 <strong>${a.title}</strong>
                 ${a.description ? `<br><span style="color:#64748b; font-size:8pt;">${a.description}</span>` : ""}
               </td>
-              <td>${a.assignedTo?.name || "Unassigned"}</td>
+              <td>${getActionItemAssignees(a).map(u => u.name).join(", ") || a.assignedTo?.name || "Unassigned"}</td>
               <td style="white-space: nowrap;">${new Date(a.deadline).toLocaleDateString()}</td>
               <td>
                 <span style="font-weight:600; color:${a.status === 'COMPLETED' ? '#15803d' : a.overdue ? '#b91c1c' : '#0369a1'

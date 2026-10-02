@@ -50,6 +50,7 @@ model User {
   organizedMeetings Meeting[]            @relation("MeetingOrganizer")
   participations    MeetingParticipant[]
   assignedActions   ActionItem[]         @relation("ActionAssignee")
+  actionAssignments ActionItemAssignee[]
   minutesAuthored   MeetingMinutes[]
   notifications     Notification[]
   documents         Document[]
@@ -87,14 +88,17 @@ model Meeting {
   notifications Notification[]
 }
 
-// Status: INVITED | ACCEPTED | DECLINED | ATTENDED | ABSENT
+// Status: INVITED | ACCEPTED | DECLINED | REJECTED | ATTENDED | ABSENT
 model MeetingParticipant {
-  id        String   @id @default(cuid())
-  meetingId String
-  userId    String
-  status    String   @default("INVITED")
-  isRequired Boolean @default(true)
-  createdAt DateTime @default(now())
+  id              String    @id @default(cuid())
+  meetingId       String
+  userId          String
+  status          String    @default("INVITED")
+  rejectionReason String?
+  respondedAt     DateTime?
+  isRequired      Boolean   @default(true)
+  participated    Boolean   @default(false)
+  createdAt       DateTime  @default(now())
 
   meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   user    User    @relation(fields: [userId], references: [id])
@@ -153,7 +157,7 @@ model ActionItem {
   decisionId     String?
   title          String
   description    String?
-  assignedToId   String
+  assignedToId   String?
   departmentId   String
   priority       String    @default("MEDIUM")
   status         String    @default("PENDING")
@@ -163,10 +167,23 @@ model ActionItem {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  meeting    Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
-  decision   Decision?   @relation(fields: [decisionId], references: [id])
-  assignedTo User        @relation("ActionAssignee", fields: [assignedToId], references: [id])
-  department Department  @relation(fields: [departmentId], references: [id])
+  meeting    Meeting              @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  decision   Decision?            @relation(fields: [decisionId], references: [id])
+  assignedTo User?                @relation("ActionAssignee", fields: [assignedToId], references: [id])
+  department Department           @relation(fields: [departmentId], references: [id])
+  assignees  ActionItemAssignee[]
+}
+
+model ActionItemAssignee {
+  id           String     @id @default(cuid())
+  actionItemId String
+  userId       String
+  createdAt    DateTime   @default(now())
+
+  actionItem ActionItem @relation(fields: [actionItemId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([actionItemId, userId])
 }
 
 model Document {

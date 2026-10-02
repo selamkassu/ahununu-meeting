@@ -29,6 +29,7 @@ import { Card, CardHeader, Button, Field, inputClass, Avatar, EmptyState } from 
 import { Badge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { useAuth } from "../../context/AuthContext";
+import { useAlert } from "../../components/ui/AlertDialog";
 
 function resolveUserStatus(user: User): UserStatus {
   if (user.status) return user.status;
@@ -66,6 +67,7 @@ function getStatusConfig(status: UserStatus) {
 
 export default function UsersPage() {
   const { hasPermission } = useAuth();
+  const { alert } = useAlert();
   const canCreate = hasPermission("users:create");
   const canEdit = hasPermission("users:edit");
   const canManageStatus = hasPermission("users:manage_status");
@@ -148,7 +150,11 @@ export default function UsersPage() {
       }
       load();
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to update user status");
+      await alert({
+        title: "Status Update Failed",
+        message: err instanceof ApiError ? err.message : "Failed to update user status",
+        tone: "danger",
+      });
     } finally {
       setStatusUpdating(false);
     }
