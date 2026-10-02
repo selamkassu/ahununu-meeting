@@ -489,6 +489,8 @@ router.post(
                 startTime: meeting.startTime,
                 endTime: meeting.endTime,
                 location: meeting.location || undefined,
+                onlineLink: meeting.onlineLink || undefined,
+                description: meeting.description || undefined,
                 meetingId: meeting.id,
               });
             } catch (partErr: any) {
@@ -1153,7 +1155,7 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
     include: detailInclude,
   });
 
-  // Notify all participants
+  // Notify all participants via in-app notification only (NO email dispatched for signature requests)
   const notifData = meeting.participants
     .filter(p => p.userId !== req.user!.userId)
     .map(p => ({
@@ -1527,6 +1529,9 @@ router.post(
         date: true,
         startTime: true,
         endTime: true,
+        location: true,
+        onlineLink: true,
+        description: true,
         departmentId: true,
         organizerId: true,
         organizer: { select: { id: true, name: true, email: true } },
@@ -1617,6 +1622,9 @@ router.post(
             meetingDate: meetingDateStrForEmail,
             startTime: meeting.startTime,
             endTime: meeting.endTime,
+            location: meeting.location || undefined,
+            onlineLink: meeting.onlineLink || undefined,
+            description: meeting.description || undefined,
             meetingId: meeting.id,
           });
         } catch (err: any) {

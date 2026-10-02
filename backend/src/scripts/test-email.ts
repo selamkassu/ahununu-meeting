@@ -23,8 +23,8 @@ async function runTests() {
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // ── 1. Meeting Creation (Meeting Invitation) ─────────
-  console.log("▶ [1/3] Meeting Creation: Sending Invitation to participant...");
+  // ── 1. Meeting Invitation ──────────────────────────────
+  console.log("▶ [1/3] Meeting Invitation: Sending Invitation to invited participant...");
   await sendMeetingInvitationEmail({
     toEmail:      DEMO_EMAIL,
     toName:       DEMO_NAME,
@@ -34,6 +34,8 @@ async function runTests() {
     startTime:    "09:00",
     endTime:      "10:30",
     location:     "Conference Room A, HQ",
+    onlineLink:   "https://meet.google.com/abc-defg-hij",
+    description:  "Quarterly strategic review covering logistical expansion, route optimizations, and executive budgets.",
     meetingId:    MEETING_ID,
   });
   console.log("   ✅ Sent (Meeting Invitation delivered to invited participant)\n");
