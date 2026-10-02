@@ -1331,7 +1331,7 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
     });
   }
 
-  const isForceApproved = Boolean(forceApprove || !allSigned);
+  const isForceApproved = !allSigned && !!forceApprove;
   const recordedBypassReason = isForceApproved
     ? (typeof forceReason === "string" && forceReason.trim()
         ? forceReason.trim()

@@ -78,7 +78,7 @@ import {
   CodeChip,
   EmptyState,
 } from "../../components/ui/Primitives";
-import { StatusBadge, PriorityBadge, ForceApprovedBadge } from "../../components/ui/Badge";
+import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { Modal } from "../../components/ui/Modal";
 import { Toast } from "../../components/ui/Toast";
 import { useAuth } from "../../context/AuthContext";
@@ -205,10 +205,12 @@ export default function MeetingDetail() {
 
   const isLocked = isLockedMeeting(meeting?.status);
   const isApproved = meeting?.status === "APPROVED";
+  const isCancelled = meeting?.status === "CANCELLED";
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
 
   // When a meeting is APPROVED, it is strictly READ-ONLY for everyone until unlocked!
-  const canEdit = !isApproved && (!isLocked || hasAdminOverride);
+  // When a meeting is CANCELLED, it is strictly READ-ONLY for everyone (terminal state)!
+  const canEdit = !isApproved && !isCancelled && (!isLocked || hasAdminOverride);
   const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
 
   const canManage = useMemo(() => {
@@ -224,6 +226,19 @@ export default function MeetingDetail() {
     meeting &&
     !["APPROVED", "CANCELLED"].includes(meeting.status) &&
     (isOrganizer || hasAdminOverride || hasPermission("meetings:approve") || hasPermission("meetings:certify_lock"))
+  );
+
+  // Approval button is shown only when meeting is ready for approval, or if admin override during pre-signing/completed
+  const canShowApproveButton = !!(
+    meeting &&
+    !["APPROVED", "CANCELLED"].includes(meeting.status) &&
+    (
+      meeting.status === "READY_FOR_APPROVAL"
+        ? canApprove
+        : (meeting.status === "PENDING_SIGNATURES" || meeting.status === "COMPLETED")
+          ? (canApprove && hasAdminOverride)
+          : false
+    )
   );
 
   const [isApprovalModalOpen, setIsApprovalModalOpen] = useState(false);
@@ -294,6 +309,14 @@ export default function MeetingDetail() {
   }, [meeting?.actionItems]);
 
   const canCompleteMeeting = hasSummaryContent || hasDecisionsContent || hasActionItemsContent;
+
+  // Completion button is shown only when meeting is currently active (SCHEDULED / IN_PROGRESS) and has content
+  const canShowCompleteButton = !!(
+    meeting &&
+    (meeting.status === "SCHEDULED" || meeting.status === "IN_PROGRESS") &&
+    (canManage || hasAdminOverride) &&
+    canCompleteMeeting
+  );
 
   const handleUnlockMeeting = async () => {
     if (!meeting) return;
@@ -597,32 +620,26 @@ export default function MeetingDetail() {
                     </Button>
                   )}
 
-                  {/* Complete Meeting Button */}
-                  {meeting.status !== "COMPLETED" && meeting.status !== "CANCELLED" && (canManage || hasAdminOverride) && (
+                  {/* Complete Meeting Button — only when active and content requirements satisfied */}
+                  {canShowCompleteButton && (
                     <Button
                       variant="secondary"
                       type="button"
                       onClick={() => updateStatus("COMPLETED")}
-                      className={`text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 font-semibold text-emerald-900 shadow-2xs transition-all ${
-                        !canCompleteMeeting ? "opacity-75 cursor-not-allowed" : ""
-                      }`}
-                      title={
-                        canCompleteMeeting
-                          ? "Complete meeting (Content verified in Summary, Decision, or Action Items)"
-                          : "To complete the meeting, at least one section (Meeting Summary, Decision, or Action Item) must contain content."
-                      }
+                      className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 font-semibold text-emerald-900 shadow-2xs transition-all cursor-pointer"
+                      title="Complete meeting (Content verified in Summary, Decision, or Action Items)"
                     >
                       <CheckCircle2 size={13} className="text-emerald-700" />
                       <span>Complete Meeting</span>
                     </Button>
                   )}
 
-                  {/* Approve Meeting */}
-                  {canApprove && (
+                  {/* Approve Meeting — only when ready for approval or force approve via admin override */}
+                  {canShowApproveButton && (
                     <Button
                       variant="primary"
                       onClick={() => setIsApprovalModalOpen(true)}
-                      className="bg-brand hover:bg-brand-dark text-white text-xs py-1.5 px-3.5 shadow-sm inline-flex items-center gap-1.5 font-medium transition-all"
+                      className="bg-brand hover:bg-brand-dark text-white text-xs py-1.5 px-3.5 shadow-sm inline-flex items-center gap-1.5 font-medium transition-all cursor-pointer"
                     >
                       <ShieldCheck size={14} />
                       <span>Approve Meeting</span>
@@ -635,8 +652,13 @@ export default function MeetingDetail() {
                       Admin Override
                     </span>
                   )}
-                  {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
-                    <ForceApprovedBadge reason={meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"} />
+                  {meeting.forceApproved && (
+                    <span
+                      className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300 shadow-2xs"
+                      title={meeting.bypassReason || "Approved with force submit override"}
+                    >
+                      Force Approved
+                    </span>
                   )}
                   <PriorityBadge priority={meeting.priority} />
                   {meeting.status === "APPROVED" && !hasAdminOverride ? (
@@ -676,9 +698,11 @@ export default function MeetingDetail() {
                           <option
                             key={s}
                             value={s}
-                            className="bg-white text-slate2-800 font-medium py-1"
+                            disabled={s === "COMPLETED" && !canCompleteMeeting}
+                            className="bg-white text-slate2-800 font-medium py-1 disabled:text-slate2-400"
                           >
                             {s.replace("_", " ")}
+                            {s === "COMPLETED" && !canCompleteMeeting ? " (Content Required)" : ""}
                           </option>
                         ))}
                       </select>
@@ -785,19 +809,6 @@ export default function MeetingDetail() {
               </div>
             </div>
           </div>
-
-          {/* Dedicated Administrative Override Notice in Detail Card */}
-          {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-xs text-amber-900 shadow-2xs">
-              <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
-              <div className="flex-1 min-w-0 leading-relaxed">
-                <span className="font-bold text-amber-950">Administrative Override: </span>
-                <span className="text-amber-900 font-medium">
-                  {meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"}
-                </span>
-              </div>
-            </div>
-          )}
         </div>
       </Card>
 
@@ -870,17 +881,6 @@ export default function MeetingDetail() {
                         />
                       </div>
                     )}
-                  </div>
-                )}
-                {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
-                  <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-100/90 border border-amber-300 px-3 py-2 text-xs text-amber-950 shadow-2xs">
-                    <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
-                    <div className="flex-1 min-w-0 leading-relaxed">
-                      <span className="font-bold text-amber-950">Administrative Override: </span>
-                      <span className="text-amber-950 font-medium">
-                        {meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"}
-                      </span>
-                    </div>
                   </div>
                 )}
               </div>
@@ -1898,7 +1898,7 @@ function MinutesTab({
   totalSignersCount: number;
   signedCount: number;
 }) {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   // Meeting Summary State
@@ -1911,7 +1911,15 @@ function MinutesTab({
   const isApproved = meeting.status === "APPROVED";
   const isCompleted = meeting.status === "COMPLETED";
   const isCancelled = meeting.status === "CANCELLED";
-  const isReadOnly = isCompleted || isCancelled || isApproved || !canManage;
+  const isPendingSignatures = meeting.status === "PENDING_SIGNATURES";
+  const isReadyForApproval = meeting.status === "READY_FOR_APPROVAL";
+  const isReadOnly =
+    isCompleted ||
+    isCancelled ||
+    isApproved ||
+    isPendingSignatures ||
+    isReadyForApproval ||
+    !canManage;
 
   const [isEditing, setIsEditing] = useState(false);
   const [summaryContent, setSummaryContent] = useState("");
@@ -2006,7 +2014,7 @@ function MinutesTab({
                   <span className="rounded-full bg-brand/15 text-brand px-2.5 py-0.5 text-[10px] font-bold tracking-wide uppercase">
                     Locked & Verified
                   </span>
-                  {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
+                  {meeting.forceApproved && (
                     <span className="rounded-full bg-amber-100 border border-amber-300 text-amber-800 px-2.5 py-0.5 text-[10px] font-bold tracking-wide uppercase">
                       Admin Force Approved (Override)
                     </span>
@@ -2022,15 +2030,17 @@ function MinutesTab({
                     {new Date(meeting.approvedAt).toLocaleString()}
                   </p>
                 )}
-                {(meeting.forceApproved || Boolean(meeting.bypassReason)) && (
-                  <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-300 p-3 text-xs text-amber-900 shadow-2xs max-w-xl">
-                    <span className="text-sm shrink-0 leading-none mt-0.5" role="img" aria-label="warning">⚠️</span>
-                    <div className="flex-1 min-w-0 leading-relaxed">
-                      <span className="font-bold text-amber-950">Administrative Override: </span>
-                      <span className="text-amber-900 font-medium">
-                        {meeting.bypassReason || "Administrative override: approved before all attendee signatures collected"}
-                      </span>
-                    </div>
+                {meeting.forceApproved && (
+                  <div className="text-xs text-amber-900 bg-amber-50/90 border border-amber-200/90 rounded-md p-2 mt-1 max-w-xl">
+                    <p className="font-semibold text-amber-950">Administrative Override Notice:</p>
+                    <p className="text-amber-800/90 mt-0.5">
+                      This meeting was certified by the administrator before all participant pre-signatures were collected.
+                    </p>
+                    {meeting.bypassReason && (
+                      <p className="mt-1 text-[11px] text-amber-900 font-medium">
+                        <strong>Reason:</strong> {meeting.bypassReason}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -2114,13 +2124,13 @@ function MinutesTab({
                   <Signature size={14} className="text-emerald-600" /> You Have Signed
                 </span>
               )}
-              {canApprove && (
+              {canApprove && hasPermission("ADMIN_OVERRIDE") && (
                 <Button
                   variant="secondary"
                   type="button"
                   onClick={onApproveClick}
-                  className="text-xs py-2 px-3.5 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50 font-semibold border-brand/30 text-brand shadow-xs"
-                  title="Certify, sign and lock meeting minutes"
+                  className="text-xs py-2 px-3.5 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50 font-semibold border-brand/30 text-brand shadow-xs cursor-pointer"
+                  title="Certify, sign and lock meeting minutes (Administrator Override)"
                 >
                   <ShieldCheck size={14} className="text-brand" />
                   <span>Sign & Approve Meeting</span>
@@ -2175,7 +2185,7 @@ function MinutesTab({
         </div>
       )}
 
-      {(meeting.status === "IN_PROGRESS" || meeting.status === "SCHEDULED") && canManage && summaryMinute?.content && (
+      {(meeting.status === "IN_PROGRESS" || meeting.status === "SCHEDULED" || meeting.status === "COMPLETED") && canManage && summaryMinute?.content && (
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-brand/20 bg-brand/5 px-4 py-3 text-xs">
           <div className="flex items-center gap-2.5 text-brand-dark">
             <Signature size={18} className="text-brand shrink-0" />
@@ -2305,7 +2315,17 @@ function MinutesTab({
                 <Lock size={12} /> Meeting Cancelled (Read-only)
               </span>
             )}
-            {!isApproved && !isCompleted && !isCancelled && !canManage && (
+            {isPendingSignatures && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 border border-amber-200">
+                <Lock size={12} /> Signing In Progress (Read-only)
+              </span>
+            )}
+            {isReadyForApproval && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2.5 py-1 text-xs font-medium text-teal-800 border border-teal-200">
+                <Lock size={12} /> Ready for Approval (Read-only)
+              </span>
+            )}
+            {!isApproved && !isCompleted && !isCancelled && !isPendingSignatures && !isReadyForApproval && !canManage && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
                 <Lock size={12} /> Read-only View
               </span>
@@ -2972,8 +2992,9 @@ function ActionsTab({
   }, []);
 
   const isMeetingCancelled = meeting.status === "CANCELLED";
-  // Completed meetings: action items are view-only (status, edit, delete all locked)
-  const isActionItemsLocked = meeting.status === "COMPLETED";
+  const isLocked = isLockedMeeting(meeting.status);
+  // Any locked or cancelled meeting locks action item creation, editing task details, and deletion unless ADMIN_OVERRIDE
+  const isActionItemsLocked = (isLocked && !hasPermission("ADMIN_OVERRIDE")) || isMeetingCancelled;
 
   // Check if current user can update status / edit for a specific action item
   const canUpdateItem = (item: (typeof meeting.actionItems)[number]) => {
@@ -3861,6 +3882,7 @@ function ActionsTab({
           users={users}
           meeting={meeting}
           todayDateStr={todayDateStr}
+          canDelete={canDeleteItem(editingItem)}
           onClose={() => setEditingItem(null)}
           onSuccess={() => {
             setEditingItem(null);
@@ -3878,6 +3900,7 @@ function ActionItemEditModal({
   users,
   meeting,
   todayDateStr,
+  canDelete = false,
   onClose,
   onSuccess,
 }: {
@@ -3885,6 +3908,7 @@ function ActionItemEditModal({
   users: User[];
   meeting: MeetingDetailType;
   todayDateStr: string;
+  canDelete?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -4132,16 +4156,18 @@ function ActionItemEditModal({
         )}
 
         <div className="flex items-center justify-between pt-4 border-t border-slate2-100">
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={handleDelete}
-            disabled={saving || deleting}
-            className="text-red-600 hover:bg-red-50 border-red-200"
-          >
-            {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-            <span>Delete Task</span>
-          </Button>
+          {canDelete ? (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleDelete}
+              disabled={saving || deleting}
+              className="text-red-600 hover:bg-red-50 border-red-200 cursor-pointer"
+            >
+              {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              <span>Delete Task</span>
+            </Button>
+          ) : <div />}
 
           <div className="flex items-center gap-2">
             <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>
@@ -4577,22 +4603,30 @@ function ParticipantsTab({
   // Authorization & Meeting State
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
-  const canManage =
+  const isLocked = isLockedMeeting(meeting.status);
+  const isApproved = meeting.status === "APPROVED";
+  const isCancelled = meeting.status === "CANCELLED";
+
+  // Modifications to participants roster are strictly locked when meeting is locked or cancelled,
+  // unless user has ADMIN_OVERRIDE.
+  const canEdit = !isApproved && !isCancelled && (!isLocked || hasAdminOverride);
+  const canManage = canEdit && (
     hasAdminOverride ||
     isOrganizer ||
     hasPermission("meetings:manage_participants") ||
     hasPermission("meetings:edit:all") ||
     (hasPermission("meetings:edit:dept") && user?.department?.id === meeting.department?.id) ||
-    !!propCanManage;
+    !!propCanManage
+  );
 
   const meetingEnded = hasMeetingEnded(meeting);
   const isAttendanceFinalized = !!meeting.attendanceFinalized;
-  const canEditAttendance = !isAttendanceFinalized
-    ? meetingEnded && canManage
-    : hasAdminOverride;
+  const canEditAttendance = !isCancelled && (!isAttendanceFinalized
+    ? meetingEnded && (canManage || hasAdminOverride)
+    : hasAdminOverride);
 
-  // Completed meetings are fully read-only for participants
-  const isParticipantsLocked = meeting.status === "COMPLETED";
+  // If meeting is locked/cancelled and no override, participants roster and editing are locked
+  const isParticipantsLocked = !canEdit;
 
   useEffect(() => {
     api
@@ -4890,22 +4924,22 @@ function ParticipantsTab({
             <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/80 px-2.5 py-0.5 text-xs font-semibold">
               <CheckCircle2 size={13} className="text-emerald-600" /> Finalized
             </span>
-          ) : meetingEnded ? (
+          ) : !isCancelled && meetingEnded && (canManage || hasAdminOverride) ? (
             <button
               type="button"
               onClick={openFinalizeModal}
-              disabled={!canManage || isFinalizing}
+              disabled={isFinalizing}
               className="inline-flex items-center gap-1 rounded-full bg-brand/10 text-brand border border-brand/20 px-2.5 py-0.5 text-xs font-semibold hover:bg-brand/20 transition-colors cursor-pointer"
             >
               <CheckCircle2 size={13} /> Finalize
             </button>
           ) : (
             <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-600 px-2.5 py-0.5 text-xs font-medium">
-              <Clock size={12} /> In Progress
+              <Clock size={12} /> {isCancelled ? "Cancelled" : "In Progress"}
             </span>
           )}
 
-          {canManage && !isParticipantsLocked && (
+          {canEditAttendance && (
             <button
               type="button"
               onClick={openFinalizeModal}
@@ -5082,6 +5116,8 @@ function ParticipantsTab({
                     if (
                       p.user.id === user?.id &&
                       (!!meeting.signaturesRequestedAt || meeting.status === "PENDING_SIGNATURES") &&
+                      meeting.status !== "APPROVED" &&
+                      meeting.status !== "CANCELLED" &&
                       onSignSelf
                     ) {
                       return (

@@ -76,7 +76,7 @@ export function ForceApprovedBadge({ reason }: { reason?: string | null }) {
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 text-[11px] font-bold tracking-wide shadow-2xs"
-      title={reason ? `Administrative Override: ${reason}` : "Administrative override: approved before all attendee signatures collected"}
+      title={reason ? `Force Approved: ${reason}` : "Approved with administrative force override"}
     >
       <ShieldAlert size={12} className="text-amber-700 shrink-0" />
       <span>FORCE APPROVED</span>

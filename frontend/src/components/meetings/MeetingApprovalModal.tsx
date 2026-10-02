@@ -228,7 +228,7 @@ export function MeetingApprovalModal({
 
     setSubmitting(true);
     try {
-      const updated = await onApproveApi(signatureDataUrl, Boolean(forceSubmit || !allSigned), forceReason);
+      const updated = await onApproveApi(signatureDataUrl, !allSigned && forceSubmit, forceReason);
       onApproveSuccess(updated);
       onClose();
     } catch (err: any) {
