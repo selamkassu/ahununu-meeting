@@ -450,10 +450,8 @@ router.post(
           weekday: "long", year: "numeric", month: "long", day: "numeric",
         });
 
-        // Send Invitation email strictly to invited attendees (never to the organizer/creator)
-        const invitedIds = (data.participantIds || []).filter(
-          (id) => id !== req.user!.userId && id !== organizer?.id
-        );
+        // Send Invitation email to all invited attendees
+        const invitedIds = data.participantIds || [];
 
         if (invitedIds.length > 0) {
           const invitedUsers = await prisma.user.findMany({
@@ -464,11 +462,10 @@ router.post(
           console.log(`[Meeting Create] Initiating invitation emails for ${invitedUsers.length} attendee(s)...`);
 
           for (const u of invitedUsers) {
-            if (
-              !u.email ||
-              u.id === req.user!.userId ||
-              (organizer?.email && u.email.trim().toLowerCase() === organizer.email.trim().toLowerCase())
-            ) {
+            if (!u.email) {
+              console.warn(
+                `[Meeting Create] Participant "${u.name}" has NO email configured — skipping invitation email.`
+              );
               continue;
             }
 
@@ -480,7 +477,7 @@ router.post(
 
             try {
               console.log(`[Meeting Create] Sending invitation to ${u.name} <${u.email}>...`);
-              await sendMeetingInvitationEmail({
+              const delivered = await sendMeetingInvitationEmail({
                 toEmail: u.email,
                 toName: u.name || "Participant",
                 organizerName: organizer?.name || "Organizer",
@@ -493,6 +490,11 @@ router.post(
                 description: meeting.description || undefined,
                 meetingId: meeting.id,
               });
+              if (delivered) {
+                console.log(`[Meeting Create] Successfully delivered invitation to ${u.email}`);
+              } else {
+                console.warn(`[Meeting Create] Invitation delivery unconfirmed for ${u.email}`);
+              }
             } catch (partErr: any) {
               console.error(`[Meeting Create] Error sending invitation to ${u.email}:`, partErr?.message || partErr);
             }
@@ -1581,25 +1583,22 @@ router.post(
     });
 
     // Create MEETING_INVITATION notifications for each invited user.
-    // The notification is sent ONLY to the invited participant — not to the
-    // organizer or whoever made the request.
     const meetingDate = new Date(meeting.date).toLocaleDateString("en-US", {
       weekday: "short",
       month: "short",
       day: "numeric",
       year: "numeric",
     });
-    const notificationData = parsed.data.userIds
-      .filter((userId) => userId !== req.user!.userId) // exclude the requester
-      .map((userId) => ({
-        userId,
-        meetingId: meeting.id,
-        type: "MEETING_INVITATION",
-        title: "New Meeting Invitation",
-        message: `You have been invited to: "${meeting.title}" on ${meetingDate} from ${meeting.startTime} to ${meeting.endTime}. Organized by ${meeting.organizer.name}.`,
-        link: `/meetings/${meeting.id}`,
-        isRead: false,
-      }));
+    const organizerDisplayName = meeting.organizer?.name || "Organizer";
+    const notificationData = parsed.data.userIds.map((userId) => ({
+      userId,
+      meetingId: meeting.id,
+      type: "MEETING_INVITATION",
+      title: "New Meeting Invitation",
+      message: `You have been invited to: "${meeting.title}" on ${meetingDate} from ${meeting.startTime} to ${meeting.endTime}. Organized by ${organizerDisplayName}.`,
+      link: `/meetings/${meeting.id}`,
+      isRead: false,
+    }));
 
     if (notificationData.length > 0) {
       await prisma.notification.createMany({
@@ -1608,31 +1607,34 @@ router.post(
       });
     }
 
-    // Send invitation emails to newly added participants (excluding inviter / organizer)
-    const newRecipientIds = (parsed.data.userIds || []).filter(
-      (id) => id !== req.user!.userId && id !== meeting.organizerId
-    );
+    // Send invitation emails to all newly added participants
     const newUsers = await prisma.user.findMany({
-      where: { id: { in: newRecipientIds } },
+      where: { id: { in: parsed.data.userIds } },
       select: { id: true, name: true, email: true },
     });
     const meetingDateStrForEmail = new Date(meeting.date).toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     (async () => {
+      console.log(`[Add Participant] Initiating invitation email dispatch for ${newUsers.length} newly added participant(s)...`);
       for (const u of newUsers) {
-        if (
-          !u.email ||
-          u.id === req.user!.userId ||
-          (meeting.organizer?.email && u.email.trim().toLowerCase() === meeting.organizer.email.trim().toLowerCase())
-        ) {
+        if (!u.email) {
+          console.warn(`[Add Participant] Participant "${u.name}" has NO email configured — skipping invitation email.`);
           continue;
         }
+
+        if (u.email.endsWith("@ahununulogistics.com")) {
+          console.warn(
+            `[Add Participant] NOTICE: "${u.name}" has demo email "${u.email}". Gmail cannot deliver to non-existent domain ahununulogistics.com.`
+          );
+        }
+
         try {
-          await sendMeetingInvitationEmail({
+          console.log(`[Add Participant] Sending invitation email to ${u.name} <${u.email}> for meeting "${meeting.title}"...`);
+          const delivered = await sendMeetingInvitationEmail({
             toEmail: u.email,
             toName: u.name || "Participant",
-            organizerName: meeting.organizer.name || "Organizer",
+            organizerName: meeting.organizer?.name || "Organizer",
             meetingTitle: meeting.title,
             meetingDate: meetingDateStrForEmail,
             startTime: meeting.startTime,
@@ -1642,6 +1644,11 @@ router.post(
             description: meeting.description || undefined,
             meetingId: meeting.id,
           });
+          if (delivered) {
+            console.log(`[Add Participant] Successfully delivered invitation email to ${u.email}`);
+          } else {
+            console.warn(`[Add Participant] Invitation email dispatch to ${u.email} was skipped or unconfirmed.`);
+          }
         } catch (err: any) {
           console.error(`[Add Participant] Error sending invitation email to ${u.email}:`, err?.message || err);
         }
