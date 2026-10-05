@@ -461,17 +461,17 @@ router.post(
 
           console.log(`[Meeting Create] Initiating invitation emails for ${invitedUsers.length} attendee(s)...`);
 
-          for (const u of invitedUsers) {
+          const emailPromises = invitedUsers.map(async (u) => {
             if (!u.email) {
               console.warn(
                 `[Meeting Create] Participant "${u.name}" has NO email configured — skipping invitation email.`
               );
-              continue;
+              return;
             }
 
             if (u.email.endsWith("@ahununulogistics.com")) {
               console.warn(
-                `[Meeting Create] NOTICE: "${u.name}" has demo email "${u.email}". Gmail cannot deliver to non-existent domain ahununulogistics.com.`
+                `[Meeting Create] NOTICE: "${u.name}" has demo email "${u.email}". Non-existent domain will bounce unless using an active mailbox.`
               );
             }
 
@@ -498,10 +498,12 @@ router.post(
             } catch (partErr: any) {
               console.error(`[Meeting Create] Error sending invitation to ${u.email}:`, partErr?.message || partErr);
             }
-          }
+          });
+
+          await Promise.allSettled(emailPromises);
         }
       } catch (err: any) {
-        console.error("[Meeting Create] Email invitation loop failed:", err?.message || err);
+        console.error("[Meeting Create] Email invitation dispatch failed:", err?.message || err);
       }
     })();
 
@@ -1617,15 +1619,15 @@ router.post(
     });
     (async () => {
       console.log(`[Add Participant] Initiating invitation email dispatch for ${newUsers.length} newly added participant(s)...`);
-      for (const u of newUsers) {
+      const emailPromises = newUsers.map(async (u) => {
         if (!u.email) {
           console.warn(`[Add Participant] Participant "${u.name}" has NO email configured — skipping invitation email.`);
-          continue;
+          return;
         }
 
         if (u.email.endsWith("@ahununulogistics.com")) {
           console.warn(
-            `[Add Participant] NOTICE: "${u.name}" has demo email "${u.email}". Gmail cannot deliver to non-existent domain ahununulogistics.com.`
+            `[Add Participant] NOTICE: "${u.name}" has demo email "${u.email}". Non-existent domain will bounce unless using an active mailbox.`
           );
         }
 
@@ -1652,7 +1654,9 @@ router.post(
         } catch (err: any) {
           console.error(`[Add Participant] Error sending invitation email to ${u.email}:`, err?.message || err);
         }
-      }
+      });
+
+      await Promise.allSettled(emailPromises);
     })();
 
     const updated = await prisma.meeting.findUnique({

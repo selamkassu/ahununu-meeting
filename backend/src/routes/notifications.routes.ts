@@ -1,9 +1,72 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma";
 import { requireAuth, AuthedRequest } from "../middleware/auth";
+import {
+  getEmailProviderStatus,
+  sendDiagnosticTestEmail,
+} from "../utils/email";
 
 const router = Router();
 router.use(requireAuth);
+
+// ---------- GET /notifications/email-status — diagnostic info on active email provider ----------
+router.get("/email-status", async (_req: AuthedRequest, res) => {
+  try {
+    const status = getEmailProviderStatus();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to determine email service status." });
+  }
+});
+
+// ---------- POST /notifications/test-email — dispatch a live test notification ----------
+router.post("/test-email", async (req: AuthedRequest, res) => {
+  try {
+    let toEmail = req.body?.toEmail?.trim();
+
+    if (!toEmail) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { email: true },
+      });
+      toEmail = user?.email;
+    }
+
+    if (!toEmail) {
+      return res.status(400).json({ error: "No recipient email address provided." });
+    }
+
+    // Basic email format validation
+    if (!toEmail.includes("@") || !toEmail.includes(".")) {
+      return res.status(400).json({ error: "Please provide a valid recipient email address." });
+    }
+
+    const result = await sendDiagnosticTestEmail(toEmail);
+    const status = getEmailProviderStatus();
+
+    if (!result.success) {
+      return res.status(502).json({
+        ok: false,
+        error: result.error || "Failed to deliver test email.",
+        provider: result.provider,
+        status,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      message: `Test email successfully delivered to ${toEmail}!`,
+      provider: result.provider,
+      messageId: result.messageId,
+      status,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Internal server error while dispatching test email.",
+    });
+  }
+});
 
 // ---------- GET /notifications — fetch the current user's notifications ----------
 router.get("/", async (req: AuthedRequest, res) => {

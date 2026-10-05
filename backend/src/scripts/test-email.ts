@@ -1,31 +1,46 @@
 /**
  * Email Test Script
- * Tests all 5 email types using the actual GMAIL_USER + GMAIL_APP_PASSWORD from .env
+ * Tests email delivery using the active provider configured in .env (Resend, Brevo, SendGrid, SMTP, or Gmail)
  * Run with: npx tsx src/scripts/test-email.ts
  */
 import "dotenv/config";
 import {
+  getEmailProviderStatus,
   sendMeetingInvitationEmail,
   sendMeetingCancellationEmail,
   sendActionItemAssignedEmail,
 } from "../utils/email";
 
-const DEMO_EMAIL = "selamkassu690@gmail.com";
+const DEMO_EMAIL = process.env.TEST_EMAIL_RECIPIENT || "selamkassu690@gmail.com";
 const DEMO_NAME  = "Selam Kassu";
 const MEETING_ID = "test-meeting-001";
 
 async function runTests() {
+  const status = getEmailProviderStatus();
+
   console.log("\n====================================================");
   console.log("  Ahununu Meeting Portal — Email Notification Test");
   console.log("====================================================");
-  console.log(`Sending to: ${DEMO_EMAIL}`);
+  console.log(`  Active Provider : ${status.providerName}`);
+  console.log(`  Sender Address  : ${status.senderEmail}`);
+  console.log(`  Cloud Safe      : ${status.isCloudSafe ? "YES (Port 443 / Safe for Render)" : "NO (Uses SMTP Ports - Blocked on Render Free Tier)"}`);
+  console.log(`  Portal URL      : ${status.appUrl}`);
+  console.log(`  Sending To      : ${DEMO_EMAIL}`);
+  if (status.renderWarning) {
+    console.log(`\n  ⚠️  RENDER WARNING: ${status.renderWarning}`);
+  }
   console.log("----------------------------------------------------\n");
+
+  if (!status.configured) {
+    console.error("❌ No email provider is configured! Set RESEND_API_KEY, BREVO_API_KEY, or GMAIL credentials in .env.");
+    process.exit(1);
+  }
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // ── 1. Meeting Invitation ──────────────────────────────
   console.log("▶ [1/3] Meeting Invitation: Sending Invitation to invited participant...");
-  await sendMeetingInvitationEmail({
+  const sent1 = await sendMeetingInvitationEmail({
     toEmail:      DEMO_EMAIL,
     toName:       DEMO_NAME,
     organizerName:"Abebe Girma",
@@ -38,7 +53,11 @@ async function runTests() {
     description:  "Quarterly strategic review covering logistical expansion, route optimizations, and executive budgets.",
     meetingId:    MEETING_ID,
   });
-  console.log("   ✅ Sent (Meeting Invitation delivered to invited participant)\n");
+  if (sent1) {
+    console.log("   ✅ Sent (Meeting Invitation delivered to invited participant)\n");
+  } else {
+    console.warn("   ⚠️ Invitation was not delivered.\n");
+  }
   await sleep(1500);
 
   // ── 2. Meeting Cancellation ───────────────────────────
@@ -75,7 +94,7 @@ async function runTests() {
   console.log("   ✅ Sent (Task assignment with responsibilities & due date delivered strictly to assignee)\n");
 
   console.log("====================================================");
-  console.log("  All 3 Workflow Emails Sent Successfully!");
+  console.log("  Workflow Email Test Completed!");
   console.log(`  Recipient Inbox: ${DEMO_EMAIL}`);
   console.log("====================================================\n");
 }
