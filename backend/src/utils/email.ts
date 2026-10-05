@@ -244,8 +244,13 @@ async function sendViaBrevo(
 
     const data: any = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const errMsg = data?.message || `Brevo API HTTP ${res.status}`;
-      console.error(`[Email:Brevo] Failed to send to ${toList.map((t) => t.email).join(", ")}:`, errMsg);
+      let errMsg = data?.message || `Brevo API HTTP ${res.status}`;
+      if (errMsg.includes("unrecognised IP address") || errMsg.includes("authorised_ips")) {
+        errMsg = `Brevo IP Whitelist Block: Brevo is blocking requests from this IP. Go to https://app.brevo.com/security/authorised_ips and select "No IP review" (or toggle IP blocking OFF) so Render can make API calls.`;
+        console.error(`[Email:Brevo] ${errMsg}`);
+      } else {
+        console.error(`[Email:Brevo] Failed to send to ${toList.map((t) => t.email).join(", ")}:`, errMsg);
+      }
       return { success: false, provider: "brevo", error: errMsg };
     }
 
