@@ -40,6 +40,7 @@ import {
   ExternalLink,
   PenTool,
   Signature,
+  Bell,
 } from "lucide-react";
 import { api, ApiError, getToken, buildUrl } from "../../api/client";
 import { RichTextEditor } from "../../components/editor/RichTextEditor";
@@ -88,7 +89,7 @@ import { ParticipantSigningModal } from "../../components/meetings/ParticipantSi
 import { SearchableUserSelect } from "../../components/ui/SearchableUserSelect";
 import { useAlert } from "../../components/ui/AlertDialog";
 
-export function hasMeetingEnded(meeting: MeetingDetailType): boolean {
+function hasMeetingEnded(meeting: MeetingDetailType): boolean {
   if (meeting.status === "COMPLETED") return true;
   if (meeting.status === "CANCELLED") return false;
 
@@ -208,10 +209,10 @@ export default function MeetingDetail() {
   const isCancelled = meeting?.status === "CANCELLED";
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
 
-  // When a meeting is APPROVED, it is strictly READ-ONLY for everyone until unlocked!
-  // When a meeting is CANCELLED, it is strictly READ-ONLY for everyone (terminal state)!
-  const canEdit = !isApproved && !isCancelled && (!isLocked || hasAdminOverride);
-  const isOrganizer = !!(user && meeting && user.id === meeting.organizer.id);
+  // When a meeting is locked (APPROVED, COMPLETED, CANCELLED, PENDING_SIGNATURES, READY_FOR_APPROVAL),
+  // it is strictly 100% READ-ONLY for everyone until unlocked with ADMIN_OVERRIDE and a recorded reason!
+  const canEdit = !isLocked;
+  const isOrganizer = !!(user && meeting && user.id === meeting.organizer?.id);
 
   const canManage = useMemo(() => {
     if (hasAdminOverride) return true;
@@ -252,7 +253,7 @@ export default function MeetingDetail() {
   const [pageToast, setPageToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const myParticipant = useMemo(() => {
-    return meeting?.participants?.find((p) => p.user.id === user?.id);
+    return meeting?.participants?.find((p) => p.user?.id === user?.id);
   }, [meeting?.participants, user?.id]);
 
   const handleRsvp = async (status: "ACCEPTED" | "REJECTED", reason?: string) => {
@@ -320,6 +321,10 @@ export default function MeetingDetail() {
 
   const handleUnlockMeeting = async () => {
     if (!meeting) return;
+    if (!unlockReason.trim()) {
+      setUnlockError("Please specify a reason for unlocking this meeting.");
+      return;
+    }
     if (unlockTargetStatus === "COMPLETED" && !canCompleteMeeting) {
       setUnlockError(
         "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time."
@@ -358,12 +363,14 @@ export default function MeetingDetail() {
         role?: { name: string; code: string } | null;
       };
       roleLabel: string;
-    }> = (meeting.participants || []).map((p) => ({
-      id: p.id,
-      userId: p.user.id,
-      user: p.user,
-      roleLabel: "Participant",
-    }));
+    }> = (meeting.participants || [])
+      .filter((p) => Boolean(p && p.user))
+      .map((p) => ({
+        id: p.id,
+        userId: p.user.id,
+        user: p.user,
+        roleLabel: "Participant",
+      }));
 
     if (meeting.organizer && !list.some((item) => item.userId === meeting.organizer.id)) {
       list.unshift({
@@ -400,11 +407,35 @@ export default function MeetingDetail() {
   );
   const hasUserSigned = !!(user && signedUserIds.has(user.id));
 
+  // Duration calculation in minutes
+  const meetingDurationMinutes = useMemo(() => {
+    if (!meeting?.startTime || !meeting?.endTime) return null;
+    const [sh, sm] = meeting.startTime.split(":").map(Number);
+    const [eh, em] = meeting.endTime.split(":").map(Number);
+    if (isNaN(sh) || isNaN(sm) || isNaN(eh) || isNaN(em)) return null;
+    const startMins = sh * 60 + sm;
+    const endMins = eh * 60 + em;
+    const diff = endMins - startMins;
+    return diff > 0 ? diff : null;
+  }, [meeting?.startTime, meeting?.endTime]);
+
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = () => {
     if (!id) return;
+    setLoading(true);
+    setLoadError(null);
     api
       .get<MeetingDetailType>(`/meetings/${id}`)
-      .then(setMeeting)
+      .then((data) => {
+        setMeeting(data);
+        setLoadError(null);
+      })
+      .catch((err: any) => {
+        console.error("Failed to load meeting details:", err);
+        setLoadError(err.message || "Failed to load meeting details.");
+        setMeeting(null);
+      })
       .finally(() => setLoading(false));
   };
 
@@ -417,7 +448,7 @@ export default function MeetingDetail() {
     const rsvpQuery = searchParams.get("rsvp");
     if (!rsvpQuery) return;
 
-    const myPart = meeting.participants?.find((p) => p.user.id === user.id);
+    const myPart = meeting.participants?.find((p) => p.user?.id === user.id);
     if (!myPart) return; // User is not an invited attendee for this meeting
 
     rsvpHandledRef.current = true;
@@ -458,13 +489,13 @@ export default function MeetingDetail() {
       });
       try {
         await refreshNotifications();
-      } catch {}
+      } catch { }
     } catch (err: any) {
       // Re-fetch latest meeting state from server to guarantee sync
       try {
         const fresh = await api.get<MeetingDetailType>(`/meetings/${id}`);
         if (fresh) setMeeting(fresh);
-      } catch {}
+      } catch { }
       await alert({
         title: "Signature Initiation Failed",
         message: err.message || "Failed to initiate participant signatures.",
@@ -477,28 +508,11 @@ export default function MeetingDetail() {
 
   const updateStatus = async (status: MeetingStatus) => {
     if (!id || !meeting) return;
-    if (meeting.status === "APPROVED" && !hasAdminOverride) {
+    if (isLocked && !hasAdminOverride) {
       await alert({
         title: "Meeting is Locked",
         message:
-          "This meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission.",
-        tone: "warning",
-      });
-      return;
-    }
-    if (status === "APPROVED") {
-      setIsApprovalModalOpen(true);
-      return;
-    }
-    if (status === "PENDING_SIGNATURES") {
-      handleRequestSignatures();
-      return;
-    }
-    if (isLocked && !hasAdminOverride) {
-      await alert({
-        title: "Status Change Blocked",
-        message:
-          "This meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status.",
+          "This meeting is strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason before any status changes can be made.",
         tone: "warning",
       });
       return;
@@ -552,285 +566,308 @@ export default function MeetingDetail() {
   }
   if (!meeting) {
     return (
-      <Card>
-        <EmptyState
-          title="Meeting not found"
-          description="It may have been deleted, or the link is incorrect."
-        />
+      <Card className="p-8 text-center">
+        {loadError ? (
+          <div className="max-w-md mx-auto space-y-3">
+            <div className="flex h-12 w-12 mx-auto items-center justify-center rounded-2xl bg-amber-50 text-amber-600 border border-amber-200">
+              <ShieldAlert size={24} />
+            </div>
+            <h3 className="font-display text-base font-bold text-slate2-900">
+              Unable to Access Meeting
+            </h3>
+            <p className="text-xs text-slate2-600 leading-relaxed">
+              {loadError}
+            </p>
+            <div className="pt-2 flex items-center justify-center gap-2">
+              <Link
+                to="/meetings"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-brand hover:bg-brand-dark text-white text-xs font-semibold px-4 py-2 transition-colors shadow-2xs"
+              >
+                <ArrowLeft size={13} /> Back to Directory
+              </Link>
+              <Button variant="secondary" onClick={load} className="text-xs">
+                Retry
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <EmptyState
+            title="Meeting not found"
+            description="It may have been deleted, or the link is incorrect."
+          />
+        )}
       </Card>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      {/* Navigation Breadcrumb */}
       <Link
         to="/meetings"
-        className="inline-flex items-center gap-1 text-xs font-medium text-slate2-500 hover:text-brand"
+        className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate2-500 hover:text-brand transition-colors"
       >
-        <ArrowLeft size={14} /> Back to meetings
+        <ArrowLeft size={14} /> Back to Meeting Directory
       </Link>
 
-      <Card className="overflow-hidden border border-slate2-200/80 shadow-sm bg-white">
-        {/* Top brand accent stripe */}
+      {/* Executive Command Header Card */}
+      <Card className="overflow-hidden border border-slate2-200/90 shadow-sm bg-white">
+        {/* Signature brand accent bar */}
         <div className="h-1 w-full bg-gradient-to-r from-brand via-brand-light to-accent" />
 
         <div className="p-5 sm:p-6 space-y-4">
-          {/* Header Row: Title, Code on left; Badges, Actions on right */}
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div className="space-y-1.5 flex-1 min-w-0">
-              <div className="flex flex-wrap items-center gap-2.5">
-                <h2 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-slate2-800">
-                  {meeting.title}
-                </h2>
-              </div>
-              {meeting.description ? (
-                <p className="text-sm text-slate2-600 max-w-3xl leading-relaxed pt-0.5">
-                  {meeting.description}
-                </p>
-              ) : null}
+          {/* Top Classification Row: Code, Department, Priority, Status, Actions */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate2-100">
+            <div className="flex flex-wrap items-center gap-2">
+              <CodeChip>{meeting.code}</CodeChip>
+              {meeting.department?.name && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate2-100 text-slate2-700 font-medium text-xs">
+                  {meeting.department.name}
+                </span>
+              )}
+              <PriorityBadge priority={meeting.priority} />
+              {meeting.forceApproved && (
+                <span
+                  className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900 border border-amber-300 shadow-2xs"
+                  title={meeting.bypassReason || "Approved with administrative force override"}
+                >
+                  Force Approved
+                </span>
+              )}
             </div>
 
-            {/* Action Hub & Status Controls */}
-            <div className="flex flex-wrap items-center gap-2 sm:self-end lg:self-start shrink-0">
-              <div className="flex flex-col gap-y-2">
-                <div className="flex flex-row gap-x-2 justify-end">
-                  {/* Print Minutes */}
-                  <Button
-                    variant="secondary"
-                    type="button"
-                    onClick={() => printMeetingMinutes({ meeting })}
-                    className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50 border border-slate2-200 font-medium text-slate2-700 shadow-2xs"
-                    title="Print Meeting Minutes (Clean Corporate Letterhead)"
+            {/* Status & Action Hub */}
+            <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              {/* Print Minutes */}
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => printMeetingMinutes({ meeting })}
+                className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-white hover:bg-slate2-50 border border-slate2-200 font-medium text-slate2-700 shadow-2xs"
+                title="Print Meeting Minutes (Clean Corporate Letterhead)"
+              >
+                <Printer size={13} className="text-slate2-600" />
+                <span>Print Minutes</span>
+              </Button>
+
+              {/* Unlock Meeting Button (Exclusive to ADMIN_OVERRIDE) */}
+              {isLocked && hasAdminOverride && (
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={() => setIsUnlockModalOpen(true)}
+                  className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-300 font-semibold text-amber-900 shadow-2xs"
+                  title="Unlock and reopen meeting for editing (requires ADMIN_OVERRIDE)"
+                >
+                  <Unlock size={13} className="text-amber-700" />
+                  <span>Unlock Meeting</span>
+                </Button>
+              )}
+
+              {/* Complete Meeting Button */}
+              {canShowCompleteButton && (
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={() => updateStatus("COMPLETED")}
+                  className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 font-semibold text-emerald-900 shadow-2xs transition-all cursor-pointer"
+                  title="Complete meeting (Content verified in Summary, Decision, or Action Items)"
+                >
+                  <CheckCircle2 size={13} className="text-emerald-700" />
+                  <span>Complete Meeting</span>
+                </Button>
+              )}
+
+              {/* Approve Meeting Button */}
+              {canShowApproveButton && (
+                <Button
+                  variant="primary"
+                  onClick={() => setIsApprovalModalOpen(true)}
+                  className="bg-brand hover:bg-brand-dark text-white text-xs py-1.5 px-3.5 shadow-sm inline-flex items-center gap-1.5 font-semibold transition-all cursor-pointer"
+                >
+                  <ShieldCheck size={14} />
+                  <span>Approve Meeting</span>
+                </Button>
+              )}
+
+              {/* Status Change Dropdown Hub */}
+              <div className="flex items-center gap-2">
+                {canManage ? (
+                  <div
+                    className={`group relative inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 transition-all shadow-2xs ${
+                      isLocked && !hasAdminOverride
+                        ? "bg-slate2-100 border-slate2-200 text-slate2-600"
+                        : `${STATUS_CONFIG[meeting.status]?.bg || "bg-slate2-100 text-slate2-700"} ${STATUS_CONFIG[meeting.status]?.border || "border-slate2-200"}`
+                    }`}
                   >
-                    <Printer size={13} className="text-slate2-600" />
-                    <span>Print Minutes</span>
-                  </Button>
-
-                  {/* Unlock Meeting Button (Exclusive to ADMIN_OVERRIDE) */}
-                  {isLocked && hasAdminOverride && (
-                    <Button
-                      variant="secondary"
-                      type="button"
-                      onClick={() => setIsUnlockModalOpen(true)}
-                      className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-300 font-semibold text-amber-900 shadow-2xs"
-                      title="Unlock and reopen meeting for editing (requires ADMIN_OVERRIDE)"
-                    >
-                      <Unlock size={13} className="text-amber-700" />
-                      <span>Unlock Meeting</span>
-                    </Button>
-                  )}
-
-                  {/* Complete Meeting Button — only when active and content requirements satisfied */}
-                  {canShowCompleteButton && (
-                    <Button
-                      variant="secondary"
-                      type="button"
-                      onClick={() => updateStatus("COMPLETED")}
-                      className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 font-semibold text-emerald-900 shadow-2xs transition-all cursor-pointer"
-                      title="Complete meeting (Content verified in Summary, Decision, or Action Items)"
-                    >
-                      <CheckCircle2 size={13} className="text-emerald-700" />
-                      <span>Complete Meeting</span>
-                    </Button>
-                  )}
-
-                  {/* Approve Meeting — only when ready for approval or force approve via admin override */}
-                  {canShowApproveButton && (
-                    <Button
-                      variant="primary"
-                      onClick={() => setIsApprovalModalOpen(true)}
-                      className="bg-brand hover:bg-brand-dark text-white text-xs py-1.5 px-3.5 shadow-sm inline-flex items-center gap-1.5 font-medium transition-all cursor-pointer"
-                    >
-                      <ShieldCheck size={14} />
-                      <span>Approve Meeting</span>
-                    </Button>
-                  )}
-                </div>
-                <div className="flex flex-row items-center gap-3 justify-end">
-                  {isLocked && hasAdminOverride && (
-                    <span className="rounded bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 border border-amber-200 shadow-2xs">
-                      Admin Override
-                    </span>
-                  )}
-                  {meeting.forceApproved && (
                     <span
-                      className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300 shadow-2xs"
-                      title={meeting.bypassReason || "Approved with force submit override"}
+                      className={`h-2 w-2 rounded-full shrink-0 ${
+                        STATUS_CONFIG[meeting.status]?.dot || "bg-slate2-400"
+                      }`}
+                    />
+                    <select
+                      value={meeting.status}
+                      onChange={(e) => updateStatus(e.target.value as MeetingStatus)}
+                      disabled={isLocked && !hasAdminOverride}
+                      title={
+                        isLocked && !hasAdminOverride
+                          ? "Meeting is locked. Only administrators with ADMIN_OVERRIDE can alter status."
+                          : "Click to change status"
+                      }
+                      className="bg-transparent text-inherit font-semibold text-xs border-0 outline-none p-0 pr-4 cursor-pointer disabled:cursor-not-allowed appearance-none focus:ring-0 select-none"
                     >
-                      Force Approved
-                    </span>
-                  )}
-                  <PriorityBadge priority={meeting.priority} />
-                  {meeting.status === "APPROVED" && !hasAdminOverride ? (
-                    <div
-                      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border ${STATUS_CONFIG.APPROVED.bg} ${STATUS_CONFIG.APPROVED.border} shadow-2xs`}
-                      title="Meeting approved & certified (Read-only)"
-                    >
-                      <span className={`h-2 w-2 rounded-full shrink-0 ${STATUS_CONFIG.APPROVED.dot}`} />
-                      <span>Approved</span>
-                      <Lock size={11} className="text-inherit opacity-70 ml-0.5" />
-                    </div>
-                  ) : canManage || hasAdminOverride ? (
-                    <div
-                      className={`group relative inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border transition-all ${STATUS_CONFIG[meeting.status]?.bg || "bg-slate2-100 text-slate2-700"
-                        } ${STATUS_CONFIG[meeting.status]?.border || "border-slate2-200"
-                        } ${isLocked && !hasAdminOverride
-                          ? "opacity-75 cursor-not-allowed"
-                          : "cursor-pointer hover:shadow-xs shadow-2xs"
-                        }`}
-                    >
-                      <span
-                        className={`h-2 w-2 rounded-full shrink-0 ${STATUS_CONFIG[meeting.status]?.dot || "bg-slate2-400"
-                          }`}
+                      {STATUS_DROPDOWN_OPTIONS.map((s) => (
+                        <option
+                          key={s}
+                          value={s}
+                          className="bg-white text-slate2-800 font-medium py-1"
+                        >
+                          {s.replace("_", " ")}
+                        </option>
+                      ))}
+                    </select>
+                    {isLocked && !hasAdminOverride ? (
+                      <Lock
+                        size={11}
+                        className="pointer-events-none absolute right-2 text-inherit opacity-70"
                       />
-                      <select
-                        value={meeting.status}
-                        onChange={(e) => updateStatus(e.target.value as MeetingStatus)}
-                        disabled={isLocked && !hasAdminOverride}
-                        title={
-                          isLocked && !hasAdminOverride
-                            ? "Meeting is locked. Only users with the ADMIN_OVERRIDE permission can alter status."
-                            : "Click to change status"
-                        }
-                        className="bg-transparent text-inherit font-semibold text-xs border-0 outline-none p-0 pr-4 cursor-pointer disabled:cursor-not-allowed appearance-none focus:ring-0 select-none"
-                      >
-                        {(meeting.status === "APPROVED" ? ["APPROVED", ...STATUS_DROPDOWN_OPTIONS] : STATUS_DROPDOWN_OPTIONS).map((s) => (
-                          <option
-                            key={s}
-                            value={s}
-                            disabled={s === "COMPLETED" && !canCompleteMeeting}
-                            className="bg-white text-slate2-800 font-medium py-1 disabled:text-slate2-400"
-                          >
-                            {s.replace("_", " ")}
-                            {s === "COMPLETED" && !canCompleteMeeting ? " (Content Required)" : ""}
-                          </option>
-                        ))}
-                      </select>
-                      {isLocked && !hasAdminOverride ? (
-                        <Lock
-                          size={11}
-                          className="pointer-events-none absolute right-2 text-inherit opacity-70"
-                        />
-                      ) : (
-                        <ChevronDown
-                          size={12}
-                          className="pointer-events-none absolute right-2 text-inherit opacity-70 group-hover:opacity-100 transition-opacity"
-                        />
-                      )}
-                    </div>
-                  ) : (
-                    <StatusBadge status={meeting.status} />
-                  )}
-                </div>
-
+                    ) : (
+                      <ChevronDown
+                        size={12}
+                        className="pointer-events-none absolute right-2 text-inherit opacity-70 group-hover:opacity-100 transition-opacity"
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <StatusBadge status={meeting.status} />
+                )}
               </div>
-
-
-
-
-
-
             </div>
           </div>
 
-          {/* Location & Online Links */}
-          {(meeting.location || meeting.onlineLink || (meeting.participants && meeting.participants.length > 0)) && (
-            <div className="flex flex-wrap items-center gap-2.5 text-xs">
-              {meeting.location && (
-                <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate2-50 px-2.5 py-1 text-slate2-700 border border-slate2-200/80 font-medium">
-                  <MapPin size={13} className="text-slate2-500" />
-                  <span>{meeting.location}</span>
-                </span>
-              )}
-              {meeting.onlineLink && (
-                <a
-                  href={meeting.onlineLink}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-brand/5 px-2.5 py-1 text-brand border border-brand/20 hover:bg-brand/10 transition-colors font-medium"
-                >
-                  <Video size={13} />
-                  <span>Join online</span>
-                </a>
-              )}
-              {meeting.participants && meeting.participants.length > 0 && (
-                <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate2-50 px-2.5 py-1 text-slate2-600 border border-slate2-200/80">
-                  <Users size={13} className="text-slate2-400" />
-                  <span>
-                    {meeting.participants.length}{" "}
-                    {meeting.participants.length === 1 ? "participant" : "participants"}
-                  </span>
-                </span>
-              )}
-            </div>
-          )}
+          {/* Title & Description */}
+          <div className="space-y-1.5">
+            <h1 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-slate2-900">
+              {meeting.title}
+            </h1>
+            {meeting.description && (
+              <p className="text-xs sm:text-sm text-slate2-600 max-w-4xl leading-relaxed">
+                {meeting.description}
+              </p>
+            )}
+          </div>
 
-          {/* Bottom Bar: Organizer on Left, Time/Date schedule on Right Bottom Corner */}
-          <div className="border-t border-slate2-100 pt-3.5 mt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            {/* Bottom Left: Organizer Info */}
-            <div className="flex items-center gap-2.5 text-xs text-slate2-600">
-              {/* <Avatar
-                name={meeting.organizer.name}
-                color={meeting.organizer.avatarColor}
-              /> */}
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-slate2-500">Organized by</span>
-                <span className="font-semibold text-slate2-800">
-                  {meeting.organizer.name}
-                </span>
-                <span className="text-slate2-400">·</span>
-                <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate2-100 text-slate2-700 font-medium text-[11px]">
-                  {meeting.department.name}
-                </span>
+          {/* Proceedings Dossier Strip: Schedule, Location, Organizer, Attendance */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+            {/* 1. Date & Time */}
+            <div className="rounded-xl border border-slate2-200/80 bg-slate2-50/60 p-3">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate2-500">
+                <CalendarDays size={13} className="text-brand" />
+                <span>Schedule & Duration</span>
               </div>
+              <p className="mt-1 text-xs font-bold text-slate2-800">
+                {new Date(meeting.date).toLocaleDateString("en-US", {
+                  weekday: "short",
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+              </p>
+              <p className="text-[11px] font-mono text-slate2-600 mt-0.5">
+                {meeting.startTime} – {meeting.endTime}
+                {meetingDurationMinutes && (
+                  <span className="ml-1 text-slate2-400 font-sans">({meetingDurationMinutes} min)</span>
+                )}
+              </p>
             </div>
 
-            {/* Bottom Right Corner: Date & Time schedule */}
-            <div className="flex items-center gap-2.5 self-start sm:self-auto rounded-xl bg-slate2-50 border border-slate2-200/80 px-3.5 py-1.5 text-xs text-slate2-700 shadow-2xs">
-              <CodeChip>{meeting.code}</CodeChip>
+            {/* 2. Venue / Room */}
+            <div className="rounded-xl border border-slate2-200/80 bg-slate2-50/60 p-3">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate2-500">
+                <MapPin size={13} className="text-brand" />
+                <span>Venue & Access</span>
+              </div>
+              <p className="mt-1 text-xs font-bold text-slate2-800 truncate">
+                {meeting.location || "Office Boardroom"}
+              </p>
+              <div className="mt-0.5">
+                {meeting.onlineLink ? (
+                  <a
+                    href={meeting.onlineLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-brand hover:underline"
+                  >
+                    <Video size={11} /> Join Video Room
+                  </a>
+                ) : (
+                  <span className="text-[11px] text-slate2-400">In-person session</span>
+                )}
+              </div>
+            </div>
 
-              <div className="flex items-center gap-1.5 font-medium text-slate2-700">
-                <CalendarDays size={14} className="text-brand" />
-                <span>
-                  {new Date(meeting.date).toLocaleDateString("en-US", {
-                    weekday: "short",
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </span>
+            {/* 3. Convener / Organizer */}
+            <div className="rounded-xl border border-slate2-200/80 bg-slate2-50/60 p-3">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate2-500">
+                <Users size={13} className="text-brand" />
+                <span>Convener / Organizer</span>
               </div>
-              <span className="h-3.5 w-px bg-slate2-200" />
-              <div className="flex items-center gap-1.5 font-semibold text-slate2-900">
-                <Clock size={14} className="text-brand" />
-                <span>
-                  {meeting.startTime} – {meeting.endTime}
-                </span>
+              <div className="mt-1 flex items-center gap-2">
+                <Avatar
+                  name={meeting.organizer?.name || "Organizer"}
+                  color={meeting.organizer?.avatarColor || "#0B7A6B"}
+                />
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate2-800 truncate">
+                    {meeting.organizer?.name || "Unassigned"}
+                  </p>
+                  {meeting.department?.name && (
+                    <p className="text-[11px] text-slate2-400 truncate">
+                      {meeting.department.name}
+                    </p>
+                  )}
+                </div>
               </div>
+            </div>
+
+            {/* 4. Attendance & Signatures */}
+            <div className="rounded-xl border border-slate2-200/80 bg-slate2-50/60 p-3">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate2-500">
+                <ShieldCheck size={13} className="text-brand" />
+                <span>Roster & Attendance</span>
+              </div>
+              <p className="mt-1 text-xs font-bold text-slate2-800">
+                {(meeting.participants || []).length} {(meeting.participants || []).length === 1 ? "Invited Attendee" : "Invited Attendees"}
+              </p>
+              <p className="text-[11px] text-slate2-600 mt-0.5">
+                {meeting.status === "APPROVED"
+                  ? "Formally certified & locked"
+                  : totalSignersCount > 0
+                    ? `${signedCount} of ${totalSignersCount} signatures verified`
+                    : `${(meeting.participants || []).filter((p) => p.status === "ACCEPTED").length} accepted`}
+              </p>
             </div>
           </div>
         </div>
       </Card>
 
-
-
-      {/* Read-Only Notification Banner for Approved / Cancelled / Completed */}
+      {/* Official Certified Proceedings Ribbon for Approved / Locked Sessions */}
       {isLocked && meeting.status !== "PENDING_SIGNATURES" && meeting.status !== "READY_FOR_APPROVAL" && (
         <div
-          className={`rounded-xl border p-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${meeting.status === "APPROVED"
-            ? "bg-brand/5 border-brand/20 text-brand-dark"
+          className={`rounded-xl border p-4 shadow-2xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${meeting.status === "APPROVED"
+            ? "bg-brand/5 border-brand/25 text-brand-dark"
             : meeting.status === "CANCELLED"
               ? "bg-rose-50/80 border-rose-200 text-rose-950"
-              : "bg-slate-50 border-slate-200 text-slate-900"
+              : "bg-slate2-50 border-slate2-200 text-slate2-900"
             }`}
         >
           <div className="flex items-start gap-3">
             <div
-              className={`mt-0.5 rounded-lg p-2 ${meeting.status === "APPROVED"
+              className={`mt-0.5 rounded-lg p-2 shrink-0 ${meeting.status === "APPROVED"
                 ? "bg-brand/10 text-brand"
                 : meeting.status === "CANCELLED"
                   ? "bg-rose-100 text-rose-700"
-                  : "bg-slate-200 text-slate-700"
+                  : "bg-slate2-200 text-slate2-700"
                 }`}
             >
               {meeting.status === "APPROVED" ? (
@@ -841,64 +878,70 @@ export default function MeetingDetail() {
                 <Lock size={20} />
               )}
             </div>
-            <div>
+
+            <div className="space-y-1">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-semibold text-sm">
-                  Meeting {meeting.status === "APPROVED" ? "Approved" : meeting.status === "CANCELLED" ? "Cancelled" : "Completed"} — {meeting.status === "COMPLETED" ? "Action Items Active" : "Read-Only Mode"}
+                <span className="font-bold text-sm">
+                  {meeting.status === "APPROVED"
+                    ? "Official Certified Corporate Record"
+                    : meeting.status === "CANCELLED"
+                      ? "Meeting Session Cancelled"
+                      : "Meeting Completed & Certified"}
                 </span>
-                <span className="rounded-full bg-white/80 border border-current px-2 py-0.5 text-[10px] font-bold tracking-wider">
-                  {meeting.status === "COMPLETED" ? "COMPLETED" : "LOCKED"}
+                <span className="rounded bg-white/90 border border-current px-2 py-0.5 text-[10px] font-bold tracking-wider">
+                  {meeting.status === "COMPLETED" ? "COMPLETED" : "LOCKED ARCHIVE"}
                 </span>
                 {hasAdminOverride && (
-                  <span className="rounded-full bg-amber-100 border border-amber-300 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
-                    Admin Override Active
+                  <span className="rounded bg-amber-100 border border-amber-300 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                    Administrator Override Active
                   </span>
                 )}
               </div>
-              <div className="mt-1 text-xs text-slate2-600 space-y-0.5">
-                <p>
-                  {meeting.status === "APPROVED"
-                    ? "This meeting has been officially approved & certified. All documents, decisions, attendance records, and minutes are strictly locked in Read-Only mode for all users. Users with the ADMIN_OVERRIDE permission can unlock this meeting using the button above to reopen it for modification."
-                    : meeting.status === "CANCELLED"
-                      ? "This meeting was cancelled. All records, including action item status, are locked from editing."
-                      : "This meeting has been completed. Meeting records are archived; action items run independently and their status can be updated."}
-                </p>
-                {meeting.status === "APPROVED" && meeting.approvedBy && meeting.approvedAt && (
-                  <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-brand/15 mt-2">
-                    <p className="font-medium text-brand flex items-center gap-1.5 pt-0.5">
-                      <CheckCircle2 size={13} className="text-brand shrink-0" />
-                      Approved by {meeting.approvedBy.name} on {new Date(meeting.approvedAt).toLocaleString()}
-                    </p>
-                    {meeting.approvalSignature && (
-                      <div className="flex items-center gap-2 rounded-lg bg-white/95 border border-brand/20 px-3 py-1 shadow-2xs self-start sm:self-auto">
-                        <span className="text-[10px] font-semibold text-slate2-500 uppercase tracking-wider">
-                          Reviewer Signature:
-                        </span>
-                        <img
-                          src={meeting.approvalSignature}
-                          alt="Reviewer Digital Signature"
-                          className="h-7 max-w-[130px] object-contain"
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+
+              <p className="text-xs text-slate2-600 leading-relaxed max-w-3xl">
+                {meeting.status === "APPROVED"
+                  ? "This session and its recorded minutes have been formally approved and certified by authorized reviewer. All minutes, decisions, attendance records, tasks, and attached documents are preserved in Read-Only archive mode."
+                  : meeting.status === "CANCELLED"
+                    ? "This meeting was cancelled. Proceedings and minutes are permanently locked."
+                    : "This meeting is completed and preserved in Read-Only archive mode."}
+              </p>
+
+              {meeting.status === "APPROVED" && meeting.approvedBy && meeting.approvedAt && (
+                <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-brand/15 mt-2">
+                  <p className="font-semibold text-xs text-brand flex items-center gap-1.5">
+                    <CheckCircle2 size={13} className="text-brand shrink-0" />
+                    Certified by {meeting.approvedBy.name} on {new Date(meeting.approvedAt).toLocaleString()}
+                  </p>
+                  {meeting.approvalSignature && (
+                    <div className="flex items-center gap-2 rounded-lg bg-white/95 border border-brand/20 px-3 py-1 shadow-2xs">
+                      <span className="text-[10px] font-semibold text-slate2-500 uppercase tracking-wider">
+                        Reviewer Seal:
+                      </span>
+                      <img
+                        src={meeting.approvalSignature}
+                        alt="Reviewer Digital Signature"
+                        className="h-7 max-w-[130px] object-contain"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            {hasAdminOverride && (
-              <div className="shrink-0 self-start sm:self-center">
-                <Button
-                  variant="secondary"
-                  type="button"
-                  onClick={() => setIsUnlockModalOpen(true)}
-                  className="text-xs py-1.5 px-3 bg-white hover:bg-amber-50 border-amber-300 text-amber-900 font-semibold shadow-2xs inline-flex items-center gap-1.5"
-                >
-                  <Unlock size={13} className="text-amber-700" />
-                  <span>Unlock Meeting</span>
-                </Button>
-              </div>
-            )}
           </div>
+
+          {hasAdminOverride && (
+            <div className="shrink-0 self-start sm:self-center">
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => setIsUnlockModalOpen(true)}
+                className="text-xs py-1.5 px-3 bg-white hover:bg-amber-50 border-amber-300 text-amber-900 font-semibold shadow-2xs inline-flex items-center gap-1.5"
+              >
+                <Unlock size={13} className="text-amber-700" />
+                <span>Unlock Meeting</span>
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -911,43 +954,43 @@ export default function MeetingDetail() {
         />
       )}
 
-      {/* Participant RSVP Banner for Invited Users */}
+      {/* Participant RSVP Strip for Invited Users */}
       {myParticipant && meeting.status !== "CANCELLED" && (
-        <div className="rounded-2xl border border-slate2-200/90 bg-white p-4 sm:p-5 shadow-xs transition-all">
+        <div className="rounded-xl border border-slate2-200/90 bg-white p-4 shadow-2xs">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex items-start sm:items-center gap-3.5 min-w-0">
+            <div className="flex items-center gap-3 min-w-0">
               <div
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${
-                  myParticipant.status === "ACCEPTED"
-                    ? "bg-emerald-50 text-emerald-600 border-emerald-200"
-                    : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED"
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${myParticipant.status === "ACCEPTED"
+                  ? "bg-emerald-50 text-emerald-600 border-emerald-200"
+                  : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED"
                     ? "bg-rose-50 text-rose-600 border-rose-200"
                     : "bg-amber-50 text-amber-600 border-amber-200"
-                }`}
+                  }`}
               >
                 {myParticipant.status === "ACCEPTED" ? (
-                  <CheckCircle2 size={20} />
+                  <CheckCircle2 size={18} />
                 ) : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED" ? (
-                  <XCircle size={20} />
+                  <XCircle size={18} />
                 ) : (
-                  <Clock size={20} />
+                  <Clock size={18} />
                 )}
               </div>
+
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-bold text-sm text-slate2-900">
-                    Meeting Invitation
+                  <span className="font-bold text-xs sm:text-sm text-slate2-900">
+                    Your Attendance Response
                   </span>
                   {myParticipant.status === "ACCEPTED" ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
-                      <CheckCircle2 size={12} className="text-emerald-600" />
-                      <span>(Accepted)</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 text-xs font-semibold">
+                      <CheckCircle2 size={11} className="text-emerald-600" />
+                      <span>Confirmed (Will Attend)</span>
                     </span>
                   ) : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED" ? (
                     <div className="inline-flex items-center gap-1.5 flex-wrap">
-                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
-                        <XCircle size={12} className="text-rose-600" />
-                        <span>(Rejected)</span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2 py-0.5 text-xs font-semibold">
+                        <XCircle size={11} className="text-rose-600" />
+                        <span>Declined</span>
                       </span>
                       {myParticipant.rejectionReason && (
                         <span className="text-xs text-rose-700 font-medium">
@@ -956,20 +999,18 @@ export default function MeetingDetail() {
                       )}
                     </div>
                   ) : (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 text-xs font-medium">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 text-xs font-medium">
                       <Clock size={11} className="text-amber-600" />
-                      <span>(Awaiting Response)</span>
+                      <span>Awaiting Response</span>
                     </span>
                   )}
                 </div>
                 <p className="text-xs text-slate2-500 mt-0.5">
                   {myParticipant.status === "ACCEPTED"
-                    ? "You confirmed that you will attend this meeting."
+                    ? "Your seat is confirmed on the official roster."
                     : myParticipant.status === "REJECTED" || myParticipant.status === "DECLINED"
-                    ? `You declined this invitation.${
-                        myParticipant.rejectionReason ? ` Reason: '${myParticipant.rejectionReason}'` : ""
-                      }`
-                    : "You are invited to this meeting. Please respond to let the organizer know if you can attend."}
+                      ? "You notified the organizer that you cannot attend."
+                      : "Please respond to let the convener know if you will attend this session."}
                 </p>
               </div>
             </div>
@@ -981,23 +1022,19 @@ export default function MeetingDetail() {
                     type="button"
                     disabled={isSubmittingRsvp}
                     onClick={() => handleRsvp("ACCEPTED")}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-2 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3 py-1.5 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
                   >
-                    {isSubmittingRsvp ? (
-                      <Loader2 size={13} className="animate-spin" />
-                    ) : (
-                      <CheckCircle2 size={14} />
-                    )}
+                    {isSubmittingRsvp ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={13} />}
                     <span>Accept (Will Attend)</span>
                   </button>
                   <button
                     type="button"
                     disabled={isSubmittingRsvp}
                     onClick={() => setIsDeclineModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 px-3.5 py-2 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 px-3 py-1.5 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
                   >
-                    <XCircle size={14} />
-                    <span>Decline / Reject</span>
+                    <XCircle size={13} />
+                    <span>Decline Invitation</span>
                   </button>
                 </>
               ) : (
@@ -1007,7 +1044,7 @@ export default function MeetingDetail() {
                       type="button"
                       disabled={isSubmittingRsvp}
                       onClick={() => setIsDeclineModalOpen(true)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate2-200 bg-white hover:bg-slate2-50 text-slate2-700 px-3 py-1.5 text-xs font-medium shadow-2xs transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate2-200 bg-white hover:bg-slate2-50 text-slate2-700 px-3 py-1.5 text-xs font-medium shadow-2xs transition-colors cursor-pointer"
                     >
                       <span>Change to Decline</span>
                     </button>
@@ -1016,9 +1053,9 @@ export default function MeetingDetail() {
                       type="button"
                       disabled={isSubmittingRsvp}
                       onClick={() => handleRsvp("ACCEPTED")}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-3 py-1.5 text-xs font-medium shadow-2xs transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-3 py-1.5 text-xs font-medium shadow-2xs transition-colors cursor-pointer"
                     >
-                      <CheckCircle2 size={13} className="text-emerald-600" />
+                      <CheckCircle2 size={12} className="text-emerald-600" />
                       <span>Change to Accepted</span>
                     </button>
                   )}
@@ -1029,20 +1066,80 @@ export default function MeetingDetail() {
         </div>
       )}
 
-      {/* Tabs */}
-      <div className="flex gap-1 overflow-x-auto border-b border-slate2-200">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`focus-ring flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${tab === t.key
-              ? "border-brand text-brand"
-              : "border-transparent text-slate2-500 hover:text-slate2-700"
-              }`}
+      {/* Participant Digital Signature Action Alert Banner */}
+      {meeting.status === "PENDING_SIGNATURES" && isEligibleSigner && !hasUserSigned && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50/70 p-4 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-xl bg-amber-100 border border-amber-200 text-amber-800 flex items-center justify-center shrink-0">
+              <Signature size={18} />
+            </div>
+            <div>
+              <p className="text-xs sm:text-sm font-bold text-amber-950">
+                Digital Signature Requested
+              </p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                Your digital signature is requested to certify and attest to this meeting&apos;s proceedings and official minutes.
+              </p>
+            </div>
+          </div>
+          <Button
+            variant="primary"
+            type="button"
+            onClick={() => setIsParticipantSignModalOpen(true)}
+            className="bg-brand hover:bg-brand-light text-white text-xs py-2 px-4 shrink-0 inline-flex items-center gap-1.5 font-semibold shadow-xs cursor-pointer"
           >
-            <t.icon size={14} /> {t.label}
-          </button>
-        ))}
+            <Signature size={14} /> Sign Meeting Minutes
+          </Button>
+        </div>
+      )}
+
+      {/* Structured Tab Bar with Live Counters */}
+      <div className="flex gap-1 overflow-x-auto border-b border-slate2-200 pb-px">
+        {TABS.map((t) => {
+          const isActive = tab === t.key;
+          let badgeContent: React.ReactNode = null;
+          if (t.key === "agenda") {
+            badgeContent = (meeting.agendaItems || []).length;
+          } else if (t.key === "decisions") {
+            badgeContent = (meeting.decisions || []).length;
+          } else if (t.key === "actions") {
+            badgeContent = (meeting.actionItems || []).length;
+          } else if (t.key === "participants") {
+            badgeContent = (meeting.participants || []).length;
+          } else if (t.key === "documents") {
+            badgeContent = (meeting.documents || []).length;
+          } else if (t.key === "minutes") {
+            if (meeting.status === "APPROVED") {
+              badgeContent = "Certified";
+            } else if (totalSignersCount > 0) {
+              badgeContent = `${signedCount}/${totalSignersCount}`;
+            }
+          }
+
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`focus-ring flex items-center gap-2 whitespace-nowrap border-b-2 px-3.5 py-2.5 text-xs sm:text-sm font-semibold transition-all cursor-pointer ${isActive
+                ? "border-brand text-brand bg-brand/[0.03]"
+                : "border-transparent text-slate2-500 hover:text-slate2-800 hover:border-slate2-300"
+                }`}
+            >
+              <t.icon size={15} />
+              <span>{t.label}</span>
+              {badgeContent !== null && badgeContent !== undefined && (
+                <span
+                  className={`rounded-full px-1.5 py-0.2 text-[10px] font-bold ${isActive
+                    ? "bg-brand/15 text-brand"
+                    : "bg-slate2-100 text-slate2-600"
+                    }`}
+                >
+                  {badgeContent}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {tab === "overview" && (
@@ -1162,11 +1259,10 @@ export default function MeetingDetail() {
                     key={chip}
                     type="button"
                     onClick={() => setDeclineReason(chip)}
-                    className={`rounded-full px-2.5 py-1 text-xs font-medium border transition-colors cursor-pointer ${
-                      declineReason === chip
-                        ? "bg-rose-100 border-rose-300 text-rose-800"
-                        : "bg-slate2-50 border-slate2-200 text-slate2-700 hover:bg-slate2-100"
-                    }`}
+                    className={`rounded-full px-2.5 py-1 text-xs font-medium border transition-colors cursor-pointer ${declineReason === chip
+                      ? "bg-rose-100 border-rose-300 text-rose-800"
+                      : "bg-slate2-50 border-slate2-200 text-slate2-700 hover:bg-slate2-100"
+                      }`}
                   >
                     {chip}
                   </button>
@@ -1223,7 +1319,7 @@ export default function MeetingDetail() {
       {isUnlockModalOpen && meeting && (
         <Modal
           open={isUnlockModalOpen}
-          onClose={unlocking ? () => {} : () => setIsUnlockModalOpen(false)}
+          onClose={unlocking ? () => { } : () => setIsUnlockModalOpen(false)}
           title="Administrator Override: Unlock Meeting"
         >
           <div className="space-y-4 text-xs text-slate2-700">
@@ -1297,9 +1393,13 @@ export default function MeetingDetail() {
                 className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
               >
                 {unlocking ? (
-                  <><Loader2 size={13} className="animate-spin" /> Unlocking...</>
+                  <>
+                    <Loader2 size={13} className="animate-spin" /> Unlocking...
+                  </>
                 ) : (
-                  <><Unlock size={14} /> Confirm Unlock & Reopen</>
+                  <>
+                    <Unlock size={14} /> Confirm Unlock & Reopen
+                  </>
                 )}
               </Button>
             </div>
@@ -1317,156 +1417,370 @@ function OverviewTab({
   meeting: MeetingDetailType;
   onNavigateTab?: (tab: TabKey) => void;
 }) {
-  const totalParticipants = meeting.participants.length;
-  const acceptedCount = meeting.participants.filter(
-    (p) => p.status === "ACCEPTED",
+  const participants = meeting.participants || [];
+  const agendaItems = meeting.agendaItems || [];
+  const decisions = meeting.decisions || [];
+  const actionItems = meeting.actionItems || [];
+  const minutes = meeting.minutes || [];
+
+  const totalParticipants = participants.length;
+  const acceptedCount = participants.filter((p) => p.status === "ACCEPTED").length;
+  const rejectedCount = participants.filter(
+    (p) => p.status === "REJECTED" || p.status === "DECLINED"
   ).length;
-  const rejectedCount = meeting.participants.filter(
-    (p) => p.status === "REJECTED" || p.status === "DECLINED",
+  const awaitingCount = participants.filter(
+    (p) => p.status !== "ACCEPTED" && p.status !== "REJECTED" && p.status !== "DECLINED"
   ).length;
-  const awaitingCount = meeting.participants.filter(
-    (p) =>
-      p.status !== "ACCEPTED" &&
-      p.status !== "REJECTED" &&
-      p.status !== "DECLINED",
-  ).length;
+
+  const attendancePercentage = totalParticipants > 0 ? Math.round((acceptedCount / totalParticipants) * 100) : 0;
+
+  // Total scheduled duration of agenda items
+  const totalAgendaMinutes = useMemo(() => {
+    return agendaItems.reduce((acc, item) => acc + (item.durationMin || 0), 0);
+  }, [agendaItems]);
+
+  // Action items completed vs pending
+  const completedActions = actionItems.filter((a) => a.status === "COMPLETED").length;
+  const pendingActions = actionItems.length - completedActions;
+
+  // Implemented decisions count
+  const implementedDecisions = decisions.filter((d) => d.status === "IMPLEMENTED").length;
+
+  // Meeting Summary preview
+  const summaryMinute = useMemo(() => {
+    return minutes.find((m) => m.type === "SUMMARY" || (!m.type && !m.attendeeId));
+  }, [minutes]);
+
+  // Determine active governance phase (1 to 4)
+  const currentPhase = useMemo(() => {
+    if (meeting.status === "APPROVED" || meeting.status === "COMPLETED") return 4;
+    if (meeting.status === "PENDING_SIGNATURES" || meeting.status === "READY_FOR_APPROVAL") return 3;
+    if (meeting.status === "IN_PROGRESS") return 2;
+    return 1; // SCHEDULED / DRAFT
+  }, [meeting.status]);
+
+  const GOVERNANCE_STAGES = [
+    { num: 1, label: "Scheduled", desc: "Agenda & Docs prepared" },
+    { num: 2, label: "In Session", desc: "Proceedings & Discussion" },
+    { num: 3, label: "Attestation", desc: "Attendee pre-signatures" },
+    { num: 4, label: "Certified", desc: "Formal executive lock" },
+  ];
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <Card className="p-4 text-center">
-        <p className="font-display text-2xl font-semibold text-slate2-800">
-          {meeting.agendaItems.length}
-        </p>
-        <p className="text-xs text-slate2-500">Agenda items</p>
-      </Card>
-      <Card className="p-4 text-center">
-        <p className="font-display text-2xl font-semibold text-slate2-800">
-          {meeting.decisions.length}
-        </p>
-        <p className="text-xs text-slate2-500">Decisions logged</p>
-      </Card>
-      <Card className="p-4 text-center">
-        <p className="font-display text-2xl font-semibold text-slate2-800">
-          {meeting.actionItems.length}
-        </p>
-        <p className="text-xs text-slate2-500">Action items</p>
-      </Card>
-
-      {/* View for Meeting Organizer: Participant Invitations & RSVP Breakdown */}
-      <Card className="p-5 lg:col-span-3">
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate2-100">
-          <div className="flex items-center gap-2">
-            <Users size={16} className="text-brand" />
-            <h4 className="text-sm font-bold text-slate2-900">
-              Participant Invitation Status
-            </h4>
+    <div className="space-y-6">
+      {/* 4 Executive Metric Ledger Tiles */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        {/* 1. Agenda Scope */}
+        <div
+          onClick={() => onNavigateTab?.("agenda")}
+          className="rounded-xl border border-slate2-200 bg-white p-4 shadow-2xs hover:border-brand/40 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate2-500">Agenda Topics</span>
+            <FileText size={16} className="text-brand group-hover:scale-110 transition-transform" />
           </div>
-          <div className="flex items-center gap-2 text-xs flex-wrap">
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
-              <CheckCircle2 size={12} className="text-emerald-600" />
-              {acceptedCount} Accepted
-            </span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
-              <XCircle size={12} className="text-rose-600" />
-              {rejectedCount} Rejected
-            </span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 text-xs font-medium">
-              <Clock size={11} className="text-amber-600" />
-              {awaitingCount} Awaiting
-            </span>
-            {onNavigateTab && (
-              <button
-                type="button"
-                onClick={() => onNavigateTab("participants")}
-                className="text-xs text-brand hover:underline font-semibold ml-2 cursor-pointer"
-              >
-                View all in Participants Tab →
-              </button>
-            )}
+          <div className="mt-2 flex items-baseline justify-between">
+            <p className="font-display text-2xl font-bold text-slate2-900">{agendaItems.length}</p>
+            <span className="text-xs font-mono text-slate2-500">{totalAgendaMinutes} mins planned</span>
           </div>
+          <p className="mt-1 text-[11px] text-slate2-400">
+            {agendaItems.filter((a) => a.status === "DISCUSSED").length} covered ·{" "}
+            {agendaItems.filter((a) => a.status === "PENDING").length} pending
+          </p>
         </div>
 
-        {meeting.participants.length === 0 ? (
-          <p className="py-4 text-xs text-slate2-400 text-center">
-            No participants invited yet.
+        {/* 2. Formal Decisions */}
+        <div
+          onClick={() => onNavigateTab?.("decisions")}
+          className="rounded-xl border border-slate2-200 bg-white p-4 shadow-2xs hover:border-brand/40 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate2-500">Formal Decisions</span>
+            <Gavel size={16} className="text-brand group-hover:scale-110 transition-transform" />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <p className="font-display text-2xl font-bold text-slate2-900">{decisions.length}</p>
+            <span className="text-xs text-emerald-700 font-semibold">{implementedDecisions} executed</span>
+          </div>
+          <p className="mt-1 text-[11px] text-slate2-400">
+            {decisions.length - implementedDecisions} open decisions
           </p>
-        ) : (
-          <div className="divide-y divide-slate2-100 mt-2">
-            {meeting.participants.map((p) => (
-              <div
-                key={p.id}
-                className="py-2.5 flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span
-                    className="inline-block h-2.5 w-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: p.user.avatarColor || "#0b2545" }}
-                  />
-                  <span className="text-xs font-semibold text-slate2-900 truncate">
-                    {p.user.name}
-                  </span>
-                  <span className="text-xs text-slate2-400 truncate hidden sm:inline">
-                    {p.user.email}
-                  </span>
-                </div>
+        </div>
 
-                <div className="shrink-0">
-                  {p.status === "ACCEPTED" ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
-                      <CheckCircle2 size={12} className="text-emerald-600" />
-                      <span>(Accepted)</span>
-                    </span>
-                  ) : p.status === "REJECTED" || p.status === "DECLINED" ? (
-                    <div className="inline-flex items-center gap-1.5 flex-wrap justify-end">
-                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
-                        <XCircle size={12} className="text-rose-600" />
-                        <span>(Rejected)</span>
+        {/* 3. Action Items */}
+        <div
+          onClick={() => onNavigateTab?.("actions")}
+          className="rounded-xl border border-slate2-200 bg-white p-4 shadow-2xs hover:border-brand/40 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate2-500">Action Items</span>
+            <ListChecks size={16} className="text-brand group-hover:scale-110 transition-transform" />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <p className="font-display text-2xl font-bold text-slate2-900">{actionItems.length}</p>
+            <span className="text-xs text-brand font-semibold">{completedActions} resolved</span>
+          </div>
+          <p className="mt-1 text-[11px] text-slate2-400">
+            {pendingActions} pending operational tasks
+          </p>
+        </div>
+
+        {/* 4. Attendance & Attendance */}
+        <div
+          onClick={() => onNavigateTab?.("participants")}
+          className="rounded-xl border border-slate2-200 bg-white p-4 shadow-2xs hover:border-brand/40 transition-colors cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate2-500">Attendee Attendance</span>
+            <Users size={16} className="text-brand group-hover:scale-110 transition-transform" />
+          </div>
+          <div className="mt-2 flex items-baseline justify-between">
+            <p className="font-display text-2xl font-bold text-slate2-900">{attendancePercentage}%</p>
+            <span className="text-xs text-slate2-500">
+              {acceptedCount} / {totalParticipants}
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-slate2-400">
+            {rejectedCount > 0 ? `${rejectedCount} declined · ` : ""}
+            {awaitingCount} awaiting response
+          </p>
+        </div>
+      </div>
+
+      {/* Main 2-Column Executive Briefing Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left 2 Columns: Governance Timeline & Meeting Summary Preview */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Governance Lifecycle Stepper */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate2-100">
+              <h3 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
+                Meeting Governance Progression
+              </h3>
+              <span className="text-xs font-semibold text-brand">
+                Phase {currentPhase} of 4: {GOVERNANCE_STAGES[currentPhase - 1].label}
+              </span>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {GOVERNANCE_STAGES.map((s) => {
+                const isPassed = s.num < currentPhase;
+                const isCurrent = s.num === currentPhase;
+
+                return (
+                  <div
+                    key={s.num}
+                    className={`rounded-xl border p-3 transition-all ${isCurrent
+                      ? "border-brand bg-brand/[0.04] shadow-2xs"
+                      : isPassed
+                        ? "border-emerald-200 bg-emerald-50/30"
+                        : "border-slate2-200/70 bg-slate2-50/40 opacity-70"
+                      }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${isPassed
+                          ? "bg-emerald-600 text-white"
+                          : isCurrent
+                            ? "bg-brand text-white"
+                            : "bg-slate2-200 text-slate2-600"
+                          }`}
+                      >
+                        {isPassed ? "✓" : s.num}
                       </span>
-                      {p.rejectionReason && (
-                        <span className="text-xs text-rose-700 font-medium">
-                          ➜ &lsquo;{p.rejectionReason}&rsquo;
-                        </span>
-                      )}
+                      <span className="text-xs font-bold text-slate2-800 truncate">{s.label}</span>
                     </div>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-0.5 text-xs font-medium">
-                      <Clock size={11} className="text-amber-600" />
-                      <span>(Awaiting Response)</span>
-                    </span>
-                  )}
+                    <p className="text-[11px] text-slate2-500 mt-1 line-clamp-1">{s.desc}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+
+          {/* Meeting Protocol & Minutes Summary Snapshot */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate2-100">
+              <div className="flex items-center gap-2">
+                <FileText size={16} className="text-brand" />
+                <h3 className="text-sm font-bold text-slate2-900">Recorded Meeting Summary</h3>
+              </div>
+              {onNavigateTab && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab("minutes")}
+                  className="text-xs font-semibold text-brand hover:underline cursor-pointer"
+                >
+                  Full Protocol & Minutes →
+                </button>
+              )}
+            </div>
+
+            {summaryMinute?.content ? (
+              <div className="mt-3.5 space-y-3">
+                <div className="rounded-xl border border-slate2-200/80 bg-slate2-50/30 p-4 max-h-48 overflow-y-auto text-xs leading-relaxed text-slate2-700">
+                  <RichTextRenderer content={summaryMinute.content} />
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate2-400 pt-1">
+                  <span>
+                    Recorded by{" "}
+                    <strong className="text-slate2-700 font-medium">
+                      {summaryMinute.recordedBy?.name || meeting.organizer?.name || "Meeting Secretary"}
+                    </strong>
+                  </span>
+                  <span>{new Date(summaryMinute.updatedAt || summaryMinute.createdAt).toLocaleDateString()}</span>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </Card>
-
-      <Card className="p-5 lg:col-span-3">
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate2-400">
-          Workflow
-        </p>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          {[
-            "Meeting",
-            "Agenda",
-            "Discussion",
-            "Minutes",
-            "Decision",
-            "Action Item",
-            "Responsible Person",
-            "Deadline",
-            "Follow-up",
-            "Completion",
-          ].map((step, i, arr) => (
-            <React.Fragment key={step}>
-              <span className="rounded-full bg-slate2-100 px-2.5 py-1 font-medium text-slate2-600">
-                {step}
-              </span>
-              {i < arr.length - 1 && <span className="text-slate2-400 select-none font-normal">→</span>}
-            </React.Fragment>
-          ))}
+            ) : (
+              <div className="mt-4 rounded-xl border border-dashed border-slate2-200 p-6 text-center">
+                <FileText size={22} className="mx-auto text-slate2-300 mb-1.5" />
+                <p className="text-xs font-medium text-slate2-700">No meeting summary recorded yet</p>
+                <p className="text-[11px] text-slate2-400 mt-0.5">
+                  Capture official minutes and discussion points in the Minutes tab.
+                </p>
+                {onNavigateTab && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => onNavigateTab("minutes")}
+                    className="mt-3 text-xs py-1.5 px-3"
+                  >
+                    Open Minutes Tab
+                  </Button>
+                )}
+              </div>
+            )}
+          </Card>
         </div>
-      </Card>
+
+        {/* Right 1 Column: Attendance Attendance & Recent Outcomes */}
+        <div className="space-y-6">
+          {/* Attendance & Attendance Breakdown */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate2-100">
+              <div className="flex items-center gap-2">
+                <Users size={16} className="text-brand" />
+                <h3 className="text-sm font-bold text-slate2-900">Attendance Breakdown</h3>
+              </div>
+              {onNavigateTab && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab("participants")}
+                  className="text-xs font-semibold text-brand hover:underline cursor-pointer"
+                >
+                  Manage Roster →
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3.5 space-y-3">
+              {/* Progress bar */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs text-slate2-600">
+                  <span className="font-medium">Attendance Attained</span>
+                  <span className="font-bold text-slate2-800">{attendancePercentage}%</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-slate2-100 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-300"
+                    style={{
+                      width: `${attendancePercentage}%`,
+                      backgroundColor: attendancePercentage >= 60 ? "#0B7A6B" : "#D97706",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Status pills */}
+              <div className="grid grid-cols-3 gap-2 pt-1 text-center">
+                <div className="rounded-lg bg-emerald-50 border border-emerald-100 p-2">
+                  <p className="text-base font-bold text-emerald-800">{acceptedCount}</p>
+                  <p className="text-[10px] font-semibold text-emerald-700">Accepted</p>
+                </div>
+                <div className="rounded-lg bg-rose-50 border border-rose-100 p-2">
+                  <p className="text-base font-bold text-rose-800">{rejectedCount}</p>
+                  <p className="text-[10px] font-semibold text-rose-700">Declined</p>
+                </div>
+                <div className="rounded-lg bg-amber-50 border border-amber-100 p-2">
+                  <p className="text-base font-bold text-amber-800">{awaitingCount}</p>
+                  <p className="text-[10px] font-semibold text-amber-700">Awaiting</p>
+                </div>
+              </div>
+
+              {/* Quick Attendee preview list */}
+              <div className="divide-y divide-slate2-100 pt-1">
+                {participants.slice(0, 4).map((p) => (
+                  <div key={p.id} className="py-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="inline-block h-2 w-2 rounded-full shrink-0"
+                        style={{ backgroundColor: p.user?.avatarColor || "#0B7A6B" }}
+                      />
+                      <span className="text-xs font-semibold text-slate2-800 truncate">
+                        {p.user?.name || "Participant"}
+                      </span>
+                    </div>
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${p.status === "ACCEPTED"
+                        ? "bg-emerald-50 text-emerald-700"
+                        : p.status === "REJECTED" || p.status === "DECLINED"
+                          ? "bg-rose-50 text-rose-700"
+                          : "bg-slate2-100 text-slate2-600"
+                        }`}
+                    >
+                      {p.status === "ACCEPTED"
+                        ? "Accepted"
+                        : p.status === "REJECTED" || p.status === "DECLINED"
+                          ? "Declined"
+                          : "Awaiting"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Card>
+
+          {/* Key Decisions Snapshot */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate2-100">
+              <div className="flex items-center gap-2">
+                <Gavel size={16} className="text-brand" />
+                <h3 className="text-sm font-bold text-slate2-900">Decisions Registry</h3>
+              </div>
+              {onNavigateTab && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab("decisions")}
+                  className="text-xs font-semibold text-brand hover:underline cursor-pointer"
+                >
+                  View All ({decisions.length}) →
+                </button>
+              )}
+            </div>
+
+            {decisions.length === 0 ? (
+              <p className="py-4 text-xs text-slate2-400 text-center">No decisions recorded yet.</p>
+            ) : (
+              <div className="divide-y divide-slate2-100 mt-2">
+                {decisions.slice(0, 3).map((d) => (
+                  <div key={d.id} className="py-2.5 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-[11px] font-bold text-slate2-700">{d.code}</span>
+                      <span
+                        className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${d.status === "IMPLEMENTED"
+                          ? "bg-emerald-50 text-emerald-800"
+                          : "bg-amber-50 text-amber-800"
+                          }`}
+                      >
+                        {d.status}
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-slate2-900 line-clamp-1">{d.title}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1579,17 +1893,42 @@ function AgendaTab({
     }
   };
 
+  const totalAgendaMinutes = useMemo(() => {
+    return (meeting.agendaItems || []).reduce((acc, item) => acc + (item.durationMin || 0), 0);
+  }, [meeting.agendaItems]);
+
   return (
-    <Card>
-      <CardHeader title="Agenda" subtitle="Topics for discussion, in order" />
+    <Card className="overflow-hidden border border-slate2-200/90 shadow-sm bg-white">
+      {/* Timetable Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
+        <div>
+          <h2 className="text-sm sm:text-base font-bold text-slate2-900">
+            Agenda & Proceedings Timetable
+          </h2>
+          <p className="mt-0.5 text-xs text-slate2-500">
+            {(meeting.agendaItems || []).length} topics scheduled · {totalAgendaMinutes} min planned duration
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-slate2-200 px-2.5 py-1 text-xs font-semibold text-slate2-700 shadow-2xs">
+            <Clock size={13} className="text-brand" />
+            <span>Total: {totalAgendaMinutes} mins</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Agenda Items List */}
       <div className="divide-y divide-slate2-100">
-        {meeting.agendaItems.length === 0 ? (
-          <EmptyState
-            title="No agenda items yet"
-            description="Add the first topic for this meeting below."
-          />
+        {(meeting.agendaItems || []).length === 0 ? (
+          <div className="p-8">
+            <EmptyState
+              title="No agenda topics scheduled yet"
+              description="Outline the discussion topics, assign presenters, and estimate durations below."
+            />
+          </div>
         ) : (
-          meeting.agendaItems.map((a, idx) => {
+          (meeting.agendaItems || []).map((a, idx) => {
             const isEditing = editingId === a.id;
             const itemPresenterOptions =
               a.presenter && !presenterOptions.includes(a.presenter)
@@ -1598,15 +1937,16 @@ function AgendaTab({
 
             if (isEditing) {
               return (
-                <div key={a.id} className="bg-slate2-50/70 p-5 space-y-4">
+                <div key={a.id} className="bg-slate2-50/90 p-5 space-y-4 border-l-4 border-l-brand">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold uppercase tracking-wider text-brand">
-                      Edit Agenda Item #{idx + 1}
+                      Edit Topic #{idx + 1}
                     </span>
                     <button
                       type="button"
                       onClick={cancelEdit}
-                      className="text-slate2-400 hover:text-slate2-600"
+                      className="text-slate2-400 hover:text-slate2-600 transition-colors"
+                      title="Cancel edit"
                     >
                       <X size={16} />
                     </button>
@@ -1615,21 +1955,21 @@ function AgendaTab({
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
                     <div className="sm:col-span-6">
                       <label className="mb-1 block text-xs font-medium text-slate2-600">
-                        Agenda item title <span className="text-danger">*</span>
+                        Topic title <span className="text-danger">*</span>
                       </label>
                       <input
                         type="text"
                         required
                         value={editTitle}
                         onChange={(e) => setEditTitle(e.target.value)}
-                        placeholder="Agenda item title"
+                        placeholder="Agenda topic title"
                         className={inputClass}
                       />
                     </div>
 
                     <div className="sm:col-span-4">
                       <label className="mb-1 block text-xs font-medium text-slate2-600">
-                        Presenter (Optional)
+                        Presenter
                       </label>
                       <select
                         value={editPresenter}
@@ -1660,27 +2000,26 @@ function AgendaTab({
                     </div>
                   </div>
 
-                  {/* WIDER INPUT: Agenda Item Description full width on desktop and mobile */}
                   <div className="w-full">
                     <label className="mb-1 block text-xs font-medium text-slate2-600">
-                      Agenda Item Description
+                      Topic Details & Objectives
                     </label>
                     <textarea
                       rows={3}
                       value={editDescription}
                       onChange={(e) => setEditDescription(e.target.value)}
-                      placeholder="Enter full agenda item description, discussion objectives, or background context..."
+                      placeholder="Outline discussion objectives, key data points, or background context..."
                       className={`${inputClass} min-h-[76px] w-full resize-y text-slate2-800 bg-white leading-relaxed placeholder:text-slate2-400`}
                     />
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-2">
-                      <label className="text-xs font-medium text-slate2-600">Status:</label>
+                      <label className="text-xs font-medium text-slate2-600">Discussion Status:</label>
                       <select
                         value={editStatus}
                         onChange={(e) => setEditStatus(e.target.value as AgendaStatus)}
-                        className="rounded-lg border border-slate2-200 bg-white px-2.5 py-1 text-xs text-slate2-700 focus-ring"
+                        className="rounded-lg border border-slate2-200 bg-white px-2.5 py-1 text-xs text-slate2-700 focus-ring font-medium"
                       >
                         <option value="PENDING">PENDING</option>
                         <option value="DISCUSSED">DISCUSSED</option>
@@ -1694,15 +2033,17 @@ function AgendaTab({
                         variant="secondary"
                         onClick={cancelEdit}
                         disabled={updating}
+                        className="text-xs"
                       >
-                        <X size={14} /> Cancel
+                        <X size={13} /> Cancel
                       </Button>
                       <Button
                         type="button"
                         onClick={() => saveEdit(a.id)}
                         disabled={updating || !editTitle.trim()}
+                        className="text-xs"
                       >
-                        <Check size={14} /> {updating ? "Saving..." : "Save changes"}
+                        <Check size={13} /> {updating ? "Saving..." : "Save changes"}
                       </Button>
                     </div>
                   </div>
@@ -1713,87 +2054,107 @@ function AgendaTab({
             return (
               <div
                 key={a.id}
-                className="flex flex-col gap-2 px-5 py-3.5 sm:flex-row sm:items-start sm:justify-between"
+                className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 p-4 sm:p-5 hover:bg-slate2-50/40 transition-colors"
               >
-                <div className="flex items-start gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate2-100 text-xs font-semibold text-slate2-500 mt-0.5">
-                    {idx + 1}
-                  </span>
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold text-slate2-800">
-                      {a.title}
-                    </p>
+                <div className="flex items-start gap-3.5 min-w-0 flex-1">
+                  {/* Sequence & Duration Badge */}
+                  <div className="flex flex-col items-center justify-center h-12 w-12 rounded-xl border border-slate2-200 bg-slate2-50 shrink-0 text-center">
+                    <span className="font-mono text-xs font-bold text-slate2-700">
+                      #{String(idx + 1).padStart(2, "0")}
+                    </span>
+                    <span className="text-[10px] font-semibold text-brand font-mono">
+                      {a.durationMin}m
+                    </span>
+                  </div>
 
-                    {/* Display saved description */}
+                  {/* Topic Details */}
+                  <div className="space-y-1.5 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-xs sm:text-sm font-bold text-slate2-900">
+                        {a.title}
+                      </h4>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${a.status === "DISCUSSED"
+                          ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                          : a.status === "DEFERRED"
+                            ? "bg-amber-50 text-amber-800 border border-amber-200"
+                            : "bg-slate2-100 text-slate2-600"
+                          }`}
+                      >
+                        {a.status.replace("_", " ")}
+                      </span>
+                    </div>
+
                     {a.description && (
-                      <p className="text-xs leading-relaxed text-slate2-600 whitespace-pre-wrap">
+                      <p className="text-xs text-slate2-600 leading-relaxed rounded-lg bg-slate2-50/60 border border-slate2-200/60 p-2.5 whitespace-pre-wrap">
                         {a.description}
                       </p>
                     )}
 
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate2-500 pt-0.5">
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate2-500 pt-0.5">
                       {a.presenter ? (
-                        <span className="inline-flex items-center gap-1 rounded bg-slate2-100 px-2 py-0.5 font-medium text-slate2-700">
-                          Presenter: {a.presenter}
+                        <span className="inline-flex items-center gap-1 rounded bg-slate2-100 px-2 py-0.5 text-[11px] font-medium text-slate2-700">
+                          Presenter: <strong className="font-semibold text-slate2-800">{a.presenter}</strong>
                         </span>
                       ) : (
-                        <span className="text-slate2-400 italic">No presenter assigned</span>
+                        <span className="text-[11px] text-slate2-400 italic">No presenter assigned</span>
                       )}
-                      <span>·</span>
-                      <span className="text-slate2-500">{a.durationMin} min</span>
+                      <span className="text-slate2-300">·</span>
+                      <span className="text-[11px] font-mono text-slate2-500">{a.durationMin} minutes</span>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 self-end sm:self-center">
-                  <span className="rounded-full bg-slate2-100 px-2.5 py-0.5 text-[11px] font-medium text-slate2-600 uppercase">
-                    {a.status.replace("_", " ")}
-                  </span>
-                  {canManage && (
-                    <div className="flex items-center gap-1 ml-2">
-                      <button
-                        type="button"
-                        onClick={() => startEdit(a)}
-                        className="rounded-md p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
-                        title="Edit agenda topic"
-                      >
-                        <Pencil size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => deleteItem(a.id)}
-                        className="rounded-md p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors"
-                        title="Delete agenda topic"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  )}
-                </div>
+                {canManage && (
+                  <div className="flex items-center gap-1 self-end sm:self-start shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => startEdit(a)}
+                      className="rounded-lg p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
+                      title="Edit topic"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteItem(a.id)}
+                      className="rounded-lg p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors"
+                      title="Delete topic"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })
         )}
       </div>
 
+      {/* Add Topic Form */}
       {canManage && (
         <form
           onSubmit={addItem}
-          className="border-t border-slate2-100 bg-slate2-50/40 p-5 space-y-3"
+          className="border-t border-slate2-200/80 bg-slate2-50/40 p-5 sm:p-6 space-y-4"
         >
-          <p className="text-xs font-semibold text-slate2-700">Add Agenda Topic</p>
+          <div className="flex items-center gap-2">
+            <Plus size={16} className="text-brand" />
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate2-700">
+              Schedule New Agenda Topic
+            </h3>
+          </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-12">
             <div className="sm:col-span-6">
               <label className="mb-1 block text-xs font-medium text-slate2-600">
-                Agenda item title <span className="text-danger">*</span>
+                Topic Title <span className="text-danger">*</span>
               </label>
               <input
                 type="text"
                 required
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Q3 Fleet Maintenance & Fuel Optimization"
+                placeholder="e.g. Q3 Logistics Fleet Fuel Optimization"
                 className={inputClass}
               />
             </div>
@@ -1831,23 +2192,22 @@ function AgendaTab({
             </div>
           </div>
 
-          {/* WIDER INPUT: Agenda Item Description full width on desktop and mobile */}
           <div className="w-full">
             <label className="mb-1 block text-xs font-medium text-slate2-600">
-              Agenda Item Description
+              Topic Details & Objectives (Optional)
             </label>
             <textarea
-              rows={3}
+              rows={2}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Enter full agenda item description, discussion objectives, or topics to cover..."
-              className={`${inputClass} min-h-[76px] w-full resize-y text-slate2-800 bg-white leading-relaxed placeholder:text-slate2-400`}
+              placeholder="Outline specific objectives, items for deliberation, or background notes..."
+              className={`${inputClass} min-h-[64px] w-full resize-y text-slate2-800 bg-white leading-relaxed placeholder:text-slate2-400`}
             />
           </div>
 
           <div className="flex justify-end pt-1">
-            <Button type="submit" disabled={submitting || !title.trim()}>
-              <Plus size={14} /> Add Agenda Item
+            <Button type="submit" disabled={submitting || !title.trim()} className="text-xs">
+              <Plus size={14} /> Add Agenda Topic
             </Button>
           </div>
         </form>
@@ -1855,6 +2215,7 @@ function AgendaTab({
     </Card>
   );
 }
+
 
 
 function MinutesTab({
@@ -1913,13 +2274,7 @@ function MinutesTab({
   const isCancelled = meeting.status === "CANCELLED";
   const isPendingSignatures = meeting.status === "PENDING_SIGNATURES";
   const isReadyForApproval = meeting.status === "READY_FOR_APPROVAL";
-  const isReadOnly =
-    isCompleted ||
-    isCancelled ||
-    isApproved ||
-    isPendingSignatures ||
-    isReadyForApproval ||
-    !canManage;
+  const isReadOnly = isLockedMeeting(meeting.status) || !canManage;
 
   const [isEditing, setIsEditing] = useState(false);
   const [summaryContent, setSummaryContent] = useState("");
@@ -2185,12 +2540,20 @@ function MinutesTab({
         </div>
       )}
 
-      {(meeting.status === "IN_PROGRESS" || meeting.status === "SCHEDULED" || meeting.status === "COMPLETED") && canManage && summaryMinute?.content && (
+      {canManage && (meeting.status === "IN_PROGRESS" || meeting.status === "SCHEDULED" || meeting.status === "COMPLETED" || meeting.status === "PENDING_SIGNATURES") && (
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-brand/20 bg-brand/5 px-4 py-3 text-xs">
           <div className="flex items-center gap-2.5 text-brand-dark">
             <Signature size={18} className="text-brand shrink-0" />
             <span>
-              <strong>Minutes Drafting:</strong> Meeting summary recorded. When finalized, request digital signatures from all participants.
+              {meeting.status === "PENDING_SIGNATURES" ? (
+                <>
+                  <strong>Signature Collection in Progress:</strong> {signedCount} of {totalSignersCount} signatures collected. You can resend in-app signature requests to notify unsigned signers.
+                </>
+              ) : (
+                <>
+                  <strong>Minutes Drafting:</strong> Meeting summary recorded. When finalized, request digital signatures from all participants.
+                </>
+              )}
             </span>
           </div>
           <Button
@@ -2198,9 +2561,9 @@ function MinutesTab({
             type="button"
             onClick={onRequestSignaturesClick}
             disabled={requestingSignatures}
-            className="border-brand/30 text-brand hover:bg-brand/10 text-xs py-1.5 px-3 shrink-0 inline-flex items-center gap-1.5 font-medium bg-white disabled:opacity-60 disabled:cursor-not-allowed"
+            className="border-brand/30 text-brand hover:bg-brand/10 text-xs py-1.5 px-3 shrink-0 inline-flex items-center gap-1.5 font-medium bg-white disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
           >
-            <Signature size={13} /> {requestingSignatures ? "Requesting Signatures..." : "Request Participant Signatures"}
+            <Signature size={13} /> {requestingSignatures ? "Sending Notifications..." : meeting.status === "PENDING_SIGNATURES" ? "Resend Signature Requests" : "Request Participant Signatures"}
           </Button>
         </div>
       )}
@@ -2445,147 +2808,158 @@ function MinutesTab({
         meeting.status === "READY_FOR_APPROVAL" ||
         meeting.status === "APPROVED" ||
         (meeting.participantSignatures && meeting.participantSignatures.length > 0)) && (
-        <Card className="overflow-hidden border border-slate2-200/80 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
-            <div>
+          <Card className="overflow-hidden border border-slate2-200/80 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/10 text-brand font-semibold text-xs">
+                    <UserCheck size={15} />
+                  </span>
+                  <h3 className="text-base font-semibold text-slate2-900">
+                    Attendee & Organizer Pre-Signatures
+                  </h3>
+                </div>
+                <p className="mt-0.5 text-xs text-slate2-500">
+                  Digital verification submitted by confirmed attendees and organizers before formal approval ({signedCount} of {totalSignersCount} signed)
+                </p>
+              </div>
+
               <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/10 text-brand font-semibold text-xs">
-                  <UserCheck size={15} />
-                </span>
-                <h3 className="text-base font-semibold text-slate2-900">
-                  Attendee & Organizer Pre-Signatures
-                </h3>
-              </div>
-              <p className="mt-0.5 text-xs text-slate2-500">
-                Digital verification submitted by confirmed attendees and organizers before formal approval ({signedCount} of {totalSignersCount} signed)
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {isEligibleSigner && !hasUserSigned && meeting.status === "PENDING_SIGNATURES" && (
-                <Button
-                  variant="primary"
-                  type="button"
-                  onClick={() => onParticipantSignClick?.()}
-                  className="bg-brand hover:bg-brand-light text-white text-xs py-1.5 px-3.5 inline-flex items-center gap-1.5 font-semibold shadow-xs"
-                >
-                  <Signature size={13} /> Sign Minutes
-                </Button>
-              )}
-            </div>
-          </div>
-
-          <div className="p-5 space-y-4">
-            {/* Progress bar */}
-            <div className="space-y-1.5">
-              <div className="flex justify-between text-xs text-slate2-600">
-                <span className="font-medium">Signature Collection Progress</span>
-                <span className={`font-semibold ${signedCount >= totalSignersCount && totalSignersCount > 0 ? "text-emerald-600" : "text-amber-600"}`}>
-                  {signedCount} / {totalSignersCount} Signed ({totalSignersCount > 0 ? Math.round((signedCount / totalSignersCount) * 100) : 0}%)
-                </span>
-              </div>
-              <div className="h-2 w-full rounded-full bg-slate2-100 overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-500"
-                  style={{
-                    width: `${totalSignersCount > 0 ? (signedCount / totalSignersCount) * 100 : 0}%`,
-                    background: signedCount >= totalSignersCount && totalSignersCount > 0 ? "#10b981" : "#0B7A6B",
-                  }}
-                />
+                {canManage && signedCount < totalSignersCount && meeting.status === "PENDING_SIGNATURES" && (
+                  <Button
+                    variant="secondary"
+                    type="button"
+                    onClick={onRequestSignaturesClick}
+                    disabled={requestingSignatures}
+                    className="border-slate2-200 bg-white hover:bg-slate2-50 text-slate2-700 text-xs py-1.5 px-3 inline-flex items-center gap-1.5 font-medium shadow-2xs cursor-pointer disabled:opacity-60"
+                  >
+                    <Bell size={13} className="text-amber-600" />
+                    <span>{requestingSignatures ? "Sending..." : "Resend Request"}</span>
+                  </Button>
+                )}
+                {isEligibleSigner && !hasUserSigned && meeting.status === "PENDING_SIGNATURES" && (
+                  <Button
+                    variant="primary"
+                    type="button"
+                    onClick={() => onParticipantSignClick?.()}
+                    className="bg-brand hover:bg-brand-light text-white text-xs py-1.5 px-3.5 inline-flex items-center gap-1.5 font-semibold shadow-xs"
+                  >
+                    <Signature size={13} /> Sign Minutes
+                  </Button>
+                )}
               </div>
             </div>
 
-            {/* Attendee & organizer signature cards grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {requiredSigners.map((signer) => {
-                const sig = meeting.participantSignatures?.find((s) => s.userId === signer.userId);
-                const isMe = signer.userId === user?.id;
-                return (
+            <div className="p-5 space-y-4">
+              {/* Progress bar */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs text-slate2-600">
+                  <span className="font-medium">Signature Collection Progress</span>
+                  <span className={`font-semibold ${signedCount >= totalSignersCount && totalSignersCount > 0 ? "text-emerald-600" : "text-amber-600"}`}>
+                    {signedCount} / {totalSignersCount} Signed ({totalSignersCount > 0 ? Math.round((signedCount / totalSignersCount) * 100) : 0}%)
+                  </span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-slate2-100 overflow-hidden">
                   <div
-                    key={signer.userId}
-                    className={`rounded-xl border p-3.5 transition-all flex flex-col justify-between ${
-                      sig
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${totalSignersCount > 0 ? (signedCount / totalSignersCount) * 100 : 0}%`,
+                      background: signedCount >= totalSignersCount && totalSignersCount > 0 ? "#10b981" : "#0B7A6B",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Attendee & organizer signature cards grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {requiredSigners.map((signer) => {
+                  const sig = meeting.participantSignatures?.find((s) => s.userId === signer.userId);
+                  const isMe = signer.userId === user?.id;
+                  return (
+                    <div
+                      key={signer.userId}
+                      className={`rounded-xl border p-3.5 transition-all flex flex-col justify-between ${sig
                         ? "border-emerald-200/90 bg-emerald-50/20"
                         : "border-slate2-200 bg-white"
-                    }`}
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span
-                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-2xs"
-                            style={{ background: (signer.user as any).avatarColor || "#0B7A6B" }}
-                          >
-                            {signer.user.name.charAt(0).toUpperCase()}
-                          </span>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <p className="text-xs font-semibold text-slate2-900 truncate">
-                                {signer.user.name}
+                        }`}
+                    >
+                      <div>
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-2xs"
+                              style={{ background: (signer.user as any).avatarColor || "#0B7A6B" }}
+                            >
+                              {signer.user.name.charAt(0).toUpperCase()}
+                            </span>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <p className="text-xs font-semibold text-slate2-900 truncate">
+                                  {signer.user.name}
+                                </p>
+                                {isMe && (
+                                  <span className="rounded bg-brand/10 text-brand px-1 py-0.2 text-[9px] font-bold">
+                                    You
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate2-500 truncate">
+                                {signer.roleLabel} · {signer.user.email}
                               </p>
-                              {isMe && (
-                                <span className="rounded bg-brand/10 text-brand px-1 py-0.2 text-[9px] font-bold">
-                                  You
-                                </span>
-                              )}
                             </div>
-                            <p className="text-[10px] text-slate2-500 truncate">
-                              {signer.roleLabel} · {signer.user.email}
-                            </p>
                           </div>
+
+                          {sig ? (
+                            <span
+                              className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-600 shadow-2xs shrink-0"
+                              title={`Signed on ${new Date(sig.signedAt).toLocaleDateString()}`}
+                            >
+                              <Signature size={14} />
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-amber-50 border border-amber-200 text-amber-600 shadow-2xs shrink-0"
+                              title="Signature pending"
+                            >
+                              <Signature size={14} className="opacity-70" />
+                            </span>
+                          )}
                         </div>
 
                         {sig ? (
-                          <span
-                            className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-600 shadow-2xs shrink-0"
-                            title={`Signed on ${new Date(sig.signedAt).toLocaleDateString()}`}
-                          >
-                            <Signature size={14} />
-                          </span>
+                          <div className="mt-2 rounded-lg border border-emerald-100 bg-white p-2 text-center">
+                            <img
+                              src={sig.signatureDataUrl}
+                              alt={`${signer.user.name}'s signature`}
+                              className="h-10 max-w-[140px] mx-auto object-contain"
+                            />
+                            <div className="mt-1 pt-1 border-t border-slate2-100 flex items-center justify-between text-[9px] text-slate2-400">
+                              <span>Attested</span>
+                              <span>{new Date(sig.signedAt).toLocaleDateString()}</span>
+                            </div>
+                          </div>
                         ) : (
-                          <span
-                            className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-amber-50 border border-amber-200 text-amber-600 shadow-2xs shrink-0"
-                            title="Signature pending"
-                          >
-                            <Signature size={14} className="opacity-70" />
-                          </span>
+                          <div className="mt-2 rounded-lg border border-dashed border-slate2-200 bg-slate2-50/50 p-3 text-center">
+                            <p className="text-[11px] text-slate2-400 italic">Signature pending</p>
+                            {meeting.status === "PENDING_SIGNATURES" && isMe && (
+                              <button
+                                type="button"
+                                onClick={() => onParticipantSignClick?.()}
+                                className="mt-1.5 text-[11px] text-brand hover:underline font-semibold inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Signature size={11} /> Sign Now →
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
-
-                      {sig ? (
-                        <div className="mt-2 rounded-lg border border-emerald-100 bg-white p-2 text-center">
-                          <img
-                            src={sig.signatureDataUrl}
-                            alt={`${signer.user.name}'s signature`}
-                            className="h-10 max-w-[140px] mx-auto object-contain"
-                          />
-                          <div className="mt-1 pt-1 border-t border-slate2-100 flex items-center justify-between text-[9px] text-slate2-400">
-                            <span>Attested</span>
-                            <span>{new Date(sig.signedAt).toLocaleDateString()}</span>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="mt-2 rounded-lg border border-dashed border-slate2-200 bg-slate2-50/50 p-3 text-center">
-                          <p className="text-[11px] text-slate2-400 italic">Signature pending</p>
-                          {meeting.status === "PENDING_SIGNATURES" && isMe && (
-                            <button
-                              type="button"
-                              onClick={() => onParticipantSignClick?.()}
-                              className="mt-1.5 text-[11px] text-brand hover:underline font-semibold inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <Signature size={11} /> Sign Now →
-                            </button>
-                          )}
-                        </div>
-                      )}
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        </Card>
-      )}
+          </Card>
+        )}
     </div>
   );
 }
@@ -2713,40 +3087,63 @@ function DecisionsTab({
     }
   };
 
+  const implementedCount = useMemo(() => {
+    return (meeting.decisions || []).filter((d) => d.status === "IMPLEMENTED").length;
+  }, [meeting.decisions]);
+
   return (
-    <Card>
-      <CardHeader
-        title="Decisions"
-        subtitle="Formal outcomes reached in this meeting"
-      />
-      {meeting.status === "APPROVED" && (
-        <div className="mx-5 mb-3 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
+    <Card className="overflow-hidden border border-slate2-200/90 shadow-sm bg-white">
+      {/* Decisions Registry Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
+        <div>
+          <h2 className="text-sm sm:text-base font-bold text-slate2-900">
+            Decisions
+          </h2>
+          <p className="mt-0.5 text-xs text-slate2-500">
+            {(meeting.decisions || []).length} official outcomes logged · {implementedCount} implemented
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-slate2-200 px-2.5 py-1 text-xs font-semibold text-slate2-700 shadow-2xs">
+            <Gavel size={13} className="text-brand" />
+            <span>{(meeting.decisions || []).length} Decisions</span>
+          </span>
+        </div>
+      </div>
+
+      {isLockedMeeting(meeting.status) && (
+        <div className="mx-5 my-4 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
           <div className="flex items-start gap-2.5">
-            <Lock size={18} className="text-slate2-500 mt-0.5 shrink-0" />
+            <Lock size={16} className="text-slate2-500 mt-0.5 shrink-0" />
             <div>
               <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
                 Decisions Officially Certified & Locked (Read-Only)
               </h4>
               <p className="mt-0.5 text-xs text-slate2-600 leading-relaxed">
-                This meeting has been officially approved and certified. In accordance with compliance and governance rules, all decisions are permanently locked in Read-Only mode. An authorized administrator with ADMIN_OVERRIDE permission must unlock the meeting before decisions can be modified.
+                This meeting is locked. In accordance with compliance and governance rules, all decisions are permanently preserved in Read-Only archive mode.
               </p>
             </div>
           </div>
         </div>
       )}
+
+      {/* Decisions List */}
       <div className="divide-y divide-slate2-100">
-        {meeting.decisions.length === 0 ? (
-          <EmptyState
-            title="No decisions logged yet"
-            description="Record decisions here so they can be tracked to completion."
-          />
+        {(meeting.decisions || []).length === 0 ? (
+          <div className="p-8">
+            <EmptyState
+              title="No formal decisions logged yet"
+              description="Record official decisions and outcomes reached during this meeting session."
+            />
+          </div>
         ) : (
-          meeting.decisions.map((d) => {
+          (meeting.decisions || []).map((d) => {
             const isEditing = editingId === d.id;
 
             if (isEditing) {
               return (
-                <div key={d.id} className="bg-slate2-50/70 p-5 space-y-4">
+                <div key={d.id} className="bg-slate2-50/90 p-5 space-y-4 border-l-4 border-l-brand">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-bold uppercase tracking-wider text-brand">
@@ -2765,8 +3162,8 @@ function DecisionsTab({
                   </div>
 
                   {error && (
-                    <div className="rounded-lg bg-red-50 p-2 text-xs text-danger flex items-center gap-1.5">
-                      <AlertCircle size={14} />
+                    <div className="rounded-lg bg-red-50 p-2.5 text-xs text-danger flex items-center gap-1.5">
+                      <AlertCircle size={14} className="shrink-0" />
                       <span>{error}</span>
                     </div>
                   )}
@@ -2774,7 +3171,7 @@ function DecisionsTab({
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
                     <div className="sm:col-span-8">
                       <label className="mb-1 block text-xs font-medium text-slate2-600">
-                        Decision title <span className="text-danger">*</span>
+                        Decision Title <span className="text-danger">*</span>
                       </label>
                       <input
                         type="text"
@@ -2804,13 +3201,13 @@ function DecisionsTab({
 
                   <div>
                     <label className="mb-1 block text-xs font-medium text-slate2-600">
-                      Details / Background (Optional)
+                      Rationale & Deliberation Notes (Optional)
                     </label>
                     <textarea
                       rows={3}
                       value={editDescription}
                       onChange={(e) => setEditDescription(e.target.value)}
-                      placeholder="Enter decision details, rationale, or context..."
+                      placeholder="Enter decision details, agreed parameters, or governance justification..."
                       className={`${inputClass} min-h-[76px] w-full resize-y text-slate2-800 bg-white leading-relaxed`}
                     />
                   </div>
@@ -2821,15 +3218,17 @@ function DecisionsTab({
                       variant="secondary"
                       onClick={cancelEdit}
                       disabled={updating}
+                      className="text-xs"
                     >
-                      <X size={14} /> Cancel
+                      <X size={13} /> Cancel
                     </Button>
                     <Button
                       type="button"
                       onClick={() => saveEdit(d.id)}
                       disabled={updating || !editTitle.trim()}
+                      className="text-xs"
                     >
-                      <Check size={14} /> {updating ? "Saving..." : "Save changes"}
+                      <Check size={13} /> {updating ? "Saving..." : "Save changes"}
                     </Button>
                   </div>
                 </div>
@@ -2839,44 +3238,36 @@ function DecisionsTab({
             return (
               <div
                 key={d.id}
-                className="flex flex-col gap-2 px-5 py-3.5 sm:flex-row sm:items-start sm:justify-between"
+                className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 p-4 sm:p-5 hover:bg-slate2-50/40 transition-colors"
               >
-                <div className="space-y-1">
+                <div className="space-y-1.5 min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-sm font-semibold text-slate2-800">
-                      {d.title}
-                    </p>
                     <CodeChip>{d.code}</CodeChip>
+                    <h4 className="text-xs sm:text-sm font-bold text-slate2-900">
+                      {d.title}
+                    </h4>
                   </div>
                   {d.description && (
-                    <p className="text-xs leading-relaxed text-slate2-600 whitespace-pre-wrap">
+                    <p className="text-xs leading-relaxed text-slate2-600 whitespace-pre-wrap rounded-lg bg-slate2-50/60 border border-slate2-200/60 p-2.5">
                       {d.description}
+                    </p>
+                  )}
+                  {d.decisionDate && (
+                    <p className="text-[11px] text-slate2-400 pt-0.5 font-mono">
+                      Recorded on {new Date(d.decisionDate).toLocaleDateString()}
                     </p>
                   )}
                 </div>
 
-                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                  {canManage ? (
-                    <select
-                      value={d.status}
-                      onChange={(e) => quickUpdateStatus(d.id, e.target.value as DecisionStatus)}
-                      className="rounded-lg border border-slate2-200 bg-white px-2 py-1 text-xs font-semibold text-slate2-700 shadow-2xs focus-ring cursor-pointer hover:border-slate2-300"
-                      title="Update decision status"
-                    >
-                      <option value="OPEN">OPEN</option>
-                      <option value="IMPLEMENTED">IMPLEMENTED</option>
-                      <option value="REVERSED">REVERSED</option>
-                    </select>
-                  ) : (
-                    <StatusBadge status={d.status} />
-                  )}
+                <div className="flex items-center gap-2 self-end sm:self-start shrink-0">
+                  <StatusBadge status={d.status} />
 
                   {canManage && (
                     <div className="flex items-center gap-1 ml-1">
                       <button
                         type="button"
                         onClick={() => startEdit(d)}
-                        className="rounded-md p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
+                        className="rounded-lg p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
                         title="Edit decision"
                       >
                         <Pencil size={14} />
@@ -2885,7 +3276,7 @@ function DecisionsTab({
                         type="button"
                         onClick={() => deleteDecision(d.id, d.code)}
                         disabled={deletingId === d.id}
-                        className="rounded-md p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors disabled:opacity-50"
+                        className="rounded-lg p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors disabled:opacity-50"
                         title="Delete decision"
                       >
                         {deletingId === d.id ? (
@@ -2902,27 +3293,51 @@ function DecisionsTab({
           })
         )}
       </div>
+
+      {/* Log Decision Form */}
       {canManage && (
         <form
           onSubmit={submit}
-          className="space-y-2 border-t border-slate2-100 p-4"
+          className="border-t border-slate2-200/80 bg-slate2-50/40 p-5 sm:p-6 space-y-3"
         >
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Decision title"
-            className={inputClass}
-          />
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={2}
-            placeholder="Details (optional)"
-            className={inputClass}
-          />
-          <div className="flex justify-end">
-            <Button type="submit" disabled={submitting}>
-              <Gavel size={14} /> Log decision
+          <div className="flex items-center gap-2">
+            <Gavel size={16} className="text-brand" />
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate2-700">
+              Record Decision
+            </h3>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate2-600">
+                Decision Title <span className="text-danger">*</span>
+              </label>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. Approve 15% budget reallocation to regional depot expansion"
+                className={inputClass}
+                required
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate2-600">
+                Decision Details / Parameters (Optional)
+              </label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+                placeholder="Specify voting consensus, agreed conditions, or implementation parameters..."
+                className={`${inputClass} min-h-[64px] resize-y`}
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-1">
+            <Button type="submit" disabled={submitting || !title.trim()} className="text-xs">
+              <Gavel size={14} /> Log Decision
             </Button>
           </div>
         </form>
@@ -2930,6 +3345,7 @@ function DecisionsTab({
     </Card>
   );
 }
+
 
 function ActionsTab({
   meeting,
@@ -2993,17 +3409,16 @@ function ActionsTab({
 
   const isMeetingCancelled = meeting.status === "CANCELLED";
   const isLocked = isLockedMeeting(meeting.status);
-  // Any locked or cancelled meeting locks action item creation, editing task details, and deletion unless ADMIN_OVERRIDE
-  const isActionItemsLocked = (isLocked && !hasPermission("ADMIN_OVERRIDE")) || isMeetingCancelled;
+  // Meeting lock freezes creation and structural changes, but action item status updates remain independent and allowed post-meeting
+  const isActionItemsLocked = isLocked;
 
-  // Check if current user can update status / edit for a specific action item
-  const canUpdateItem = (item: (typeof meeting.actionItems)[number]) => {
-    if (isMeetingCancelled) return false;
-    if (hasPermission("ADMIN_OVERRIDE")) return true;
+  // Action items are post-meeting deliverables: assignees & permitted users can update status even when meeting is locked
+  const canUpdateItemStatus = (item: (typeof meeting.actionItems)[number]) => {
     const assignees = getActionItemAssignees(item);
     if (user && assignees.some((u) => u.id === user.id)) return true;
     if (user && item.assignedTo && user.id === item.assignedTo.id) return true;
     if (user && user.id === meeting.organizer?.id) return true;
+    if (hasPermission("ADMIN_OVERRIDE")) return true;
     if (hasPermission("action_items:edit:all") || hasPermission("meetings:edit:all")) return true;
     if (
       (hasPermission("action_items:edit:dept") || hasPermission("meetings:edit:dept")) &&
@@ -3014,11 +3429,17 @@ function ActionsTab({
     return false;
   };
 
+  // Structural edits (title, deadline, assignees) are not allowed when meeting is completed or locked.
+  // Action item details are not editable; ONLY their status can be updated.
+  const canEditItemDetails = (_item: (typeof meeting.actionItems)[number]) => {
+    if (isActionItemsLocked || meeting.status === "COMPLETED") return false;
+    return canUpdateItemStatus(_item);
+  };
+
   const canDeleteItem = (item: (typeof meeting.actionItems)[number]) => {
-    if (isActionItemsLocked) return false;
-    if (isMeetingCancelled) return false;
-    if (hasPermission("ADMIN_OVERRIDE")) return true;
+    if (isActionItemsLocked || meeting.status === "COMPLETED") return false;
     if (user && user.id === meeting.organizer?.id) return true;
+    if (hasPermission("ADMIN_OVERRIDE")) return true;
     if (hasPermission("action_items:delete:all") || hasPermission("meetings:edit:all")) return true;
     if (
       (hasPermission("action_items:delete:dept") || hasPermission("meetings:edit:dept")) &&
@@ -3032,7 +3453,7 @@ function ActionsTab({
   // Grouped assignee stats for the filter bar
   const assigneeStats = useMemo(() => {
     const map = new Map<string, { user: { id: string; name: string; avatarColor?: string }; count: number }>();
-    meeting.actionItems.forEach((item) => {
+    (meeting.actionItems || []).forEach((item) => {
       const assignees = getActionItemAssignees(item);
       assignees.forEach((u) => {
         if (!map.has(u.id)) {
@@ -3046,7 +3467,7 @@ function ActionsTab({
 
   const myTasksCount = useMemo(() => {
     if (!user) return 0;
-    return meeting.actionItems.filter((i) => {
+    return (meeting.actionItems || []).filter((i) => {
       const assignees = getActionItemAssignees(i);
       return assignees.some((u) => u.id === user.id);
     }).length;
@@ -3054,14 +3475,15 @@ function ActionsTab({
 
   // Filtered action items based on active assignee tab
   const displayedActionItems = useMemo(() => {
-    if (assigneeFilter === "ALL") return meeting.actionItems;
+    const items = meeting.actionItems || [];
+    if (assigneeFilter === "ALL") return items;
     if (assigneeFilter === "MINE") {
-      if (!user) return meeting.actionItems;
-      return meeting.actionItems.filter((i) =>
+      if (!user) return items;
+      return items.filter((i) =>
         getActionItemAssignees(i).some((u) => u.id === user.id)
       );
     }
-    return meeting.actionItems.filter((i) =>
+    return items.filter((i) =>
       getActionItemAssignees(i).some((u) => u.id === assigneeFilter)
     );
   }, [meeting.actionItems, assigneeFilter, user]);
@@ -3238,43 +3660,56 @@ function ActionsTab({
 
   const selectedUsers = users.filter((u) => assignedUserIds.includes(u.id));
 
+  // Executive summary metrics
+  const totalTasks = (meeting.actionItems || []).length;
+  const completedTasks = (meeting.actionItems || []).filter((i) => i.status === "COMPLETED").length;
+  const inProgressTasks = (meeting.actionItems || []).filter((i) => i.status === "IN_PROGRESS").length;
+  const overdueTasks = (meeting.actionItems || []).filter(
+    (i) => i.overdue || (i.status !== "COMPLETED" && i.deadline && i.deadline.split("T")[0] < todayDateStr)
+  ).length;
+  const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+
   return (
-    <Card>
+    <Card className="border border-slate2-200/90 bg-white rounded-2xl shadow-xs overflow-hidden">
       <CardHeader
         title={
-          <span className="flex items-center gap-2">
-            Action Items
+          <span className="flex items-center gap-2.5">
+            <span className="font-bold text-slate2-900">Action Items & Deliverables</span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 text-brand border border-teal-200/80 px-2.5 py-0.5 text-xs font-semibold">
+              <ListChecks size={11} />
+              {totalTasks} {totalTasks === 1 ? "Task" : "Tasks"}
+            </span>
             {isActionItemsLocked && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-500 border border-slate2-200 px-2.5 py-0.5 text-xs font-semibold">
-                <Lock size={11} />
-                View Only
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-600 border border-slate2-200 px-2 py-0.5 text-[11px] font-medium"
+                title="Meeting is finalized; action item statuses remain active for follow-through execution"
+              >
+                Post-Meeting Execution
               </span>
             )}
           </span>
         }
-        subtitle="Manage single or multiple task assignments across team members"
+        subtitle="Track commitments, assign accountability, and ensure follow-through on meeting decisions"
         action={
           canCreate && !isActionItemsLocked && (
-            <div className="flex items-center gap-1.5 bg-slate2-100 p-0.5 rounded-lg text-xs">
+            <div className="flex items-center gap-1 bg-slate2-100 p-1 rounded-xl text-xs border border-slate2-200/70">
               <button
                 type="button"
                 onClick={() => setCreationMode("SINGLE")}
-                className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                  creationMode === "SINGLE"
-                    ? "bg-white text-brand shadow-2xs"
-                    : "text-slate2-600 hover:text-slate2-900"
-                }`}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${creationMode === "SINGLE"
+                  ? "bg-white text-brand shadow-2xs"
+                  : "text-slate2-600 hover:text-slate2-900"
+                  }`}
               >
                 Standard Task
               </button>
               <button
                 type="button"
                 onClick={() => setCreationMode("BATCH")}
-                className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                  creationMode === "BATCH"
-                    ? "bg-white text-brand shadow-2xs"
-                    : "text-slate2-600 hover:text-slate2-900"
-                }`}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${creationMode === "BATCH"
+                  ? "bg-white text-brand shadow-2xs"
+                  : "text-slate2-600 hover:text-slate2-900"
+                  }`}
               >
                 Batch Multiple Tasks
               </button>
@@ -3283,33 +3718,70 @@ function ActionsTab({
         }
       />
 
-      {/* Assignee Filter Tabs Bar (Instant visibility for multiple actions per user) */}
-      {meeting.actionItems.length > 0 && (
-        <div className="flex items-center gap-1.5 px-5 py-2.5 bg-slate2-50/70 border-b border-slate2-100 overflow-x-auto text-xs">
-          <span className="font-semibold text-slate2-500 text-[11px] uppercase tracking-wider mr-1 shrink-0">
+      {/* Operational Task Metrics Pulse Bar */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-slate2-100 border-y border-slate2-200/80">
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Total Commitments</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono text-slate2-900">{totalTasks}</span>
+            <span className="text-xs text-slate2-500">logged</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Completed</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono text-emerald-700">{completedTasks}</span>
+            <span className="text-xs font-semibold text-emerald-600">({completionRate}%)</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">In Progress</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono text-brand">{inProgressTasks}</span>
+            <span className="text-xs text-slate2-500">active</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Overdue</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className={`text-xl font-bold font-mono ${overdueTasks > 0 ? "text-rose-600" : "text-slate2-700"}`}>
+              {overdueTasks}
+            </span>
+            <span className={`text-xs ${overdueTasks > 0 ? "text-rose-600 font-semibold" : "text-slate2-400"}`}>
+              {overdueTasks > 0 ? "needs attention" : "on track"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Assignee Filter Tabs Bar */}
+      {(meeting.actionItems || []).length > 0 && (
+        <div className="flex items-center gap-1.5 px-5 py-3 bg-slate2-50/70 border-b border-slate2-100 overflow-x-auto text-xs">
+          <span className="font-semibold text-slate2-500 text-[11px] uppercase tracking-wider mr-1.5 shrink-0">
             Filter:
           </span>
           <button
             type="button"
             onClick={() => setAssigneeFilter("ALL")}
-            className={`px-2.5 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
-              assigneeFilter === "ALL"
-                ? "bg-[#005f56] text-white shadow-2xs"
-                : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
-            }`}
+            className={`px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${assigneeFilter === "ALL"
+              ? "bg-[#0B7A6B] text-white shadow-2xs font-semibold"
+              : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+              }`}
           >
-            All Tasks ({meeting.actionItems.length})
+            All Tasks ({(meeting.actionItems || []).length})
           </button>
 
           {user && myTasksCount > 0 && (
             <button
               type="button"
               onClick={() => setAssigneeFilter("MINE")}
-              className={`px-2.5 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
-                assigneeFilter === "MINE"
-                  ? "bg-[#005f56] text-white shadow-2xs"
-                  : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
-              }`}
+              className={`px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${assigneeFilter === "MINE"
+                ? "bg-[#0B7A6B] text-white shadow-2xs font-semibold"
+                : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+                }`}
             >
               My Tasks ({myTasksCount})
             </button>
@@ -3320,21 +3792,19 @@ function ActionsTab({
               key={u.id}
               type="button"
               onClick={() => setAssigneeFilter(u.id)}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
-                assigneeFilter === u.id
-                  ? "bg-[#005f56] text-white shadow-2xs"
-                  : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
-              }`}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${assigneeFilter === u.id
+                ? "bg-[#0B7A6B] text-white shadow-2xs font-semibold"
+                : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+                }`}
             >
               <span
                 className="h-2 w-2 rounded-full shrink-0"
-                style={{ backgroundColor: u.avatarColor || "#005f56" }}
+                style={{ backgroundColor: u.avatarColor || "#0B7A6B" }}
               />
               <span>{u.name.split(" ")[0]}</span>
               <span
-                className={`text-[10px] font-bold rounded-full px-1.5 py-0.2 ${
-                  assigneeFilter === u.id ? "bg-white/20 text-white" : "bg-slate2-100 text-slate2-600"
-                }`}
+                className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${assigneeFilter === u.id ? "bg-white/20 text-white" : "bg-slate2-100 text-slate2-600"
+                  }`}
               >
                 {count}
               </span>
@@ -3345,7 +3815,7 @@ function ActionsTab({
             <button
               type="button"
               onClick={() => setAssigneeFilter("ALL")}
-              className="text-[11px] font-semibold text-brand hover:underline shrink-0 ml-2"
+              className="text-xs font-semibold text-brand hover:underline shrink-0 ml-2 cursor-pointer"
             >
               Reset filter
             </button>
@@ -3357,26 +3827,48 @@ function ActionsTab({
       <div className="divide-y divide-slate2-100">
         {displayedActionItems.length === 0 ? (
           <EmptyState
-            title={assigneeFilter !== "ALL" ? "No matching action items" : "No action items yet"}
+            title={assigneeFilter !== "ALL" ? "No matching action items" : "No action items recorded yet"}
             description={
               assigneeFilter !== "ALL"
                 ? "No tasks assigned to the selected assignee filter."
-                : "Turn meeting decisions into tracked tasks with single or multi-user accountability."
+                : "Assign accountability and follow through on decisions made during the session."
             }
           />
         ) : (
           displayedActionItems.map((a) => {
             const assignees = getActionItemAssignees(a);
-            const userCanUpdate = canUpdateItem(a);
+            const userCanUpdateStatus = canUpdateItemStatus(a);
+            const userCanEditDetails = canEditItemDetails(a);
             const userCanDelete = canDeleteItem(a);
+            const isCompleted = a.status === "COMPLETED";
 
             return (
               <div
                 key={a.id}
-                className="flex flex-col gap-3 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between hover:bg-slate2-50/50 transition-colors"
+                className="flex flex-col gap-3.5 px-5 py-4 sm:flex-row sm:items-center sm:justify-between hover:bg-slate2-50/50 transition-colors"
               >
-                <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
-                  {/* Avatar stack */}
+                <div className="flex items-start sm:items-center gap-3.5 min-w-0 flex-1">
+                  {/* Quick toggle checkmark */}
+                  <button
+                    type="button"
+                    disabled={!userCanUpdateStatus}
+                    onClick={() => updateStatus(a.id, isCompleted ? "IN_PROGRESS" : "COMPLETED")}
+                    title={
+                      !userCanUpdateStatus
+                        ? "You do not have permission to update status"
+                        : isCompleted
+                          ? "Mark as In Progress"
+                          : "Mark as Completed"
+                    }
+                    className={`h-6 w-6 mt-0.5 sm:mt-0 rounded-full flex items-center justify-center border transition-all shrink-0 ${isCompleted
+                      ? "bg-emerald-600 border-emerald-600 text-white shadow-2xs"
+                      : "border-slate2-300 hover:border-brand text-transparent hover:text-slate2-300"
+                      } ${!userCanUpdateStatus ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+                  >
+                    <Check size={13} strokeWidth={3} className={isCompleted ? "opacity-100" : "opacity-0 hover:opacity-100"} />
+                  </button>
+
+                  {/* Assignee Avatar Stack */}
                   <div className="shrink-0 mt-0.5 sm:mt-0">
                     {assignees.length <= 1 ? (
                       <Avatar
@@ -3401,59 +3893,66 @@ function ActionsTab({
 
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-semibold text-slate2-800">
+                      <p className={`text-sm font-semibold ${isCompleted ? "text-slate2-800" : "text-slate2-900"}`}>
                         {a.title}
                       </p>
                       <CodeChip>{a.code}</CodeChip>
                       <PriorityBadge priority={a.priority} />
                       {a.decisionId && (
-                        <span className="rounded bg-teal-50 border border-teal-200 px-1.5 py-0.5 text-[10px] font-semibold text-teal-800">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 border border-teal-200/90 px-2 py-0.5 text-[10px] font-semibold text-brand">
+                          <Gavel size={10} />
                           Linked Decision
                         </span>
                       )}
                     </div>
+
                     {a.description && (
-                      <p className="text-xs text-slate2-500 mt-0.5 line-clamp-1">
+                      <p className="text-xs text-slate2-600 mt-1 line-clamp-2 leading-relaxed">
                         {a.description}
                       </p>
                     )}
-                    <p className="text-xs text-slate2-500 truncate max-w-xl mt-1">
-                      <span className="text-slate2-400">Assigned: </span>
-                      <strong className="text-slate2-700 font-semibold">
+
+                    <div className="flex items-center gap-2 flex-wrap text-xs text-slate2-500 mt-1.5">
+                      <span className="text-slate2-400">Assigned:</span>
+                      <strong className="text-slate2-800 font-semibold">
                         {assignees.length > 0
                           ? assignees.map((u) => u.name).join(", ")
                           : a.assignedTo?.name || "Unassigned"}
                       </strong>
                       {assignees.length > 1 && (
-                        <span className="ml-1.5 text-[10px] font-semibold text-[#005f56] bg-[#e6f4f1] border border-[#c2e7df] px-1.5 py-0.2 rounded-full">
+                        <span className="text-[10px] font-semibold text-brand bg-teal-50 border border-teal-200/80 px-1.5 py-0.2 rounded-full">
                           {assignees.length} assignees
                         </span>
                       )}
-                      {" "}· Due {new Date(a.deadline).toLocaleDateString()}
-                      {a.overdue && (
-                        <span className="ml-1.5 font-bold text-danger bg-red-50 border border-red-200 px-1.5 py-0.2 rounded text-[10px]">
+                      <span className="text-slate2-300">·</span>
+                      <span className="inline-flex items-center gap-1 font-mono text-slate2-600">
+                        <Clock size={11} className="text-slate2-400" />
+                        Due {new Date(a.deadline).toLocaleDateString()}
+                      </span>
+                      {a.overdue && !isCompleted && (
+                        <span className="font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full text-[10px]">
                           Overdue
                         </span>
                       )}
-                    </p>
+                    </div>
                   </div>
                 </div>
 
                 {/* Status & Actions Hub */}
-                <div className="flex items-center gap-2.5 sm:w-auto shrink-0 justify-between sm:justify-end">
+                <div className="flex items-center gap-3 sm:w-auto shrink-0 justify-between sm:justify-end pl-9 sm:pl-0">
                   <div className="w-24 sm:w-28 hidden md:block">
                     <div className="flex items-center justify-between text-[10px] text-slate2-500 mb-1">
                       <span>Progress</span>
-                      <span className="font-semibold">{a.progressPercent}%</span>
+                      <span className="font-mono font-semibold">{a.progressPercent}%</span>
                     </div>
                     <ProgressBar
                       percent={a.progressPercent}
                       tone={
-                        a.overdue
+                        a.overdue && !isCompleted
                           ? "danger"
-                          : a.status === "COMPLETED"
-                          ? "success"
-                          : "brand"
+                          : isCompleted
+                            ? "success"
+                            : "brand"
                       }
                     />
                   </div>
@@ -3461,17 +3960,16 @@ function ActionsTab({
                   <select
                     value={a.status}
                     onChange={(e) => updateStatus(a.id, e.target.value)}
-                    disabled={!userCanUpdate}
+                    disabled={!userCanUpdateStatus}
                     title={
-                      isMeetingCancelled
-                        ? "Meeting is cancelled. Action items are locked from editing."
-                        : !userCanUpdate
-                        ? "You do not have permission to update this action item status."
-                        : "Change status"
+                      !userCanUpdateStatus
+                        ? "You do not have permission to update status."
+                        : "Update task status"
                     }
-                    className={`${inputClass} w-auto text-xs py-1 px-2 ${
-                      !userCanUpdate ? "opacity-60 cursor-not-allowed bg-slate2-100" : "cursor-pointer"
-                    }`}
+                    className={`${inputClass} w-auto text-xs py-1.5 px-2.5 rounded-lg font-medium ${!userCanUpdateStatus
+                      ? "opacity-60 cursor-not-allowed bg-slate2-100"
+                      : "cursor-pointer"
+                      }`}
                   >
                     {["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"].map((s) => (
                       <option key={s} value={s}>
@@ -3480,15 +3978,15 @@ function ActionsTab({
                     ))}
                   </select>
 
-                  {/* Edit button — hidden when meeting is completed or no update permission */}
-                  {userCanUpdate && !isActionItemsLocked && (
+                  {/* Edit button */}
+                  {userCanEditDetails && (
                     <button
                       type="button"
                       onClick={() => setEditingItem(a)}
-                      className="p-1.5 text-slate2-500 hover:text-brand hover:bg-slate2-100 rounded-md transition-colors cursor-pointer"
+                      className="p-1.5 text-slate2-500 hover:text-brand hover:bg-slate2-100 rounded-lg transition-colors cursor-pointer"
                       title="Edit action item, assignees & progress"
                     >
-                      <Pencil size={14} />
+                      <Pencil size={15} />
                     </button>
                   )}
 
@@ -3497,10 +3995,10 @@ function ActionsTab({
                     <button
                       type="button"
                       onClick={() => handleDeleteItem(a)}
-                      className="p-1.5 text-slate2-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+                      className="p-1.5 text-slate2-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                       title="Delete action item"
                     >
-                      <Trash2 size={14} />
+                      <Trash2 size={15} />
                     </button>
                   )}
                 </div>
@@ -3514,23 +4012,30 @@ function ActionsTab({
       {canCreate && !isActionItemsLocked && creationMode === "SINGLE" && (
         <form
           onSubmit={submitSingle}
-          className="space-y-3 border-t border-slate2-100 p-4 bg-slate2-50/40"
+          className="space-y-4 border-t border-slate2-100 p-5 bg-slate2-50/50"
         >
+          <div className="flex items-center gap-2 pb-1 border-b border-slate2-200/60">
+            <Plus size={15} className="text-brand" />
+            <h4 className="text-xs font-bold text-slate2-900 uppercase tracking-wider">
+              Add Action Item
+            </h4>
+          </div>
+
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
             <div className="sm:col-span-5">
-              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
-                Task Description <span className="text-red-500">*</span>
+              <label className="block text-xs font-semibold text-slate2-700 mb-1">
+                Task Description <span className="text-rose-500">*</span>
               </label>
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="What needs to be done?"
+                placeholder="What needs to be accomplished?"
                 className={`${inputClass} w-full`}
               />
             </div>
             <div className="sm:col-span-4">
-              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
-                Assign To (One or Multiple) <span className="text-red-500">*</span>
+              <label className="block text-xs font-semibold text-slate2-700 mb-1">
+                Assign Accountability <span className="text-rose-500">*</span>
               </label>
               <SearchableUserSelect
                 users={users}
@@ -3543,25 +4048,25 @@ function ActionsTab({
               />
             </div>
             <div className="sm:col-span-3">
-              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
-                Due Date <span className="text-red-500">*</span>
+              <label className="block text-xs font-semibold text-slate2-700 mb-1">
+                Due Date <span className="text-rose-500">*</span>
               </label>
               <input
                 type="date"
                 min={todayDateStr}
                 value={deadline}
                 onChange={(e) => setDeadline(e.target.value)}
-                className={`${inputClass} w-full`}
+                className={`${inputClass} w-full font-mono text-xs`}
               />
             </div>
           </div>
 
-          {/* Multi-User Assignment Mode Choice (When 2+ users are selected) */}
+          {/* Multi-User Assignment Mode Choice */}
           {assignedUserIds.length > 1 && (
-            <div className="flex flex-wrap items-center justify-between gap-3 bg-[#eaf6f4] border border-[#bce4dc] px-3.5 py-2.5 rounded-lg text-xs">
-              <div className="flex items-center gap-1.5 text-[#005f56] font-semibold">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-teal-50/60 border border-teal-200/80 px-4 py-2.5 rounded-xl text-xs">
+              <div className="flex items-center gap-2 text-brand font-semibold">
                 <Users size={15} />
-                <span>Multi-User Assignment Mode:</span>
+                <span>Multi-Assignee Distribution:</span>
               </div>
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-1.5 cursor-pointer font-medium text-slate2-800">
@@ -3570,11 +4075,9 @@ function ActionsTab({
                     name="assignmentModeSingle"
                     checked={assignmentMode === "SHARED"}
                     onChange={() => setAssignmentMode("SHARED")}
-                    className="text-[#005f56] focus:ring-[#005f56]"
+                    className="text-brand focus:ring-brand"
                   />
-                  <span>
-                    👥 Joint Shared Task (1 task for all {assignedUserIds.length} assignees)
-                  </span>
+                  <span>Joint Shared Task ({assignedUserIds.length} assignees)</span>
                 </label>
                 <label className="flex items-center gap-1.5 cursor-pointer font-medium text-slate2-800">
                   <input
@@ -3582,25 +4085,23 @@ function ActionsTab({
                     name="assignmentModeSingle"
                     checked={assignmentMode === "INDIVIDUAL"}
                     onChange={() => setAssignmentMode("INDIVIDUAL")}
-                    className="text-[#005f56] focus:ring-[#005f56]"
+                    className="text-brand focus:ring-brand"
                   />
-                  <span>
-                    📋 Separate Tasks (Creates {assignedUserIds.length} individual tasks)
-                  </span>
+                  <span>Individual Copy for Each Assignee</span>
                 </label>
               </div>
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-1">
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
             <div className="sm:col-span-4">
-              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
-                Priority
+              <label className="block text-xs font-semibold text-slate2-700 mb-1">
+                Priority Level
               </label>
               <select
                 value={priority}
                 onChange={(e) => setPriority(e.target.value as Priority)}
-                className={`${inputClass} w-full`}
+                className={`${inputClass} w-full text-xs`}
               >
                 <option value="LOW">Low Priority</option>
                 <option value="MEDIUM">Medium Priority</option>
@@ -3610,13 +4111,13 @@ function ActionsTab({
             </div>
             {meeting.decisions.length > 0 && (
               <div className="sm:col-span-8">
-                <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                <label className="block text-xs font-semibold text-slate2-700 mb-1">
                   Link to Decision (Optional)
                 </label>
                 <select
                   value={decisionId}
                   onChange={(e) => setDecisionId(e.target.value)}
-                  className={`${inputClass} w-full`}
+                  className={`${inputClass} w-full text-xs`}
                 >
                   <option value="">No decision linked</option>
                   {meeting.decisions.map((d) => (
@@ -3629,8 +4130,7 @@ function ActionsTab({
             )}
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate2-200/60">
-            {/* Left: Keep assignees checkbox for rapid sequential task addition */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate2-200/70">
             <label className="flex items-center gap-2 text-xs text-slate2-600 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -3638,10 +4138,9 @@ function ActionsTab({
                 onChange={(e) => setKeepAssignees(e.target.checked)}
                 className="rounded border-slate2-300 text-brand focus:ring-brand"
               />
-              <span>Keep assignee(s) selected to add multiple tasks</span>
+              <span>Keep assignee(s) selected for next task</span>
             </label>
 
-            {/* Right: Submit Button */}
             <Button type="submit" disabled={submitting}>
               {submitting ? (
                 <>
@@ -3651,10 +4150,10 @@ function ActionsTab({
                 <>
                   <CheckCircle2 size={14} />
                   <span>
-                    Assign action item{" "}
+                    Assign Action Item{" "}
                     {assignedUserIds.length > 1
                       ? assignmentMode === "INDIVIDUAL"
-                        ? `(${assignedUserIds.length} individual tasks)`
+                        ? `(${assignedUserIds.length} tasks)`
                         : `(${assignedUserIds.length} users)`
                       : ""}
                   </span>
@@ -3665,25 +4164,25 @@ function ActionsTab({
         </form>
       )}
 
-      {/* Creation Form: Batch Mode (Multiple tasks to one user or multiple users) */}
+      {/* Creation Form: Batch Mode */}
       {canCreate && !isActionItemsLocked && creationMode === "BATCH" && (
         <form
           onSubmit={submitBatch}
-          className="space-y-4 border-t border-slate2-100 p-4 bg-teal-50/20"
+          className="space-y-4 border-t border-slate2-100 p-5 bg-teal-50/20"
         >
           <div className="flex items-center justify-between pb-2 border-b border-teal-100">
             <div>
               <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wide">
-                Batch Task Assignment
+                Batch Action Items Assignment
               </h4>
-              <p className="text-[11px] text-slate2-500">
-                Assign multiple tasks to one team member or distribute across multiple members at once.
+              <p className="text-xs text-slate2-500 mt-0.5">
+                Rapidly create multiple tasks and distribute them across responsible team members.
               </p>
             </div>
             <button
               type="button"
               onClick={() => setCreationMode("SINGLE")}
-              className="text-xs font-semibold text-brand hover:underline"
+              className="text-xs font-semibold text-brand hover:underline cursor-pointer"
             >
               Switch to single task
             </button>
@@ -3692,8 +4191,8 @@ function ActionsTab({
           {/* Select Assignee(s) for the batch */}
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
             <div className="sm:col-span-8">
-              <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
-                Assign All Tasks To <span className="text-red-500">*</span>
+              <label className="block text-xs font-semibold text-slate2-700 mb-1">
+                Assign All Tasks To <span className="text-rose-500">*</span>
               </label>
               <SearchableUserSelect
                 users={users}
@@ -3707,13 +4206,13 @@ function ActionsTab({
             </div>
             {meeting.decisions.length > 0 && (
               <div className="sm:col-span-4">
-                <label className="block text-[11px] font-semibold text-slate2-600 mb-1">
+                <label className="block text-xs font-semibold text-slate2-700 mb-1">
                   Link to Decision (Optional)
                 </label>
                 <select
                   value={decisionId}
                   onChange={(e) => setDecisionId(e.target.value)}
-                  className={`${inputClass} w-full`}
+                  className={`${inputClass} w-full text-xs`}
                 >
                   <option value="">No decision linked</option>
                   {meeting.decisions.map((d) => (
@@ -3728,17 +4227,17 @@ function ActionsTab({
 
           {/* Multi-User choice in Batch */}
           {assignedUserIds.length > 1 && (
-            <div className="flex items-center gap-4 bg-[#eaf6f4] border border-[#bce4dc] px-3.5 py-2 rounded-lg text-xs">
-              <span className="font-semibold text-[#005f56]">Mode:</span>
+            <div className="flex items-center gap-4 bg-teal-50/80 border border-teal-200/80 px-4 py-2 rounded-xl text-xs">
+              <span className="font-semibold text-brand">Mode:</span>
               <label className="flex items-center gap-1.5 cursor-pointer text-slate2-800">
                 <input
                   type="radio"
                   name="assignmentModeBatch"
                   checked={assignmentMode === "SHARED"}
                   onChange={() => setAssignmentMode("SHARED")}
-                  className="text-[#005f56] focus:ring-[#005f56]"
+                  className="text-brand focus:ring-brand"
                 />
-                <span>Joint Shared Tasks (Assignees work together on each task)</span>
+                <span>Joint Shared Tasks (Team collaborates on each task)</span>
               </label>
               <label className="flex items-center gap-1.5 cursor-pointer text-slate2-800">
                 <input
@@ -3746,25 +4245,25 @@ function ActionsTab({
                   name="assignmentModeBatch"
                   checked={assignmentMode === "INDIVIDUAL"}
                   onChange={() => setAssignmentMode("INDIVIDUAL")}
-                  className="text-[#005f56] focus:ring-[#005f56]"
+                  className="text-brand focus:ring-brand"
                 />
-                <span>Separate Individual Tasks (Each user gets a private copy)</span>
+                <span>Separate Individual Tasks (One copy per member)</span>
               </label>
             </div>
           )}
 
           {/* Task rows */}
           <div className="space-y-2">
-            <label className="block text-[11px] font-semibold text-slate2-600">
-              Action Items ({batchTasks.length})
+            <label className="block text-xs font-semibold text-slate2-700">
+              Task Ledger Rows ({batchTasks.length})
             </label>
             {batchTasks.map((task, idx) => (
               <div
                 key={task.id}
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-2 bg-white rounded-lg border border-slate2-200 shadow-2xs"
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-2.5 bg-white rounded-xl border border-slate2-200 shadow-2xs"
               >
-                <span className="text-xs font-bold text-slate2-400 w-5 shrink-0 text-center">
-                  #{idx + 1}
+                <span className="text-xs font-bold font-mono text-slate2-400 w-7 shrink-0 text-center">
+                  #{String(idx + 1).padStart(2, "0")}
                 </span>
                 <input
                   value={task.title}
@@ -3773,8 +4272,8 @@ function ActionsTab({
                     next[idx].title = e.target.value;
                     setBatchTasks(next);
                   }}
-                  placeholder={`Task #${idx + 1} description…`}
-                  className={`${inputClass} flex-1`}
+                  placeholder={`Task #${idx + 1} deliverable description…`}
+                  className={`${inputClass} flex-1 text-xs`}
                 />
                 <div className="flex items-center gap-2 shrink-0">
                   <input
@@ -3786,7 +4285,7 @@ function ActionsTab({
                       next[idx].deadline = e.target.value;
                       setBatchTasks(next);
                     }}
-                    className={`${inputClass} w-36 text-xs`}
+                    className={`${inputClass} w-36 text-xs font-mono`}
                   />
                   <select
                     value={task.priority}
@@ -3795,7 +4294,7 @@ function ActionsTab({
                       next[idx].priority = e.target.value as Priority;
                       setBatchTasks(next);
                     }}
-                    className={`${inputClass} w-24 text-xs`}
+                    className={`${inputClass} w-28 text-xs`}
                   >
                     <option value="LOW">Low</option>
                     <option value="MEDIUM">Medium</option>
@@ -3808,10 +4307,10 @@ function ActionsTab({
                       onClick={() => {
                         setBatchTasks(batchTasks.filter((_, i) => i !== idx));
                       }}
-                      className="p-1.5 text-slate2-400 hover:text-red-500 rounded cursor-pointer"
+                      className="p-1.5 text-slate2-400 hover:text-rose-600 rounded-lg cursor-pointer transition-colors"
                       title="Remove task row"
                     >
-                      <Trash2 size={13} />
+                      <Trash2 size={14} />
                     </button>
                   )}
                 </div>
@@ -3831,9 +4330,9 @@ function ActionsTab({
                   },
                 ]);
               }}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand hover:text-brand-dark py-1 px-2 rounded hover:bg-brand/5 cursor-pointer transition-colors"
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand hover:text-brand-dark py-1.5 px-3 rounded-lg hover:bg-brand/5 cursor-pointer transition-colors"
             >
-              <Plus size={13} /> Add another task row
+              <Plus size={13} /> Add another deliverable row
             </button>
           </div>
 
@@ -3842,7 +4341,7 @@ function ActionsTab({
               {assignedUserIds.length > 0 ? (
                 <span>
                   Ready to assign to{" "}
-                  <strong className="text-[#005f56]">
+                  <strong className="text-brand">
                     {selectedUsers.map((u) => u.name).join(", ")}
                   </strong>
                 </span>
@@ -3913,6 +4412,7 @@ function ActionItemEditModal({
   onSuccess: () => void;
 }) {
   const { alert, confirm } = useAlert();
+  const { hasPermission } = useAuth();
   const [title, setTitle] = useState(item.title);
   const [description, setDescription] = useState(item.description || "");
   const [priority, setPriority] = useState<Priority>(item.priority);
@@ -3968,6 +4468,14 @@ function ActionItemEditModal({
       return;
     }
 
+    if (isLockedMeeting(meeting.status) || meeting.status === "COMPLETED") {
+      await alert({
+        title: "Meeting is Completed",
+        message: "This meeting is finalized. Action item details cannot be edited. Only the status can be changed directly from the action items list.",
+        tone: "warning",
+      });
+      return;
+    }
     setSaving(true);
     try {
       await api.put(`/action-items/${item.id}`, {
@@ -4201,6 +4709,53 @@ function buildMeetingDocViewUrl(meetingId: string, docId: string) {
     : base;
 }
 
+function getDocTypeInfo(fileName: string) {
+  const ext = fileName.split(".").pop()?.toLowerCase() || "";
+  if (ext === "pdf") {
+    return {
+      type: "PDF Document",
+      badge: "PDF",
+      badgeColor: "bg-rose-50 text-rose-700 border-rose-200",
+      iconColor: "text-rose-600",
+      bgColor: "bg-rose-50",
+    };
+  }
+  if (["xls", "xlsx", "csv"].includes(ext)) {
+    return {
+      type: "Spreadsheet",
+      badge: "EXCEL",
+      badgeColor: "bg-emerald-50 text-emerald-700 border-emerald-200",
+      iconColor: "text-emerald-600",
+      bgColor: "bg-emerald-50",
+    };
+  }
+  if (["doc", "docx"].includes(ext)) {
+    return {
+      type: "Word Document",
+      badge: "WORD",
+      badgeColor: "bg-blue-50 text-blue-700 border-blue-200",
+      iconColor: "text-blue-600",
+      bgColor: "bg-blue-50",
+    };
+  }
+  if (["png", "jpg", "jpeg", "webp", "svg", "bmp", "gif"].includes(ext)) {
+    return {
+      type: "Image Asset",
+      badge: "IMAGE",
+      badgeColor: "bg-purple-50 text-purple-700 border-purple-200",
+      iconColor: "text-purple-600",
+      bgColor: "bg-purple-50",
+    };
+  }
+  return {
+    type: "Document",
+    badge: ext.toUpperCase() || "FILE",
+    badgeColor: "bg-teal-50 text-brand border-teal-200",
+    iconColor: "text-brand",
+    bgColor: "bg-teal-50",
+  };
+}
+
 function InlineDocViewer({
   meetingId,
   doc,
@@ -4214,82 +4769,78 @@ function InlineDocViewer({
 }) {
   const viewUrl = buildMeetingDocViewUrl(meetingId, doc.id);
   const sizeMB = (doc.fileSize / 1024 / 1024).toFixed(2);
+  const meta = getDocTypeInfo(doc.fileName);
 
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
   return (
     <div
-      style={{
-        position: "fixed", inset: 0, zIndex: 9999,
-        background: "rgba(0,0,0,0.75)",
-        display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center",
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate2-900/80 backdrop-blur-xs p-4 sm:p-6"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
       }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{
-        background: "#fff", borderRadius: 12, overflow: "hidden",
-        display: "flex", flexDirection: "column",
-        width: "92vw", maxWidth: 1100, height: "90vh",
-        boxShadow: "0 25px 60px rgba(0,0,0,0.4)",
-      }}>
+      <div className="relative flex flex-col w-full max-w-5xl h-[88vh] bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate2-200">
         {/* Header */}
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "12px 16px", borderBottom: "1px solid #e2e8f0",
-          background: "#f8fafc", flexShrink: 0,
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-            <FileText size={16} color="#0B7A6B" style={{ flexShrink: 0 }} />
-            <span style={{
-              fontSize: 14, fontWeight: 600, color: "#1e293b",
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>{doc.fileName}</span>
-            <span style={{ fontSize: 12, color: "#94a3b8", flexShrink: 0 }}>{sizeMB} MB</span>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate2-200 bg-slate2-50/90 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${meta.bgColor} ${meta.iconColor} shrink-0`}>
+              <FileText size={18} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-slate2-900 truncate">
+                  {doc.fileName}
+                </span>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${meta.badgeColor}`}>
+                  {meta.badge}
+                </span>
+              </div>
+              <span className="text-xs font-mono text-slate2-500">{sizeMB} MB</span>
+            </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            <a href={viewUrl} target="_blank" rel="noopener noreferrer" title="Open in new tab"
-              style={{
-                width: 32, height: 32, display: "inline-flex",
-                alignItems: "center", justifyContent: "center",
-                borderRadius: 6, border: "1px solid #cbd5e1",
-                background: "#fff", cursor: "pointer", textDecoration: "none",
-              }}
+
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href={viewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open document in new browser tab"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate2-200 bg-white text-slate2-700 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs"
             >
-              <ExternalLink size={14} color="#475569" />
+              <ExternalLink size={15} />
             </a>
-            <button type="button" onClick={onDownload} title="Download file"
-              style={{
-                width: 32, height: 32, display: "inline-flex",
-                alignItems: "center", justifyContent: "center",
-                borderRadius: 6, border: "1.5px solid #0B7A6B",
-                background: "#0B7A6B", cursor: "pointer",
-              }}
+            <button
+              type="button"
+              onClick={onDownload}
+              title="Download file"
+              className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand hover:bg-brand-dark text-white transition-colors shadow-2xs cursor-pointer"
             >
-              <Download size={14} color="#fff" />
+              <Download size={15} />
             </button>
-            <button type="button" onClick={onClose} title="Close (Esc)"
-              style={{
-                width: 32, height: 32, display: "inline-flex",
-                alignItems: "center", justifyContent: "center",
-                borderRadius: 6, border: "1px solid #fca5a5",
-                background: "#fff", cursor: "pointer",
-              }}
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close viewer (Esc)"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
             >
-              <X size={14} color="#ef4444" />
+              <X size={15} />
             </button>
           </div>
         </div>
-        {/* Content — always iframe; only invoked for browser-viewable file types */}
-        <div style={{ flex: 1, overflow: "hidden", background: "#f1f5f9" }}>
+
+        {/* Content Viewer iframe */}
+        <div className="flex-1 overflow-hidden bg-slate2-100">
           <iframe
             src={viewUrl}
             title={doc.fileName}
-            style={{ width: "100%", height: "100%", border: "none" }}
+            className="w-full h-full border-0"
           />
         </div>
       </div>
@@ -4311,6 +4862,11 @@ function DocumentsTab({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [viewing, setViewing] = useState<{ id: string; fileName: string; fileSize: number } | null>(null);
+
+  // Total document metrics
+  const totalDocs = (meeting.documents || []).length;
+  const totalBytes = (meeting.documents || []).reduce((acc, d) => acc + (d.fileSize || 0), 0);
+  const totalSizeFormatted = (totalBytes / (1024 * 1024)).toFixed(2);
 
   // Smart view: previewable files open in modal; Office files download directly
   const handleView = (d: { id: string; fileName: string; fileSize: number }) => {
@@ -4374,7 +4930,7 @@ function DocumentsTab({
   const remove = async (documentId: string) => {
     const confirmed = await confirm({
       title: "Delete Document",
-      message: "Are you sure you want to delete this document?",
+      message: "Are you sure you want to delete this document? This record will be permanently removed.",
       tone: "danger",
       confirmLabel: "Delete Document",
       cancelLabel: "Cancel",
@@ -4383,6 +4939,8 @@ function DocumentsTab({
     await api.delete(`/meetings/${meeting.id}/documents/${documentId}`);
     onChange();
   };
+
+  const isMeetingLocked = isLockedMeeting(meeting.status);
 
   return (
     <>
@@ -4394,130 +4952,232 @@ function DocumentsTab({
           onDownload={() => download(viewing.id, viewing.fileName)}
         />
       )}
-      <Card>
+      <Card className="border border-slate2-200/90 bg-white rounded-2xl shadow-xs overflow-hidden">
         <CardHeader
-          title="Documents"
-          subtitle="Upload and manage files attached to this meeting"
+          title={
+            <span className="flex items-center gap-2.5">
+              <span className="font-bold text-slate2-900">Document Repository & Exhibits</span>
+              {isMeetingLocked ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-600 border border-slate2-200 px-2.5 py-0.5 text-xs font-semibold">
+                  <Lock size={11} />
+                  Certified & Locked
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 text-brand border border-teal-200/80 px-2.5 py-0.5 text-xs font-semibold">
+                  <Paperclip size={11} />
+                  {totalDocs} {totalDocs === 1 ? "File" : "Files"}
+                </span>
+              )}
+            </span>
+          }
+          subtitle="Official presentation decks, committee materials, and supporting documentation"
         />
-        {meeting.status === "APPROVED" && (
-          <div className="mx-5 mb-3 rounded-xl border border-slate2-200 bg-slate2-50/90 p-3.5 shadow-2xs">
-            <div className="flex items-start gap-2.5">
-              <Lock size={18} className="text-slate2-500 mt-0.5 shrink-0" />
-              <div>
-                <h4 className="text-xs font-bold text-slate2-800 uppercase tracking-wider">
-                  Documents Officially Certified & Locked (Read-Only)
+
+        {/* Locked Session Banner */}
+        {isMeetingLocked && (
+          <div className="mx-5 mb-4 rounded-xl border border-slate2-200 bg-slate2-50/90 p-4 shadow-2xs">
+            <div className="flex items-start gap-3">
+              <div className="rounded-lg bg-slate2-200/80 p-2 text-slate2-700 shrink-0 mt-0.5">
+                <Lock size={16} />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-bold text-slate2-900 uppercase tracking-wider">
+                  Documents Certified & Archived
                 </h4>
-                <p className="mt-0.5 text-xs text-slate2-600 leading-relaxed">
-                  This meeting has been officially approved and certified. All meeting documents and attachments are permanently locked in Read-Only mode. An authorized administrator with ADMIN_OVERRIDE permission must unlock the meeting before documents can be added or deleted.
+                <p className="text-xs text-slate2-600 leading-relaxed max-w-2xl">
+                  This session has been formally approved and sealed. Attached files are archived as permanent corporate governance records.
+                  Modifications require administrative override.
                 </p>
               </div>
             </div>
           </div>
         )}
+
+        {/* Metrics Pulse Bar */}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-px bg-slate2-100 border-y border-slate2-200/80">
+          <div className="bg-white p-4">
+            <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Attached Exhibits</p>
+            <div className="mt-1 flex items-baseline gap-2">
+              <span className="text-xl font-bold font-mono text-slate2-900">{totalDocs}</span>
+              <span className="text-xs text-slate2-500">{totalDocs === 1 ? "document" : "documents"}</span>
+            </div>
+          </div>
+
+          <div className="bg-white p-4">
+            <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Archive Volume</p>
+            <div className="mt-1 flex items-baseline gap-2">
+              <span className="text-xl font-bold font-mono text-brand">{totalSizeFormatted}</span>
+              <span className="text-xs text-slate2-500">MB stored</span>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 col-span-2 md:col-span-1">
+            <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Access Protocol</p>
+            <div className="mt-1 flex items-baseline gap-2">
+              <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2 py-0.5 rounded-md">
+                Verified Participants
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Documents Ledger List */}
         <div className="divide-y divide-slate2-100">
-          {meeting.documents.length === 0 ? (
+          {(meeting.documents || []).length === 0 ? (
             <EmptyState
-              title="No documents attached"
-              description="Upload meeting documents below."
+              title="No documents attached yet"
+              description="Upload presentations, briefing packets, or supplementary files for this session."
             />
           ) : (
-            meeting.documents.map((d) => (
-              <div
-                key={d.id}
-                className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
-              >
-                <div className="min-w-0">
-                  <button
-                    type="button"
-                    onClick={() => handleView(d)}
-                    className="truncate text-sm font-medium hover:underline transition-colors cursor-pointer text-left"
-                    style={{ color: "#0B7A6B" }}
-                    title={`Preview ${d.fileName}`}
-                  >
-                    {d.fileName}
-                  </button>
-                  <p className="text-xs text-slate2-400">
-                    {d.uploadedBy.name} · {(d.fileSize / 1024 / 1024).toFixed(2)} MB
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  {/* View button — opens inline modal */}
-                  <button
-                    type="button"
-                    onClick={() => handleView(d)}
-                    title="Preview file inline"
-                    style={{
-                      width: 36, height: 36,
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                      borderRadius: 8, border: "1.5px solid #cbd5e1",
-                      background: "#ffffff", cursor: "pointer", flexShrink: 0,
-                      transition: "border-color 0.15s, background 0.15s",
-                    }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
-                      (e.currentTarget as HTMLElement).style.background = "#f0faf8";
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.borderColor = "#cbd5e1";
-                      (e.currentTarget as HTMLElement).style.background = "#ffffff";
-                    }}
-                  >
-                    <Eye size={16} color="#0B7A6B" />
-                  </button>
-                  {/* Download / Export button */}
-                  <button
-                    type="button"
-                    onClick={() => download(d.id, d.fileName)}
-                    title="Export / Download file"
-                    style={{
-                      width: 36, height: 36,
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                      borderRadius: 8, border: "1.5px solid #0B7A6B",
-                      background: "#0B7A6B", cursor: "pointer", flexShrink: 0,
-                      transition: "background 0.15s, border-color 0.15s",
-                    }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = "#095f55";
-                      (e.currentTarget as HTMLElement).style.borderColor = "#095f55";
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = "#0B7A6B";
-                      (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
-                    }}
-                  >
-                    <Download size={16} color="#ffffff" />
-                  </button>
-                  {canManage && (
+            (meeting.documents || []).map((d) => {
+              const meta = getDocTypeInfo(d.fileName);
+              const ext = d.fileName.split(".").pop()?.toLowerCase() ?? "";
+              const isInlineViewable = INLINE_VIEWABLE_EXTS.includes(ext);
+
+              return (
+                <div
+                  key={d.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 px-5 py-3.5 hover:bg-slate2-50/50 transition-colors"
+                >
+                  <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                    <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${meta.bgColor} ${meta.iconColor} shrink-0`}>
+                      {meta.badge === "EXCEL" ? (
+                        <FileSpreadsheet size={20} />
+                      ) : (
+                        <FileText size={20} />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleView(d)}
+                          className="text-sm font-semibold text-slate2-900 hover:text-brand hover:underline transition-colors text-left truncate cursor-pointer"
+                          title={isInlineViewable ? `Preview ${d.fileName} inline` : `Download ${d.fileName}`}
+                        >
+                          {d.fileName}
+                        </button>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${meta.badgeColor}`}>
+                          {meta.badge}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2 text-xs text-slate2-500 mt-1 flex-wrap">
+                        <span>Uploaded by <strong className="text-slate2-700 font-semibold">{d.uploadedBy.name}</strong></span>
+                        <span className="text-slate2-300">·</span>
+                        <span className="font-mono text-slate2-600">{(d.fileSize / 1024 / 1024).toFixed(2)} MB</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                    {/* View inline button */}
                     <button
                       type="button"
-                      onClick={() => remove(d.id)}
-                      className="text-xs font-medium text-red-600 hover:text-red-700"
+                      onClick={() => handleView(d)}
+                      title={isInlineViewable ? "Preview document inline" : "Download document"}
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate2-200 bg-white text-slate2-700 hover:border-brand hover:text-brand hover:bg-teal-50/50 transition-all shadow-2xs cursor-pointer"
                     >
-                      Delete
+                      <Eye size={16} />
                     </button>
-                  )}
+
+                    {/* Download button */}
+                    <button
+                      type="button"
+                      onClick={() => download(d.id, d.fileName)}
+                      title="Download file to device"
+                      className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand hover:bg-brand-dark text-white transition-all shadow-2xs cursor-pointer"
+                    >
+                      <Download size={16} />
+                    </button>
+
+                    {/* Delete button */}
+                    {canManage && !isMeetingLocked && (
+                      <button
+                        type="button"
+                        onClick={() => remove(d.id)}
+                        title="Delete document"
+                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate2-200 bg-white text-slate2-400 hover:border-rose-200 hover:text-rose-600 hover:bg-rose-50 transition-all shadow-2xs cursor-pointer"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
-        {canManage && (
-          <form onSubmit={attach} className="border-t border-slate2-100 p-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                id="meeting-document-file"
-                type="file"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-                className={`${inputClass} flex-1`}
-              />
-              <Button type="submit" disabled={!file || submitting}>
-                <Plus size={14} /> {submitting ? "Uploading…" : "Upload"}
-              </Button>
+
+        {/* Corporate Upload Section */}
+        {canManage && !isMeetingLocked && (
+          <form onSubmit={attach} className="border-t border-slate2-100 p-5 bg-slate2-50/40">
+            <div className="rounded-xl border border-dashed border-slate2-300 bg-white p-5 text-center transition-colors hover:border-brand">
+              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-teal-50 text-brand mb-2">
+                <Paperclip size={20} />
+              </div>
+              <p className="text-xs font-bold text-slate2-800">
+                Upload New Document or Exhibit
+              </p>
+              <p className="text-[11px] text-slate2-500 mt-0.5">
+                PDF, Word, Excel spreadsheets, presentations, and image records up to 25MB
+              </p>
+
+              <div className="mt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <label
+                  htmlFor="meeting-document-file"
+                  className="cursor-pointer rounded-xl border border-slate2-300 bg-white hover:bg-slate2-50 px-4 py-2 text-xs font-semibold text-slate2-700 shadow-2xs transition-all hover:border-slate2-400"
+                >
+                  Choose Document File
+                </label>
+                <input
+                  id="meeting-document-file"
+                  type="file"
+                  onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  className="hidden"
+                />
+
+                {file && (
+                  <div className="flex items-center gap-2 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-xl text-xs text-brand font-medium">
+                    <FileText size={14} />
+                    <span className="truncate max-w-[200px]">{file.name}</span>
+                    <span className="text-slate2-400 font-mono text-[11px]">
+                      ({(file.size / 1024 / 1024).toFixed(2)} MB)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFile(null);
+                        const input = document.getElementById("meeting-document-file") as HTMLInputElement | null;
+                        if (input) input.value = "";
+                      }}
+                      className="text-slate2-400 hover:text-rose-600 ml-1 cursor-pointer"
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                )}
+
+                <Button type="submit" disabled={!file || submitting}>
+                  {submitting ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" /> Uploading…
+                    </>
+                  ) : (
+                    <>
+                      <Plus size={14} /> Upload to Repository
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {error && (
+                <p className="mt-3 text-xs font-medium text-rose-600 bg-rose-50 border border-rose-200 rounded-lg p-2 max-w-md mx-auto">
+                  {error}
+                </p>
+              )}
             </div>
-            <p className="mt-2 text-xs text-slate2-400">Any file type supported</p>
-            {error && (
-              <p className="mt-2 text-xs font-medium text-red-600">{error}</p>
-            )}
           </form>
         )}
       </Card>
@@ -4607,9 +5267,9 @@ function ParticipantsTab({
   const isApproved = meeting.status === "APPROVED";
   const isCancelled = meeting.status === "CANCELLED";
 
-  // Modifications to participants roster are strictly locked when meeting is locked or cancelled,
-  // unless user has ADMIN_OVERRIDE.
-  const canEdit = !isApproved && !isCancelled && (!isLocked || hasAdminOverride);
+  // Modifications to participants roster and attendance are strictly locked when meeting is locked,
+  // until unlocked via the Unlock button with an administrator reason.
+  const canEdit = !isLocked;
   const canManage = canEdit && (
     hasAdminOverride ||
     isOrganizer ||
@@ -4621,12 +5281,10 @@ function ParticipantsTab({
 
   const meetingEnded = hasMeetingEnded(meeting);
   const isAttendanceFinalized = !!meeting.attendanceFinalized;
-  const canEditAttendance = !isCancelled && (!isAttendanceFinalized
-    ? meetingEnded && (canManage || hasAdminOverride)
-    : hasAdminOverride);
+  const canEditAttendance = !isLocked && !isAttendanceFinalized && meetingEnded && canManage;
 
-  // If meeting is locked/cancelled and no override, participants roster and editing are locked
-  const isParticipantsLocked = !canEdit;
+  // If meeting is locked, participants roster and editing are locked
+  const isParticipantsLocked = isLocked;
 
   useEffect(() => {
     api
@@ -4712,7 +5370,7 @@ function ParticipantsTab({
   const openFinalizeModal = () => {
     // Populate initial staged attendance from current participants
     const initialMap: Record<string, "ATTENDED" | "NOT ATTENDED"> = {};
-    for (const p of meeting.participants) {
+    for (const p of (meeting.participants || [])) {
       initialMap[p.id] =
         p.participated || p.status === "ATTENDED" ? "ATTENDED" : "NOT ATTENDED";
     }
@@ -4725,7 +5383,7 @@ function ParticipantsTab({
     if (isFinalizing) return;
     setIsFinalizing(true);
     try {
-      const records = meeting.participants.map((p) => ({
+      const records = (meeting.participants || []).map((p) => ({
         participantId: p.id,
         status:
           stagedAttendance[p.id] ||
@@ -4756,20 +5414,20 @@ function ParticipantsTab({
   };
 
   // Stats calculation
-  const totalParticipants = meeting.participants.length;
-  const acceptedCount = meeting.participants.filter(
+  const totalParticipants = (meeting.participants || []).length;
+  const acceptedCount = (meeting.participants || []).filter(
     (p) => p.status === "ACCEPTED",
   ).length;
-  const rejectedCount = meeting.participants.filter(
+  const rejectedCount = (meeting.participants || []).filter(
     (p) => p.status === "REJECTED" || p.status === "DECLINED",
   ).length;
-  const awaitingCount = meeting.participants.filter(
+  const awaitingCount = (meeting.participants || []).filter(
     (p) =>
       p.status !== "ACCEPTED" &&
       p.status !== "REJECTED" &&
       p.status !== "DECLINED",
   ).length;
-  const attendedCount = meeting.participants.filter(
+  const attendedCount = (meeting.participants || []).filter(
     (p) => p.participated || p.status === "ATTENDED",
   ).length;
   const attendancePct =
@@ -4778,27 +5436,28 @@ function ParticipantsTab({
       : 0;
 
   const displayedParticipants = useMemo(() => {
+    const list = meeting.participants || [];
     if (rsvpFilter === "ACCEPTED")
-      return meeting.participants.filter((p) => p.status === "ACCEPTED");
+      return list.filter((p) => p.status === "ACCEPTED");
     if (rsvpFilter === "REJECTED")
-      return meeting.participants.filter(
+      return list.filter(
         (p) => p.status === "REJECTED" || p.status === "DECLINED",
       );
     if (rsvpFilter === "AWAITING")
-      return meeting.participants.filter(
+      return list.filter(
         (p) =>
           p.status !== "ACCEPTED" &&
           p.status !== "REJECTED" &&
           p.status !== "DECLINED",
       );
-    return meeting.participants;
+    return list;
   }, [meeting.participants, rsvpFilter]);
 
-  const invitedIds = new Set(meeting.participants.map((p) => p.user.id));
+  const invitedIds = new Set((meeting.participants || []).map((p) => p.user?.id).filter(Boolean));
   const available = users.filter((u) => !invitedIds.has(u.id));
 
   // Modal stats calculation
-  const modalAttendedCount = meeting.participants.filter(
+  const modalAttendedCount = (meeting.participants || []).filter(
     (p) => stagedAttendance[p.id] === "ATTENDED",
   ).length;
   const modalPct =
@@ -4814,97 +5473,28 @@ function ParticipantsTab({
         onClose={() => setToast(null)}
       />
 
-      {/* Header matching screenshot: Title, Subtitle, Progress, Finalized Pill, Edit Button */}
+      {/* Header: Title, Subtitle, Progress, Finalized Pill, Edit Button */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-slate2-100 bg-white">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <h3 className="text-base sm:text-lg font-bold text-slate2-900 leading-tight">
               Participants & Attendance
             </h3>
-            {isParticipantsLocked && (
+            {isParticipantsLocked ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-500 border border-slate2-200 px-2.5 py-0.5 text-xs font-semibold">
                 <Lock size={11} />
                 View Only
               </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 text-brand border border-teal-200/80 px-2.5 py-0.5 text-xs font-semibold">
+                <Users size={11} />
+                {totalParticipants} {totalParticipants === 1 ? "Member" : "Members"}
+              </span>
             )}
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-            <span className="text-slate2-500 font-medium">
-              {totalParticipants} invited
-            </span>
-            <span className="text-slate2-300">·</span>
-            <button
-              type="button"
-              onClick={() =>
-                setRsvpFilter(rsvpFilter === "ACCEPTED" ? "ALL" : "ACCEPTED")
-              }
-              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold border transition-all cursor-pointer ${
-                rsvpFilter === "ACCEPTED"
-                  ? "bg-emerald-600 text-white border-emerald-600 shadow-2xs"
-                  : "bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100"
-              }`}
-              title="Click to filter accepted participants"
-            >
-              <CheckCircle2
-                size={11}
-                className={
-                  rsvpFilter === "ACCEPTED" ? "text-white" : "text-emerald-600"
-                }
-              />
-              <span>{acceptedCount} Accepted</span>
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setRsvpFilter(rsvpFilter === "REJECTED" ? "ALL" : "REJECTED")
-              }
-              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold border transition-all cursor-pointer ${
-                rsvpFilter === "REJECTED"
-                  ? "bg-rose-600 text-white border-rose-600 shadow-2xs"
-                  : "bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100"
-              }`}
-              title="Click to filter rejected participants"
-            >
-              <XCircle
-                size={11}
-                className={
-                  rsvpFilter === "REJECTED" ? "text-white" : "text-rose-600"
-                }
-              />
-              <span>{rejectedCount} Rejected</span>
-            </button>
-            {awaitingCount > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  setRsvpFilter(rsvpFilter === "AWAITING" ? "ALL" : "AWAITING")
-                }
-                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium border transition-all cursor-pointer ${
-                  rsvpFilter === "AWAITING"
-                    ? "bg-amber-600 text-white border-amber-600 shadow-2xs"
-                    : "bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100"
-                }`}
-                title="Click to filter awaiting RSVP participants"
-              >
-                <Clock
-                  size={11}
-                  className={
-                    rsvpFilter === "AWAITING" ? "text-white" : "text-amber-600"
-                  }
-                />
-                <span>{awaitingCount} Awaiting</span>
-              </button>
-            )}
-            {rsvpFilter !== "ALL" && (
-              <button
-                type="button"
-                onClick={() => setRsvpFilter("ALL")}
-                className="text-[11px] text-slate2-500 hover:text-slate2-800 underline font-medium cursor-pointer"
-              >
-                Reset filter
-              </button>
-            )}
-          </div>
+          <p className="text-xs text-slate2-500 mt-0.5">
+            Confirmed attendance, official RSVP declarations, and attestation pre-signatures
+          </p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -4912,9 +5502,9 @@ function ParticipantsTab({
             <span className="text-xs text-slate2-600 font-medium">
               Attendance {attendedCount}/{totalParticipants}
             </span>
-            <div className="h-1.5 w-20 rounded-full bg-slate2-100 overflow-hidden">
+            <div className="h-2 w-20 rounded-full bg-slate2-100 overflow-hidden">
               <div
-                className="h-full rounded-full bg-[#0B7A6B] transition-all duration-300"
+                className="h-full rounded-full bg-brand transition-all duration-300"
                 style={{ width: `${attendancePct}%` }}
               />
             </div>
@@ -4929,13 +5519,13 @@ function ParticipantsTab({
               type="button"
               onClick={openFinalizeModal}
               disabled={isFinalizing}
-              className="inline-flex items-center gap-1 rounded-full bg-brand/10 text-brand border border-brand/20 px-2.5 py-0.5 text-xs font-semibold hover:bg-brand/20 transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-full bg-brand/10 text-brand border border-brand/20 px-3 py-1 text-xs font-semibold hover:bg-brand/20 transition-colors cursor-pointer"
             >
-              <CheckCircle2 size={13} /> Finalize
+              <CheckCircle2 size={13} /> Finalize Roster
             </button>
           ) : (
             <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 text-slate2-600 px-2.5 py-0.5 text-xs font-medium">
-              <Clock size={12} /> {isCancelled ? "Cancelled" : "In Progress"}
+              <Clock size={12} /> {isCancelled ? "Cancelled" : "In Session"}
             </span>
           )}
 
@@ -4953,7 +5543,111 @@ function ParticipantsTab({
         </div>
       </div>
 
-      {/* Participants List: Every participant on ONE single row */}
+      {/* Governance Metrics Pulse Bar */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-slate2-100 border-b border-slate2-200/80">
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Total Invited</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono text-slate2-900">{totalParticipants}</span>
+            <span className="text-xs text-slate2-500">participants</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Attendance Confirmed</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono text-emerald-700">{acceptedCount}</span>
+            <span className="text-xs font-semibold text-emerald-600">
+              ({totalParticipants > 0 ? Math.round((acceptedCount / totalParticipants) * 100) : 0}%)
+            </span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Checked In</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono text-brand">{attendedCount}</span>
+            <span className="text-xs text-slate2-500">({attendancePct}%)</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4">
+          <p className="text-[11px] font-semibold text-slate2-500 uppercase tracking-wider">Pending RSVP</p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className={`text-xl font-bold font-mono ${awaitingCount > 0 ? "text-amber-600" : "text-slate2-700"}`}>
+              {awaitingCount}
+            </span>
+            <span className="text-xs text-slate2-400">awaiting</span>
+          </div>
+        </div>
+      </div>
+
+      {/* RSVP Filter Strip */}
+      <div className="flex items-center gap-1.5 px-5 py-3 bg-slate2-50/70 border-b border-slate2-100 overflow-x-auto text-xs">
+        <span className="font-semibold text-slate2-500 text-[11px] uppercase tracking-wider mr-1.5 shrink-0">
+          Filter RSVP:
+        </span>
+        <button
+          type="button"
+          onClick={() => setRsvpFilter("ALL")}
+          className={`px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${rsvpFilter === "ALL"
+            ? "bg-[#0B7A6B] text-white shadow-2xs font-semibold"
+            : "bg-white text-slate2-700 hover:bg-slate2-100 border border-slate2-200"
+            }`}
+        >
+          All ({totalParticipants})
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setRsvpFilter(rsvpFilter === "ACCEPTED" ? "ALL" : "ACCEPTED")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${rsvpFilter === "ACCEPTED"
+            ? "bg-emerald-600 text-white shadow-2xs font-semibold"
+            : "bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50"
+            }`}
+        >
+          <CheckCircle2 size={12} className={rsvpFilter === "ACCEPTED" ? "text-white" : "text-emerald-600"} />
+          <span>Accepted ({acceptedCount})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setRsvpFilter(rsvpFilter === "REJECTED" ? "ALL" : "REJECTED")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${rsvpFilter === "REJECTED"
+            ? "bg-rose-600 text-white shadow-2xs font-semibold"
+            : "bg-white text-rose-800 border border-rose-200 hover:bg-rose-50"
+            }`}
+        >
+          <XCircle size={12} className={rsvpFilter === "REJECTED" ? "text-white" : "text-rose-600"} />
+          <span>Rejected ({rejectedCount})</span>
+        </button>
+
+        {awaitingCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setRsvpFilter(rsvpFilter === "AWAITING" ? "ALL" : "AWAITING")}
+            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-medium transition-all shrink-0 cursor-pointer ${rsvpFilter === "AWAITING"
+              ? "bg-amber-600 text-white shadow-2xs font-semibold"
+              : "bg-white text-amber-800 border border-amber-200 hover:bg-amber-50"
+              }`}
+          >
+            <Clock size={12} className={rsvpFilter === "AWAITING" ? "text-white" : "text-amber-600"} />
+            <span>Awaiting ({awaitingCount})</span>
+          </button>
+        )}
+
+        {rsvpFilter !== "ALL" && (
+          <button
+            type="button"
+            onClick={() => setRsvpFilter("ALL")}
+            className="text-xs font-semibold text-brand hover:underline shrink-0 ml-2 cursor-pointer"
+          >
+            Reset filter
+          </button>
+        )}
+      </div>
+
+      {/* Participants List */}
       <div className="divide-y divide-slate2-100">
         {displayedParticipants.length === 0 ? (
           <EmptyState
@@ -4965,7 +5659,7 @@ function ParticipantsTab({
             description={
               rsvpFilter !== "ALL"
                 ? "Try resetting the filter to see all participants."
-                : "Add participants below to invite team members and track attendance."
+                : "Invite committee members and stakeholders to track attendance and attestations."
             }
           />
         ) : (
@@ -4973,24 +5667,24 @@ function ParticipantsTab({
             const isAttended = p.participated || p.status === "ATTENDED";
             const initials = p.user.name
               ? p.user.name
-                  .split(" ")
-                  .filter(Boolean)
-                  .map((n) => n[0])
-                  .slice(0, 2)
-                  .join("")
-                  .toUpperCase()
+                .split(" ")
+                .filter(Boolean)
+                .map((n) => n[0])
+                .slice(0, 2)
+                .join("")
+                .toUpperCase()
               : "U";
 
             return (
               <div
                 key={p.id}
-                className="flex items-center justify-between gap-4 px-5 py-3 hover:bg-slate2-50/50 transition-colors"
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 px-5 py-3.5 hover:bg-slate2-50/50 transition-colors"
               >
                 {/* Left: Avatar + Name + RSVP Badge + Email + Rejection Reason */}
-                <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="flex items-center gap-3.5 min-w-0 flex-1">
                   <div
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white text-xs font-bold tracking-tight shadow-2xs"
-                    style={{ backgroundColor: p.user.avatarColor || "#0b2545" }}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-white text-xs font-bold tracking-tight shadow-2xs"
+                    style={{ backgroundColor: p.user.avatarColor || "#0B7A6B" }}
                   >
                     {initials}
                   </div>
@@ -5000,58 +5694,68 @@ function ParticipantsTab({
                         {p.user.name}
                       </span>
 
-                      {/* View for the Meeting Organizer: Green Badge (ACCEPTED) & Red Badge and Reason (REJECTED) */}
+                      {/* RSVP Badges */}
                       {p.status === "ACCEPTED" ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold">
                           <CheckCircle2 size={12} className="text-emerald-600" />
-                          <span>(Accepted)</span>
+                          <span>Accepted</span>
                         </span>
                       ) : p.status === "REJECTED" || p.status === "DECLINED" ? (
-                        <div className="inline-flex items-center gap-1.5 flex-wrap">
+                        <div className="inline-flex items-center gap-2 flex-wrap">
                           <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 px-2.5 py-0.5 text-xs font-semibold">
                             <XCircle size={12} className="text-rose-600" />
-                            <span>(Rejected)</span>
+                            <span>Declined</span>
                           </span>
                           {p.rejectionReason && (
-                            <span className="text-xs text-rose-700 font-medium">
-                              ➜ &lsquo;{p.rejectionReason}&rsquo;
+                            <span className="inline-flex items-center text-xs text-rose-700 bg-rose-50/80 border border-rose-200/70 px-2 py-0.5 rounded-md font-medium">
+                              Reason: &ldquo;{p.rejectionReason}&rdquo;
                             </span>
                           )}
                         </div>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200/80 px-2.5 py-0.5 text-xs font-medium">
                           <Clock size={11} className="text-amber-600" />
-                          <span>(Awaiting Response)</span>
+                          <span>Awaiting Response</span>
                         </span>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2 mt-0.5 text-xs text-slate2-500">
+                    <div className="flex items-center gap-2 mt-1 text-xs text-slate2-500 flex-wrap">
                       <span className="truncate">{p.user.email}</span>
+                      {p.user.department && (
+                        <>
+                          <span className="text-slate2-300">·</span>
+                          <span className="text-slate2-600 font-medium">{p.user.department.name}</span>
+                        </>
+                      )}
                       {p.respondedAt && (
-                        <span className="text-[11px] text-slate2-400">
-                          · Responded {new Date(p.respondedAt).toLocaleDateString()}
-                        </span>
+                        <>
+                          <span className="text-slate2-300">·</span>
+                          <span className="text-slate2-400 font-mono text-[11px]">
+                            Responded {new Date(p.respondedAt).toLocaleDateString()}
+                          </span>
+                        </>
                       )}
                     </div>
                   </div>
                 </div>
 
                 {/* Right: Organizer RSVP Button + Attended/Absent Toggle + Signature Badge + Delete Action */}
-                <div className="flex items-center gap-2.5 shrink-0">
+                <div className="flex items-center gap-2.5 shrink-0 self-end sm:self-center">
                   {canManage && !isParticipantsLocked && (
                     <button
                       type="button"
                       onClick={() => handleOpenRsvpModal(p)}
                       title="Update participant invitation status"
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate2-200 bg-white hover:bg-slate2-50 px-2.5 py-1 text-xs font-semibold text-slate2-700 transition-colors shadow-2xs cursor-pointer"
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate2-200 bg-white hover:bg-slate2-50 px-3 py-1.5 text-xs font-semibold text-slate2-700 transition-colors shadow-2xs cursor-pointer"
                     >
-                      <ClipboardList size={12} className="text-slate2-500" />
-                      <span>Invitation</span>
+                      <ClipboardList size={13} className="text-slate2-500" />
+                      <span>RSVP Status</span>
                     </button>
                   )}
+
                   {/* Attendance status toggle [ Attended | Absent ] */}
-                  <div className="inline-flex items-center rounded-xl bg-slate2-100/90 p-0.5 border border-slate2-200/80">
+                  <div className="inline-flex items-center rounded-xl bg-slate2-100 p-0.5 border border-slate2-200/80">
                     <button
                       type="button"
                       onClick={() => updateSingleAttendance(p.id, true)}
@@ -5063,11 +5767,10 @@ function ParticipantsTab({
                             ? "Attendance finalized"
                             : `Available after meeting ends at ${meeting.endTime}`
                       }
-                      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-all ${
-                        isAttended
-                          ? "bg-[#0B7A6B] text-white shadow-2xs"
-                          : "text-slate2-600 hover:text-slate2-900 cursor-pointer"
-                      } ${!canEditAttendance ? "opacity-80 cursor-not-allowed" : "cursor-pointer"}`}
+                      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-all ${isAttended
+                        ? "bg-brand text-white shadow-2xs"
+                        : "text-slate2-600 hover:text-slate2-900 cursor-pointer"
+                        } ${!canEditAttendance ? "opacity-80 cursor-not-allowed" : "cursor-pointer"}`}
                     >
                       <CheckCircle2
                         size={13}
@@ -5086,11 +5789,10 @@ function ParticipantsTab({
                             ? "Attendance finalized"
                             : `Available after meeting ends at ${meeting.endTime}`
                       }
-                      className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-all ${
-                        !isAttended
-                          ? "bg-slate2-700 text-white shadow-2xs"
-                          : "text-slate2-500 hover:text-slate2-800 cursor-pointer"
-                      } ${!canEditAttendance ? "opacity-80 cursor-not-allowed" : "cursor-pointer"}`}
+                      className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-all ${!isAttended
+                        ? "bg-slate2-700 text-white shadow-2xs"
+                        : "text-slate2-500 hover:text-slate2-800 cursor-pointer"
+                        } ${!canEditAttendance ? "opacity-80 cursor-not-allowed" : "cursor-pointer"}`}
                     >
                       <XCircle
                         size={13}
@@ -5100,7 +5802,7 @@ function ParticipantsTab({
                     </button>
                   </div>
 
-                  {/* Digital Signature Status - Icon Only */}
+                  {/* Digital Signature Status */}
                   {(() => {
                     const sig = meeting.participantSignatures?.find((s) => s.userId === p.user.id);
                     if (sig) {
@@ -5134,7 +5836,7 @@ function ParticipantsTab({
                     return (
                       <span
                         className="inline-flex items-center justify-center h-8 w-8 rounded-xl bg-amber-50/80 border border-amber-200/80 text-amber-600 shadow-2xs shrink-0"
-                        title="Signature pending"
+                        title="Attestation signature pending"
                       >
                         <Signature size={15} className="opacity-70" />
                       </span>
@@ -5159,9 +5861,9 @@ function ParticipantsTab({
         )}
       </div>
 
-      {/* Add Participant Section: Search/Select + [+ Add] Button */}
+      {/* Add Participant Section */}
       {canManage && !isParticipantsLocked && (
-        <div className="flex items-center gap-3 border-t border-slate2-100 p-4">
+        <div className="flex items-center gap-3 border-t border-slate2-100 p-4 bg-slate2-50/40">
           <div className="relative flex-1">
             <select
               value={selected}
@@ -5189,10 +5891,12 @@ function ParticipantsTab({
           >
             {addingParticipant ? (
               <>
-                <Loader2 size={13} className="animate-spin" /> Adding...
+                <Loader2 size={13} className="animate-spin" /> Inviting…
               </>
             ) : (
-              <>+ Add</>
+              <>
+                <Plus size={14} /> Invite Participant
+              </>
             )}
           </button>
         </div>
@@ -5303,7 +6007,7 @@ function ParticipantsTab({
 
             {/* Participant list in modal */}
             <div className="max-h-[50vh] overflow-y-auto divide-y divide-slate2-100 rounded-lg border border-slate2-200">
-              {meeting.participants.map((p) => {
+              {(meeting.participants || []).map((p) => {
                 const currentStatus =
                   stagedAttendance[p.id] || "NOT ATTENDED";
                 return (
@@ -5313,15 +6017,15 @@ function ParticipantsTab({
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <Avatar
-                        name={p.user.name}
-                        color={p.user.avatarColor}
+                        name={p.user?.name || "Participant"}
+                        color={p.user?.avatarColor || "#0B7A6B"}
                       />
                       <div className="min-w-0">
                         <p className="text-xs font-semibold text-slate2-800 truncate">
-                          {p.user.name}
+                          {p.user?.name || "Participant"}
                         </p>
                         <p className="text-[11px] text-slate2-400 truncate">
-                          {p.user.email}
+                          {p.user?.email || ""}
                         </p>
                       </div>
                     </div>
@@ -5419,11 +6123,10 @@ function ParticipantsTab({
                 <button
                   type="button"
                   onClick={() => setTargetStatus("ACCEPTED")}
-                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
-                    targetStatus === "ACCEPTED"
-                      ? "bg-emerald-50 border-emerald-300 text-emerald-800 shadow-2xs ring-1 ring-emerald-400"
-                      : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
-                  }`}
+                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${targetStatus === "ACCEPTED"
+                    ? "bg-emerald-50 border-emerald-300 text-emerald-800 shadow-2xs ring-1 ring-emerald-400"
+                    : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
+                    }`}
                 >
                   <CheckCircle2
                     size={18}
@@ -5438,11 +6141,10 @@ function ParticipantsTab({
                 <button
                   type="button"
                   onClick={() => setTargetStatus("REJECTED")}
-                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
-                    targetStatus === "REJECTED"
-                      ? "bg-rose-50 border-rose-300 text-rose-800 shadow-2xs ring-1 ring-rose-400"
-                      : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
-                  }`}
+                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${targetStatus === "REJECTED"
+                    ? "bg-rose-50 border-rose-300 text-rose-800 shadow-2xs ring-1 ring-rose-400"
+                    : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
+                    }`}
                 >
                   <XCircle
                     size={18}
@@ -5457,11 +6159,10 @@ function ParticipantsTab({
                 <button
                   type="button"
                   onClick={() => setTargetStatus("INVITED")}
-                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
-                    targetStatus === "INVITED"
-                      ? "bg-amber-50 border-amber-300 text-amber-800 shadow-2xs ring-1 ring-amber-400"
-                      : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
-                  }`}
+                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${targetStatus === "INVITED"
+                    ? "bg-amber-50 border-amber-300 text-amber-800 shadow-2xs ring-1 ring-amber-400"
+                    : "bg-white border-slate2-200 text-slate2-600 hover:bg-slate2-50"
+                    }`}
                 >
                   <Clock
                     size={18}
@@ -5493,11 +6194,10 @@ function ParticipantsTab({
                       key={chip}
                       type="button"
                       onClick={() => setTargetReason(chip)}
-                      className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition-colors cursor-pointer ${
-                        targetReason === chip
-                          ? "bg-rose-100 border-rose-300 text-rose-800"
-                          : "bg-slate2-50 border-slate2-200 text-slate2-600 hover:bg-slate2-100"
-                      }`}
+                      className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition-colors cursor-pointer ${targetReason === chip
+                        ? "bg-rose-100 border-rose-300 text-rose-800"
+                        : "bg-slate2-50 border-slate2-200 text-slate2-600 hover:bg-slate2-100"
+                        }`}
                     >
                       {chip}
                     </button>

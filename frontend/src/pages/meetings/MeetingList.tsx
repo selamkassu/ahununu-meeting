@@ -9,6 +9,12 @@ import {
   Clock,
   ShieldCheck,
   AlertTriangle,
+  Calendar,
+  X,
+  ChevronRight,
+  CheckCircle2,
+  FileText,
+  Filter,
 } from "lucide-react";
 import { api } from "../../api/client";
 import type { MeetingListItem, Department } from "../../types";
@@ -18,14 +24,13 @@ import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { useAuth } from "../../context/AuthContext";
 import MeetingCreateModal from "./MeetingCreateModal";
 
-const STATUS_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "All statuses" },
+const STATUS_FILTERS = [
+  { value: "", label: "All Sessions" },
   { value: "SCHEDULED", label: "Scheduled" },
   { value: "IN_PROGRESS", label: "In Progress" },
   { value: "PENDING_SIGNATURES", label: "Pending Signatures" },
   { value: "READY_FOR_APPROVAL", label: "Ready for Approval" },
   { value: "APPROVED", label: "Approved" },
-  { value: "FORCE_APPROVED", label: "Force Approved" },
   { value: "COMPLETED", label: "Completed" },
   { value: "CANCELLED", label: "Cancelled" },
 ];
@@ -104,6 +109,15 @@ export default function MeetingList() {
     );
   };
 
+  const clearAllFilters = () => {
+    setStatus("");
+    setDepartmentId("");
+    setQ("");
+    setSearchParams({}, { replace: true });
+  };
+
+  const hasActiveFilters = Boolean(status || departmentId || q.trim());
+
   const filteredMeetings = useMemo(() => {
     let result = meetings;
     if (status === "FORCE_APPROVED") {
@@ -142,6 +156,15 @@ export default function MeetingList() {
     });
   }, [meetings, q, status]);
 
+  // Executive metrics count across current full list
+  const metrics = useMemo(() => {
+    const total = meetings.length;
+    const inProgress = meetings.filter((m) => m.status === "IN_PROGRESS" || m.status === "SCHEDULED").length;
+    const pendingSignatures = meetings.filter((m) => m.status === "PENDING_SIGNATURES" || m.status === "READY_FOR_APPROVAL").length;
+    const certified = meetings.filter((m) => m.status === "APPROVED" || m.status === "COMPLETED").length;
+    return { total, inProgress, pendingSignatures, certified };
+  }, [meetings]);
+
   const grouped = useMemo(() => {
     const map = new Map<string, MeetingListItem[]>();
     for (const m of filteredMeetings) {
@@ -153,182 +176,369 @@ export default function MeetingList() {
   }, [filteredMeetings]);
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:flex-wrap lg:flex-nowrap">
-        {/* Search — grows to fill available space */}
-        <div className="relative flex-1 min-w-[160px]">
-          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400" />
-          <input
-            value={q}
-            onChange={(e) => handleQueryChange(e.target.value)}
-            placeholder="Search meetings by title, code, approver, force status…"
-            className={`${inputClass} pl-8 w-full`}
-          />
+    <div className="space-y-6">
+      {/* Executive Command Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate2-200/80 pb-5">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-brand" />
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate2-800">
+              Meeting Directory
+            </h1>
+          </div>
+          <p className="mt-1 text-xs sm:text-sm text-slate2-500">
+            Official logistics committees, executive proceedings, and departmental records
+          </p>
         </div>
 
-        {/* Status dropdown */}
-        <select
-          value={status}
-          onChange={(e) => handleStatusChange(e.target.value)}
-          className={`${inputClass} w-full sm:w-48 shrink-0`}
-        >
-          {STATUS_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-
-        {/* Department dropdown (visible only for org-wide view tier) */}
-        {(hasPermission("meetings:view:all") || hasPermission("ADMIN_OVERRIDE")) && (
-          <select
-            value={departmentId}
-            onChange={(e) => handleDepartmentChange(e.target.value)}
-            className={`${inputClass} w-full sm:w-44 shrink-0`}
-          >
-            <option value="">All departments</option>
-            {departments.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
-        )}
-
-        {/* New Meeting button */}
         {canCreate && (
-          <Button onClick={() => setCreateOpen(true)} className="shrink-0 w-full sm:w-auto">
-            <Plus size={15} /> New Meeting
+          <Button
+            onClick={() => setCreateOpen(true)}
+            className="shrink-0 shadow-sm inline-flex items-center gap-2 px-4 py-2 text-xs sm:text-sm font-semibold rounded-lg"
+          >
+            <Plus size={16} /> Schedule Session
           </Button>
         )}
       </div>
 
+      {/* Operational Metrics Pulse Bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="rounded-xl border border-slate2-200 bg-white p-3.5 shadow-2xs">
+          <p className="text-[11px] font-medium text-slate2-500">All Registered</p>
+          <div className="mt-1 flex items-baseline justify-between">
+            <span className="font-display text-xl font-bold text-slate2-800">{metrics.total}</span>
+            <span className="text-[11px] text-slate2-400">Total sessions</span>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-3.5 shadow-2xs">
+          <p className="text-[11px] font-medium text-sky-800">Active & Scheduled</p>
+          <div className="mt-1 flex items-baseline justify-between">
+            <span className="font-display text-xl font-bold text-sky-900">{metrics.inProgress}</span>
+            <span className="inline-flex h-2 w-2 rounded-full bg-sky-500 animate-pulse" />
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-amber-100 bg-amber-50/40 p-3.5 shadow-2xs">
+          <p className="text-[11px] font-medium text-amber-800">Awaiting Signatures</p>
+          <div className="mt-1 flex items-baseline justify-between">
+            <span className="font-display text-xl font-bold text-amber-900">{metrics.pendingSignatures}</span>
+            <span className="text-[11px] text-amber-700 font-medium">In review</span>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-3.5 shadow-2xs">
+          <p className="text-[11px] font-medium text-emerald-800">Certified & Complete</p>
+          <div className="mt-1 flex items-baseline justify-between">
+            <span className="font-display text-xl font-bold text-emerald-900">{metrics.certified}</span>
+            <CheckCircle2 size={15} className="text-emerald-600" />
+          </div>
+        </div>
+      </div>
+
+      {/* Controls & Filter Strip */}
+      <div className="rounded-xl border border-slate2-200 bg-white p-3.5 space-y-3 shadow-2xs">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          {/* Search Field */}
+          <div className="relative flex-1">
+            <Search
+              size={15}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400"
+            />
+            <input
+              value={q}
+              onChange={(e) => handleQueryChange(e.target.value)}
+              placeholder="Search meetings by title, code, organizer, approver, attendee..."
+              className={`${inputClass} pl-9 pr-8 text-xs sm:text-sm`}
+            />
+            {q && (
+              <button
+                type="button"
+                onClick={() => handleQueryChange("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate2-400 hover:text-slate2-600"
+                title="Clear search"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          {/* Department Filter (Visible for elevated tiers) */}
+          {(hasPermission("meetings:view:all") || hasPermission("ADMIN_OVERRIDE")) && (
+            <div className="w-full sm:w-52 shrink-0">
+              <select
+                value={departmentId}
+                onChange={(e) => handleDepartmentChange(e.target.value)}
+                className={`${inputClass} text-xs sm:text-sm bg-white cursor-pointer`}
+              >
+                <option value="">All departments</option>
+                {departments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              className="inline-flex items-center justify-center gap-1.5 text-xs font-medium text-slate2-600 hover:text-danger px-3 py-2 rounded-lg border border-slate2-200 hover:border-red-200 bg-slate2-50 transition-colors"
+            >
+              <X size={13} /> Clear filters
+            </button>
+          )}
+        </div>
+
+        {/* Quick-filter status pill carousel */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pt-1 pb-0.5 border-t border-slate2-100 text-xs">
+          <span className="text-[11px] font-semibold text-slate2-400 uppercase tracking-wider mr-1 shrink-0 flex items-center gap-1">
+            <Filter size={11} /> Filter:
+          </span>
+          {STATUS_FILTERS.map((f) => {
+            const isActive = status === f.value;
+            return (
+              <button
+                key={f.value}
+                type="button"
+                onClick={() => handleStatusChange(f.value)}
+                className={`whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition-all cursor-pointer ${
+                  isActive
+                    ? "bg-brand text-white shadow-2xs font-semibold"
+                    : "bg-slate2-50 text-slate2-600 hover:bg-slate2-100 border border-slate2-200/60"
+                }`}
+              >
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Main Ledger List */}
       {loading ? (
         <div className="space-y-3">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-24 animate-pulse rounded-xl bg-slate2-100" />
+            <div key={i} className="h-28 animate-pulse rounded-xl bg-slate2-100 border border-slate2-200/60" />
           ))}
         </div>
       ) : filteredMeetings.length === 0 ? (
-        <Card>
+        <Card className="p-8">
           <EmptyState
-            title="No meetings match these filters"
-            description="Try clearing a filter, or schedule a new meeting to get started."
+            title={hasActiveFilters ? "No sessions match these filters" : "No meetings found"}
+            description={
+              hasActiveFilters
+                ? "Try adjusting your search query, or clear filters to view all sessions."
+                : "Schedule your first meeting session to begin tracking agendas, minutes, and decisions."
+            }
           />
+          {hasActiveFilters && (
+            <div className="mt-4 flex justify-center">
+              <Button variant="secondary" onClick={clearAllFilters} className="text-xs">
+                Reset all filters
+              </Button>
+            </div>
+          )}
         </Card>
       ) : (
-        <div className="space-y-6">
-          {grouped.map(([day, items]) => (
-            <div key={day}>
-              <p className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-slate2-400">
-                {new Date(day).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
-              </p>
-              <div className="flex flex-col gap-4">
-                {items.map((m) => (
-                  <Link key={m.id} to={`/meetings/${m.id}`} className="block">
-                    <Card
-                      className={`flex flex-col gap-3 p-4 transition-all hover:shadow-md sm:flex-row sm:items-center sm:justify-between ${m.forceApproved
-                        ? "border-l-4 border-l-amber-500 bg-linear-to-r from-amber-50/20 to-white"
-                        : ""
-                        }`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-display text-sm font-semibold text-slate2-800">{m.title}</p>
-                          <CodeChip>{m.code}</CodeChip>
-                        </div>
-                        {m.description && (
-                          <p className="mt-0.5 line-clamp-1 text-xs text-slate2-500">{m.description}</p>
-                        )}
-                        {q.trim() && m.participants && m.participants.some(p => p.user.name.toLowerCase().includes(q.trim().toLowerCase())) && (
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate2-500">
-                            <span className="text-[11px] text-slate2-400">Participant match:</span>
-                            {m.participants
-                              .filter(p => p.user.name.toLowerCase().includes(q.trim().toLowerCase()))
-                              .map(p => (
-                                <span key={p.user.id} className="inline-flex items-center gap-1 rounded bg-slate2-100 px-1.5 py-0.5 text-[11px] font-medium text-slate2-700">
-                                  <span
-                                    className="inline-block h-2 w-2 rounded-full"
-                                    style={{ backgroundColor: p.user.avatarColor || "#94a3b8" }}
-                                  />
-                                  <span>{p.user.name}</span>
-                                  {p.status === "ACCEPTED" && (
-                                    <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1 rounded-sm">
-                                      (Accepted)
-                                    </span>
-                                  )}
-                                  {(p.status === "REJECTED" || p.status === "DECLINED") && (
-                                    <span className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-1 rounded-sm">
-                                      (Rejected){p.rejectionReason ? ` ➜ '${p.rejectionReason}'` : ""}
-                                    </span>
-                                  )}
-                                </span>
-                              ))}
-                          </div>
-                        )}
-                        <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-slate2-500">
-                          <span className="flex items-center gap-1">
-                            <Avatar name={m.organizer.name} color={m.organizer.avatarColor} />
-                            {m.organizer.name}
-                          </span>
-                          <span>{m.department.name}</span>
-                          {m.location && (
-                            <span className="flex items-center gap-1">
-                              <MapPin size={12} /> {m.location}
-                            </span>
-                          )}
-                          {m.onlineLink && (
-                            <span className="flex items-center gap-1">
-                              <Video size={12} /> Online
-                            </span>
-                          )}
-                          <span className="flex items-center gap-1">
-                            <Users size={12} /> {m._count.participants}
-                          </span>
+        <div className="space-y-7">
+          {grouped.map(([day, items]) => {
+            const dateObj = new Date(day);
+            const formattedDate = dateObj.toLocaleDateString("en-US", {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+              year: "numeric",
+            });
 
-                          {/* Approval Status Indicator in metadata */}
-                          {m.approvedBy && (
-                            <span
-                              className={`inline-flex items-center gap-1 font-medium ${m.forceApproved ? "text-amber-800" : "text-brand"
-                                }`}
-                              title={m.approvedAt ? `Formally certified on ${new Date(m.approvedAt).toLocaleString()}` : undefined}
-                            >
-                              <ShieldCheck size={13} className={m.forceApproved ? "text-amber-600" : "text-brand"} />
-                              <span>{m.forceApproved ? "Force certified by" : "Approved by"} {m.approvedBy.name}</span>
-                            </span>
-                          )}
-                        </div>
+            return (
+              <div key={day} className="space-y-3">
+                {/* Clean Date Divider */}
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate2-700">
+                    <Calendar size={13} className="text-brand" />
+                    <span>{formattedDate}</span>
+                  </div>
+                  <span className="rounded-full bg-slate2-100 px-2 py-0.5 text-[10px] font-semibold text-slate2-500">
+                    {items.length} {items.length === 1 ? "session" : "sessions"}
+                  </span>
+                  <div className="h-px flex-1 bg-slate2-200/70" />
+                </div>
 
-                        {/* Dedicated Administrative Override Notice if Force Approved */}
-                        {m.forceApproved && (
-                          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50/90 border border-amber-200/80 px-2.5 py-1 text-xs text-amber-900">
-                            <div className="flex items-center gap-1 font-semibold text-amber-900 shrink-0">
-                              <AlertTriangle size={13} className="text-amber-600 shrink-0" />
-                              <span>Administrative Override:</span>
+                <div className="space-y-3">
+                  {items.map((m) => {
+                    const meetingDate = new Date(m.date);
+                    const monthShort = meetingDate.toLocaleDateString("en-US", { month: "short" }).toUpperCase();
+                    const dayNum = meetingDate.toLocaleDateString("en-US", { day: "numeric" });
+
+                    return (
+                      <Link key={m.id} to={`/meetings/${m.id}`} className="group block">
+                        <div
+                          className={`rounded-xl border bg-white p-4 sm:p-5 transition-all duration-150 hover:border-brand/40 hover:shadow-sm ${
+                            m.forceApproved
+                              ? "border-l-4 border-l-amber-500 border-slate2-200"
+                              : "border-slate2-200"
+                          }`}
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-start gap-4">
+                            {/* Calendar Block (Signature focal ledger element) */}
+                            <div className="hidden sm:flex flex-col items-center justify-center h-16 w-16 rounded-xl border border-slate2-200 bg-slate2-50/70 shrink-0 text-center transition-colors group-hover:border-brand/30 group-hover:bg-brand/[0.03]">
+                              <span className="text-[10px] font-bold tracking-wider text-brand font-mono">
+                                {monthShort}
+                              </span>
+                              <span className="text-xl font-black text-slate2-800 leading-none mt-0.5 font-display">
+                                {dayNum}
+                              </span>
                             </div>
-                            <span className="text-amber-800 line-clamp-1">
-                              {m.bypassReason || "Approved before all participant pre-signatures were collected"}
-                            </span>
-                          </div>
-                        )}
-                      </div>
 
-                      <div className="flex flex-wrap items-center justify-between gap-2.5 sm:flex-col sm:items-end sm:justify-center shrink-0">
-                        <div className="flex items-center gap-1.5 rounded-lg bg-slate2-50 border border-slate2-200/80 px-2.5 py-1 text-xs font-semibold text-slate2-800 shadow-2xs">
-                          <Clock size={13} className="text-brand shrink-0" />
-                          <span>{m.startTime} – {m.endTime}</span>
+                            {/* Center Content Dossier */}
+                            <div className="flex-1 min-w-0 space-y-2">
+                              {/* Title, Monospace Code, Badges */}
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="text-sm sm:text-base font-bold text-slate2-900 group-hover:text-brand transition-colors">
+                                  {m.title}
+                                </h3>
+                                <CodeChip>{m.code}</CodeChip>
+                                <span className="inline-flex items-center rounded-md bg-slate2-100 px-2 py-0.5 text-[11px] font-medium text-slate2-700">
+                                  {m.department.name}
+                                </span>
+                              </div>
+
+                              {/* Description */}
+                              {m.description && (
+                                <p className="text-xs text-slate2-600 line-clamp-2 leading-relaxed">
+                                  {m.description}
+                                </p>
+                              )}
+
+                              {/* Participant search matches */}
+                              {q.trim() &&
+                                m.participants &&
+                                m.participants.some((p) =>
+                                  p.user.name.toLowerCase().includes(q.trim().toLowerCase())
+                                ) && (
+                                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate2-500 pt-0.5">
+                                    <span className="text-[11px] text-slate2-400">Matched attendee:</span>
+                                    {m.participants
+                                      .filter((p) =>
+                                        p.user.name.toLowerCase().includes(q.trim().toLowerCase())
+                                      )
+                                      .map((p) => (
+                                        <span
+                                          key={p.user.id}
+                                          className="inline-flex items-center gap-1 rounded bg-slate2-100 px-1.5 py-0.5 text-[11px] font-medium text-slate2-700"
+                                        >
+                                          <span
+                                            className="inline-block h-2 w-2 rounded-full"
+                                            style={{ backgroundColor: p.user.avatarColor || "#0B7A6B" }}
+                                          />
+                                          <span>{p.user.name}</span>
+                                          {p.status === "ACCEPTED" && (
+                                            <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1 rounded-sm">
+                                              (Accepted)
+                                            </span>
+                                          )}
+                                        </span>
+                                      ))}
+                                  </div>
+                                )}
+
+                              {/* Administrative Override Callout */}
+                              {m.forceApproved && (
+                                <div className="flex items-center gap-2 rounded-lg bg-amber-50/90 border border-amber-200 px-2.5 py-1 text-xs text-amber-900">
+                                  <AlertTriangle size={13} className="text-amber-600 shrink-0" />
+                                  <span className="font-semibold shrink-0">Admin Override:</span>
+                                  <span className="truncate text-amber-800">
+                                    {m.bypassReason || "Certified prior to full participant signature collection"}
+                                  </span>
+                                </div>
+                              )}
+
+                              {/* Metadata Strip */}
+                              <div className="flex flex-wrap items-center gap-3 pt-1 text-xs text-slate2-500">
+                                <div className="flex items-center gap-1.5">
+                                  <Avatar name={m.organizer.name} color={m.organizer.avatarColor} />
+                                  <span className="font-medium text-slate2-700">{m.organizer.name}</span>
+                                </div>
+
+                                <span className="text-slate2-300">·</span>
+
+                                <div className="flex items-center gap-1">
+                                  <Users size={13} className="text-slate2-400" />
+                                  <span>{m._count.participants} attendees</span>
+                                </div>
+
+                                {m.location && (
+                                  <>
+                                    <span className="text-slate2-300">·</span>
+                                    <div className="flex items-center gap-1">
+                                      <MapPin size={13} className="text-slate2-400" />
+                                      <span className="truncate max-w-[160px]">{m.location}</span>
+                                    </div>
+                                  </>
+                                )}
+
+                                {m.onlineLink && (
+                                  <>
+                                    <span className="text-slate2-300">·</span>
+                                    <div className="flex items-center gap-1 text-brand">
+                                      <Video size={13} />
+                                      <span>Online Room</span>
+                                    </div>
+                                  </>
+                                )}
+
+                                {m.approvedBy && (
+                                  <>
+                                    <span className="text-slate2-300">·</span>
+                                    <div
+                                      className={`flex items-center gap-1 font-medium ${
+                                        m.forceApproved ? "text-amber-800" : "text-brand"
+                                      }`}
+                                    >
+                                      <ShieldCheck
+                                        size={13}
+                                        className={m.forceApproved ? "text-amber-600" : "text-brand"}
+                                      />
+                                      <span>
+                                        {m.forceApproved ? "Force certified" : "Certified by"} {m.approvedBy.name}
+                                      </span>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Right Status & Time Column */}
+                            <div className="flex flex-row sm:flex-col sm:items-end justify-between items-center gap-2 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate2-100 shrink-0">
+                              <div className="flex items-center gap-1.5 rounded-lg bg-slate2-50 border border-slate2-200/80 px-2.5 py-1 text-xs font-mono font-semibold text-slate2-800">
+                                <Clock size={12} className="text-brand shrink-0" />
+                                <span>
+                                  {m.startTime} – {m.endTime}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <PriorityBadge priority={m.priority} />
+                                <StatusBadge status={m.status} />
+                              </div>
+
+                              <div className="hidden sm:flex items-center gap-1 text-xs font-semibold text-slate2-400 group-hover:text-brand transition-colors pt-1">
+                                <span>Open</span>
+                                <ChevronRight size={13} />
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-                          <PriorityBadge priority={m.priority} />
-                          <StatusBadge status={m.status} />
-                        </div>
-                      </div>
-                    </Card>
-                  </Link>
-                ))}
+                      </Link>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -345,4 +555,5 @@ export default function MeetingList() {
     </div>
   );
 }
+
 

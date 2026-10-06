@@ -90,14 +90,8 @@ const detailInclude = {
  * APPROVED meetings are strictly read-only for all users unless unlocked with ADMIN_OVERRIDE.
  */
 function checkMeetingLock(meeting: { status: string }, req: AuthedRequest): string | null {
-  if (meeting.status === "APPROVED") {
-    return "Meeting is approved and strictly read-only. An administrator with ADMIN_OVERRIDE permission must unlock the meeting before any changes can be made.";
-  }
   if (isLockedMeetingStatus(meeting.status)) {
-    const hasOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-    if (!hasOverride) {
-      return `Meeting is locked (${meeting.status.replace("_", " ")}). Modifications are restricted.`;
-    }
+    return `Meeting is locked (${meeting.status.replace("_", " ")}). It must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason before any changes can be made.`;
   }
   return null;
 }
@@ -913,7 +907,7 @@ router.put(
 
     const existing = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true, organizerId: true, approvedById: true, departmentId: true, startTime: true, endTime: true },
+      select: { id: true, status: true, organizerId: true, approvedById: true, departmentId: true, startTime: true, endTime: true, signaturesRequestedAt: true },
     });
     if (!existing) return res.status(404).json({ error: "Meeting not found." });
 
@@ -924,186 +918,202 @@ router.put(
       return res.status(403).json({ error: "You do not have permission to edit meetings outside your ownership scope." });
     }
 
-  await ensureUserPermissions(req);
-  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+    await ensureUserPermissions(req);
+    const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
 
-  // Once a meeting is APPROVED, it is strictly READ-ONLY for everyone until unlocked!
-  if (existing.status === "APPROVED" && !hasAdminOverride) {
-    return res.status(403).json({
-      error: "Meeting is approved and strictly read-only. It must be unlocked first by an administrator with ADMIN_OVERRIDE permission before any edits can be made.",
-    });
-  }
-
-  const wasLocked = isLockedMeetingStatus(existing.status);
-  if (wasLocked && !hasAdminOverride) {
-    return res.status(403).json({
-      error: `Meeting is locked (${existing.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE permission.`,
-    });
-  }
-
-  // Validate updated time constraints if startTime or endTime is modified
-  if (parsed.data.startTime || parsed.data.endTime) {
-    const checkStartTime = parsed.data.startTime || existing.startTime;
-    const checkEndTime = parsed.data.endTime || existing.endTime;
-    const sParsed = parseTimeString(checkStartTime);
-    const eParsed = parseTimeString(checkEndTime);
-    if (!sParsed || !eParsed) {
-      return res.status(400).json({ error: "Invalid time format. Please provide time as HH:mm." });
-    }
-    if (eParsed.totalMinutes <= sParsed.totalMinutes) {
-      return res.status(400).json({ error: "Meeting end time must be strictly after the start time." });
-    }
-    if (eParsed.totalMinutes - sParsed.totalMinutes < 5) {
-      return res.status(400).json({ error: "Meeting duration must be at least 5 minutes." });
-    }
-  }
-
-  const { date, status, ...rest } = parsed.data;
-  const dataToUpdate: any = { ...rest };
-  if (date) dataToUpdate.date = new Date(date);
-
-  // Status transitions: APPROVED cannot be set via standard update dropdown
-  if (status !== undefined) {
-    if (status === "APPROVED") {
-      return res.status(400).json({
-        error: "Meetings cannot be set to APPROVED via status update. Approval must be performed using the 'Approve Meeting' workflow with digital certification.",
+    // Once a meeting is locked (APPROVED, COMPLETED, etc.), it is strictly READ-ONLY for everyone until unlocked via the Unlock button!
+    if (isLockedMeetingStatus(existing.status)) {
+      return res.status(403).json({
+        error: `Meeting is locked (${existing.status.replace("_", " ")}). It must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason before any edits can be made.`,
       });
     }
 
-    if (status === "COMPLETED" && existing.status !== "COMPLETED") {
-      const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
-        (prisma as any).meetingMinutes.findMany({
-          where: { meetingId: req.params.id },
-          select: { content: true },
-        }),
-        prisma.decision.count({ where: { meetingId: req.params.id } }),
-        prisma.actionItem.count({ where: { meetingId: req.params.id } }),
-      ]);
-
-      const stripHtml = (html: string) =>
-        (html || "")
-          .replace(/<[^>]*>/g, "")
-          .replace(/&nbsp;/g, " ")
-          .trim();
-
-      const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
-      const hasDecisions = decisionsCount > 0;
-      const hasActionItems = actionItemsCount > 0;
-
-      if (!hasSummary && !hasDecisions && !hasActionItems) {
-        return res.status(400).json({
-          error:
-            "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
-        });
+    // Validate updated time constraints if startTime or endTime is modified
+    if (parsed.data.startTime || parsed.data.endTime) {
+      const checkStartTime = parsed.data.startTime || existing.startTime;
+      const checkEndTime = parsed.data.endTime || existing.endTime;
+      const sParsed = parseTimeString(checkStartTime);
+      const eParsed = parseTimeString(checkEndTime);
+      if (!sParsed || !eParsed) {
+        return res.status(400).json({ error: "Invalid time format. Please provide time as HH:mm." });
+      }
+      if (eParsed.totalMinutes <= sParsed.totalMinutes) {
+        return res.status(400).json({ error: "Meeting end time must be strictly after the start time." });
+      }
+      if (eParsed.totalMinutes - sParsed.totalMinutes < 5) {
+        return res.status(400).json({ error: "Meeting duration must be at least 5 minutes." });
       }
     }
 
-    dataToUpdate.status = status;
-  }
+    const { date, status, ...rest } = parsed.data;
+    const dataToUpdate: any = { ...rest };
+    if (date) dataToUpdate.date = new Date(date);
 
-  try {
-    const meeting = await prisma.meeting.update({
-      where: { id: req.params.id },
-      data: dataToUpdate,
-      include: detailInclude,
-    });
+    // Status transitions: APPROVED cannot be set via standard update dropdown
+    if (status !== undefined) {
+      if (status === "APPROVED") {
+        return res.status(400).json({
+          error: "Meetings cannot be set to APPROVED via status update. Approval must be performed using the 'Approve Meeting' workflow with digital certification.",
+        });
+      }
 
-    // Notify participants and organizer if meeting status was transitioned to CANCELLED
-    if (existing.status !== "CANCELLED" && status === "CANCELLED") {
-      try {
-        const userIdsToNotify = new Set<string>();
+      if (status === "COMPLETED" && existing.status !== "COMPLETED") {
+        const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+          (prisma as any).meetingMinutes.findMany({
+            where: { meetingId: req.params.id },
+            select: { content: true },
+          }),
+          prisma.decision.count({ where: { meetingId: req.params.id } }),
+          prisma.actionItem.count({ where: { meetingId: req.params.id } }),
+        ]);
 
-        if (meeting.participants && Array.isArray(meeting.participants)) {
-          for (const p of meeting.participants) {
-            if (p.userId) userIdsToNotify.add(p.userId);
+        const stripHtml = (html: string) =>
+          (html || "")
+            .replace(/<[^>]*>/g, "")
+            .replace(/&nbsp;/g, " ")
+            .trim();
+
+        const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+        const hasDecisions = decisionsCount > 0;
+        const hasActionItems = actionItemsCount > 0;
+
+        if (!hasSummary && !hasDecisions && !hasActionItems) {
+          return res.status(400).json({
+            error:
+              "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+          });
+        }
+      }
+
+      if (status === "PENDING_SIGNATURES" && !existing.signaturesRequestedAt) {
+        dataToUpdate.signaturesRequestedAt = new Date();
+      }
+      dataToUpdate.status = status;
+    }
+
+    try {
+      const meeting = await prisma.meeting.update({
+        where: { id: req.params.id },
+        data: dataToUpdate,
+        include: detailInclude,
+      });
+
+      // Notify participants and organizer if meeting status was transitioned to CANCELLED
+      if (existing.status !== "CANCELLED" && status === "CANCELLED") {
+        try {
+          const userIdsToNotify = new Set<string>();
+
+          if (meeting.participants && Array.isArray(meeting.participants)) {
+            for (const p of meeting.participants) {
+              if (p.userId) userIdsToNotify.add(p.userId);
+            }
           }
-        }
 
-        if (meeting.organizerId) {
-          userIdsToNotify.add(meeting.organizerId);
-        }
+          if (meeting.organizerId) {
+            userIdsToNotify.add(meeting.organizerId);
+          }
 
-        if (meeting.actionItems && Array.isArray(meeting.actionItems)) {
-          for (const a of meeting.actionItems) {
-            if (a.assignedToId) userIdsToNotify.add(a.assignedToId);
-            if ((a as any).assignees && Array.isArray((a as any).assignees)) {
-              for (const asg of (a as any).assignees) {
-                if (asg.userId) userIdsToNotify.add(asg.userId);
+          if (meeting.actionItems && Array.isArray(meeting.actionItems)) {
+            for (const a of meeting.actionItems) {
+              if (a.assignedToId) userIdsToNotify.add(a.assignedToId);
+              if ((a as any).assignees && Array.isArray((a as any).assignees)) {
+                for (const asg of (a as any).assignees) {
+                  if (asg.userId) userIdsToNotify.add(asg.userId);
+                }
               }
             }
           }
-        }
 
-        const meetingDate = new Date(meeting.date).toLocaleDateString("en-US", {
-          weekday: "short",
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        });
-
-        const timeRange =
-          meeting.startTime && meeting.endTime
-            ? ` from ${meeting.startTime} to ${meeting.endTime}`
-            : "";
-
-        const notifications = Array.from(userIdsToNotify).map((userId) => ({
-          userId,
-          meetingId: meeting.id,
-          type: "MEETING_CANCELLED",
-          title: "Meeting Cancelled",
-          message: `The meeting "${meeting.title}" (${meeting.code}) scheduled for ${meetingDate}${timeRange} has been cancelled.`,
-          link: `/meetings/${meeting.id}`,
-          isRead: false,
-        }));
-
-        if (notifications.length > 0) {
-          await prisma.notification.createMany({
-            data: notifications,
+          const meetingDate = new Date(meeting.date).toLocaleDateString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
           });
-        }
-      } catch (notifErr) {
-        console.error("Failed to generate cancellation notifications:", notifErr);
-      }
-    }
 
-    // ── Email: Cancellation — sent to participants (excluding the user cancelling) ──
-    if (existing.status !== "CANCELLED" && status === "CANCELLED") {
-      const cancelledByUser = await prisma.user.findUnique({
-        where: { id: req.user!.userId },
-        select: { name: true, email: true },
-      });
-      const allRecipientIds = new Set<string>();
-      if (meeting.organizerId && meeting.organizerId !== req.user!.userId) allRecipientIds.add(meeting.organizerId);
-      if (meeting.participants && Array.isArray(meeting.participants)) {
-        for (const p of meeting.participants) {
-          if (p.userId && p.userId !== req.user!.userId) allRecipientIds.add(p.userId);
+          const timeRange =
+            meeting.startTime && meeting.endTime
+              ? ` from ${meeting.startTime} to ${meeting.endTime}`
+              : "";
+
+          const notifications = Array.from(userIdsToNotify).map((userId) => ({
+            userId,
+            meetingId: meeting.id,
+            type: "MEETING_CANCELLED",
+            title: "Meeting Cancelled",
+            message: `The meeting "${meeting.title}" (${meeting.code}) scheduled for ${meetingDate}${timeRange} has been cancelled.`,
+            link: `/meetings/${meeting.id}`,
+            isRead: false,
+          }));
+
+          if (notifications.length > 0) {
+            await prisma.notification.createMany({
+              data: notifications,
+            });
+          }
+        } catch (notifErr) {
+          console.error("Failed to generate cancellation notifications:", notifErr);
         }
       }
-      const cancelRecipients = await prisma.user.findMany({
-        where: { id: { in: Array.from(allRecipientIds) } },
-        select: { name: true, email: true },
-      });
-      const cancelDateStr = new Date(meeting.date).toLocaleDateString("en-US", {
-        weekday: "long", year: "numeric", month: "long", day: "numeric",
-      });
-      sendMeetingCancellationEmail({
-        recipients: cancelRecipients
-          .filter(u => !!u.email && (!cancelledByUser?.email || u.email.trim().toLowerCase() !== cancelledByUser.email.trim().toLowerCase()))
-          .map(u => ({ email: u.email!, name: u.name || "" })),
-        meetingTitle: meeting.title,
-        meetingDate: cancelDateStr,
-        startTime: meeting.startTime,
-        endTime: meeting.endTime,
-        cancelledByName: cancelledByUser?.name || "Administrator",
-        meetingId: meeting.id,
-      }).catch(console.error);
-    }
 
-    res.json(meeting);
-  } catch {
-    res.status(404).json({ error: "Meeting not found." });
-  }
-});
+      // Notify participants and organizer if meeting status is PENDING_SIGNATURES
+      if (status === "PENDING_SIGNATURES") {
+        try {
+          const signedUserIds = new Set<string>(
+            (meeting.participantSignatures || []).map((s: any) => (s.userId || s.user?.id) as string).filter(Boolean)
+          );
+          const participantUserIds = (meeting.participants || []).map((p: any) => p.userId || p.user?.id).filter(Boolean);
+
+          await createSignatureRequestNotifications(
+            meeting.id,
+            meeting.title,
+            meeting.organizerId,
+            participantUserIds,
+            signedUserIds
+          );
+        } catch (notifErr) {
+          console.error("Failed to generate signature request notifications on status update:", notifErr);
+        }
+      }
+
+      // ── Email: Cancellation — sent to participants (excluding the user cancelling) ──
+      if (existing.status !== "CANCELLED" && status === "CANCELLED") {
+        const cancelledByUser = await prisma.user.findUnique({
+          where: { id: req.user!.userId },
+          select: { name: true, email: true },
+        });
+        const allRecipientIds = new Set<string>();
+        if (meeting.organizerId && meeting.organizerId !== req.user!.userId) allRecipientIds.add(meeting.organizerId);
+        if (meeting.participants && Array.isArray(meeting.participants)) {
+          for (const p of meeting.participants) {
+            if (p.userId && p.userId !== req.user!.userId) allRecipientIds.add(p.userId);
+          }
+        }
+        const cancelRecipients = await prisma.user.findMany({
+          where: { id: { in: Array.from(allRecipientIds) } },
+          select: { name: true, email: true },
+        });
+        const cancelDateStr = new Date(meeting.date).toLocaleDateString("en-US", {
+          weekday: "long", year: "numeric", month: "long", day: "numeric",
+        });
+        sendMeetingCancellationEmail({
+          recipients: cancelRecipients
+            .filter(u => !!u.email && (!cancelledByUser?.email || u.email.trim().toLowerCase() !== cancelledByUser.email.trim().toLowerCase()))
+            .map(u => ({ email: u.email!, name: u.name || "" })),
+          meetingTitle: meeting.title,
+          meetingDate: cancelDateStr,
+          startTime: meeting.startTime,
+          endTime: meeting.endTime,
+          cancelledByName: cancelledByUser?.name || "Administrator",
+          meetingId: meeting.id,
+        }).catch(console.error);
+      }
+
+      res.json(meeting);
+    } catch {
+      res.status(404).json({ error: "Meeting not found." });
+    }
+  });
 
 // ---------- Delete Meeting ----------
 router.delete(
@@ -1136,6 +1146,71 @@ router.delete(
 );
 
 // ---------- Signing Workflow ----------
+
+/**
+ * Dispatch in-app MEETING_SIGN_REQUEST notifications to all required signers
+ * (all participants + the meeting organizer) who have not yet submitted their signature.
+ * (In-app notification only via notification bell).
+ */
+async function createSignatureRequestNotifications(
+  meetingId: string,
+  meetingTitle: string,
+  organizerId: string | null,
+  participantUserIds: string[],
+  signedUserIds: Set<string>
+): Promise<number> {
+  try {
+    const requiredSignerIds = new Set<string>();
+    for (const uid of participantUserIds) {
+      if (uid && typeof uid === "string") requiredSignerIds.add(uid);
+    }
+    if (organizerId && typeof organizerId === "string") {
+      requiredSignerIds.add(organizerId);
+    }
+
+    const pendingSignerIds = Array.from(requiredSignerIds).filter(
+      (uid) => !signedUserIds.has(uid)
+    );
+
+    if (pendingSignerIds.length === 0) return 0;
+
+    // Remove any previous unread MEETING_SIGN_REQUEST for this meeting to prevent duplicate clutter
+    // and guarantee the new notification appears at the top of the user's notification list
+    await prisma.notification.deleteMany({
+      where: {
+        meetingId,
+        type: "MEETING_SIGN_REQUEST",
+        userId: { in: pendingSignerIds },
+        isRead: false,
+      },
+    }).catch(() => {});
+
+    // Create fresh in-app notification for each pending signer
+    const notifData = pendingSignerIds.map((userId) => ({
+      userId,
+      meetingId,
+      type: "MEETING_SIGN_REQUEST",
+      title: "Signature Requested",
+      message: `Your digital signature is required for the meeting: "${meetingTitle}".`,
+      link: `/meetings/${meetingId}?tab=minutes`,
+      isRead: false,
+    }));
+
+    const result = await prisma.notification.createMany({
+      data: notifData,
+    });
+
+    console.log(
+      `[SignatureRequest Notifications] Created ${result.count} in-app notification(s) for meeting ${meetingId}. Signers:`,
+      pendingSignerIds
+    );
+
+    return result.count;
+  } catch (err) {
+    console.error("[SignatureRequest Notifications] Error creating notifications:", err);
+    return 0;
+  }
+}
 
 // POST /:id/request-signatures  — move meeting to PENDING_SIGNATURES phase (idempotent)
 router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
@@ -1173,19 +1248,17 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
     include: detailInclude,
   });
 
-  // Notify participants who haven't signed yet via in-app notification only (NO email dispatched for signature requests)
-  const signedUserIds = new Set((meeting.participantSignatures || []).map((s: any) => s.userId));
-  const notifData = meeting.participants
-    .filter(p => p.userId !== req.user!.userId && !signedUserIds.has(p.userId))
-    .map(p => ({
-      userId: p.userId,
-      meetingId: meeting.id,
-      type: "MEETING_SIGN_REQUEST",
-      title: "Signature Requested",
-      message: `Your digital signature is required for the meeting: "${meeting.title}".`,
-      link: `/meetings/${meeting.id}?tab=overview`,
-    }));
-  if (notifData.length) await prisma.notification.createMany({ data: notifData });
+  // Notify all unsigned signers (participants + organizer) via in-app notification
+  const signedUserIds = new Set<string>((updated.participantSignatures || []).map((s: any) => s.userId as string));
+  const participantUserIds = (updated.participants || []).map((p: any) => p.userId);
+
+  await createSignatureRequestNotifications(
+    meeting.id,
+    meeting.title,
+    meeting.organizerId,
+    participantUserIds,
+    signedUserIds
+  );
 
   res.json(updated);
 });
@@ -1338,8 +1411,8 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
   const isForceApproved = !allSigned && !!forceApprove;
   const recordedBypassReason = isForceApproved
     ? (typeof forceReason === "string" && forceReason.trim()
-        ? forceReason.trim()
-        : "Administrative override: approved before all attendee signatures collected")
+      ? forceReason.trim()
+      : "Administrative override: approved before all attendee signatures collected")
     : null;
 
   // Also record the approving admin/reviewer signature in participantSignatures if not already present
@@ -1415,6 +1488,11 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
   }
 
   const { targetStatus = "IN_PROGRESS", reason } = req.body || {};
+  if (!reason || typeof reason !== "string" || !reason.trim()) {
+    return res.status(400).json({
+      error: "A valid reason is strictly required to unlock this meeting.",
+    });
+  }
   const validTargetStatus = ["IN_PROGRESS", "COMPLETED", "DRAFT", "SCHEDULED"].includes(targetStatus)
     ? targetStatus
     : "IN_PROGRESS";

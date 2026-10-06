@@ -88,8 +88,8 @@ export default function DecisionsPage() {
             const completed = d.actionItems.filter((a) => a.status === "COMPLETED").length;
             const isApproved = d.meeting?.status === "APPROVED";
             const isMeetingLocked = isLockedMeeting(d.meeting?.status);
-            // Approved meetings are strictly read-only until unlocked
-            const canModifyDecision = !isApproved && canEditDecision(d) && (!isMeetingLocked || hasAdminOverride);
+            // Locked meetings are strictly read-only until unlocked
+            const canModifyDecision = !isMeetingLocked && canEditDecision(d);
 
             return (
               <div key={d.id} className="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">

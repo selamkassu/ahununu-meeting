@@ -216,7 +216,10 @@ export function Header({
                           {n.link && (
                             <Link
                               to={n.link}
-                              onClick={() => setNotifOpen(false)}
+                              onClick={() => {
+                                markRead(n.id);
+                                setNotifOpen(false);
+                              }}
                               className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium ${
                                 isCancelled ? "text-rose-600 hover:text-rose-700" : "text-brand"
                               } hover:underline`}

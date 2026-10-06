@@ -139,10 +139,9 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
     select: { id: true, title: true, status: true, departmentId: true, organizerId: true },
   });
   await ensureUserPermissions(req);
-  const hasOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-  if (meeting && isLockedMeetingStatus(meeting.status) && !hasOverride) {
+  if (meeting && isLockedMeetingStatus(meeting.status)) {
     return res.status(403).json({
-      error: `Meeting is locked (${meeting.status.replace("_", " ")}). Cannot assign new action items unless authorized with ADMIN_OVERRIDE permission.`,
+      error: `Meeting is locked (${meeting.status.replace("_", " ")}). Cannot assign new action items. The meeting must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
     });
   }
 
@@ -332,10 +331,9 @@ router.post("/batch", requirePermission("action_items:create"), async (req: Auth
   if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
   await ensureUserPermissions(req);
-  const hasOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-  if (isLockedMeetingStatus(meeting.status) && !hasOverride) {
+  if (isLockedMeetingStatus(meeting.status)) {
     return res.status(403).json({
-      error: `Meeting is locked (${meeting.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE.`,
+      error: `Meeting is locked (${meeting.status.replace("_", " ")}). The meeting must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
     });
   }
 
@@ -552,29 +550,22 @@ router.put("/:id", async (req: AuthedRequest, res) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid action item update." });
 
-  // Enforce meeting lock
-  if (existing.meeting?.status === "CANCELLED") {
-    return res.status(403).json({
-      error: "This meeting is cancelled. All records, including action item status, are locked from editing.",
-    });
-  }
+  // Enforce meeting lock: Action items are post-meeting operational deliverables.
+  // Their status and progress can be updated at any time even when the meeting is locked.
+  // Structural changes (title, description, deadline, assignees) remain restricted when locked without override.
+  const hasStructuralEdits = Boolean(
+    parsed.data.title !== undefined ||
+    parsed.data.description !== undefined ||
+    parsed.data.deadline !== undefined ||
+    parsed.data.priority !== undefined ||
+    parsed.data.assignedToId !== undefined ||
+    parsed.data.assigneeIds !== undefined
+  );
 
-  if (existing.meeting && !hasOverride) {
-    if (existing.meeting.status === "COMPLETED" || existing.meeting.status === "APPROVED") {
-      const { priority, deadline, title, description, assignedToId, assigneeIds } = parsed.data;
-      if (
-        priority !== undefined ||
-        deadline !== undefined ||
-        title !== undefined ||
-        description !== undefined ||
-        assignedToId !== undefined ||
-        assigneeIds !== undefined
-      ) {
-        return res.status(403).json({
-          error: `Meeting is ${existing.meeting.status.toLowerCase()}. Action items run independently, but only their status can be updated.`,
-        });
-      }
-    }
+  if (existing.meeting && (isLockedMeetingStatus(existing.meeting.status) || existing.meeting.status === "COMPLETED") && hasStructuralEdits) {
+    return res.status(403).json({
+      error: `Meeting is ${existing.meeting.status.toLowerCase().replace("_", " ")}. Action item details cannot be edited once the meeting is completed or locked. Only action item status updates are allowed.`,
+    });
   }
 
   const { deadline, assigneeIds, ...rest } = parsed.data;
@@ -656,15 +647,9 @@ router.delete(
     }
 
     // Enforce meeting lock
-    if (existing.meeting?.status === "CANCELLED") {
+    if (existing.meeting && isLockedMeetingStatus(existing.meeting.status)) {
       return res.status(403).json({
-        error: "This meeting is cancelled. All records are locked from editing.",
-      });
-    }
-
-    if (existing.meeting && isLockedMeetingStatus(existing.meeting.status) && !hasDeleteOverride) {
-      return res.status(403).json({
-        error: `Meeting is locked (${existing.meeting.status.replace("_", " ")}). Cannot delete action items unless authorized with ADMIN_OVERRIDE permission.`,
+        error: `Meeting is locked (${existing.meeting.status.replace("_", " ")}). Action items cannot be deleted until the meeting is unlocked by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
       });
     }
 
