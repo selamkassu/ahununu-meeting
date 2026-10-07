@@ -8,6 +8,7 @@ import {
   Clock,
   CheckCircle2,
   MailOpen,
+  Signature,
 } from "lucide-react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
@@ -160,18 +161,33 @@ export function Header({
                     </p>
                   </div>
                 ) : (
-                  notifications.slice(0, 10).map((n) => {
+                  notifications.slice(0, 15).map((n) => {
                     const isCancelled = n.type === "MEETING_CANCELLED";
+                    const isSignRequest = n.type === "MEETING_SIGN_REQUEST";
                     return (
                     <div
                       key={n.id}
                       className={`group relative px-4 py-3.5 transition-colors hover:bg-slate2-50/80 ${
-                        !n.isRead ? (isCancelled ? "bg-rose-50/50" : "bg-brand/5") : ""
+                        !n.isRead
+                          ? isCancelled
+                            ? "bg-rose-50/50"
+                            : isSignRequest
+                              ? "bg-amber-50/60 border-l-2 border-l-amber-500"
+                              : "bg-brand/5"
+                          : ""
                       }`}
                     >
                       {/* Unread dot indicator */}
                       {!n.isRead && (
-                        <span className={`absolute left-1.5 top-4 h-1.5 w-1.5 rounded-full ${isCancelled ? "bg-rose-500" : "bg-brand"}`} />
+                        <span
+                          className={`absolute left-1.5 top-4 h-1.5 w-1.5 rounded-full ${
+                            isCancelled
+                              ? "bg-rose-500"
+                              : isSignRequest
+                                ? "bg-amber-500"
+                                : "bg-brand"
+                          }`}
+                        />
                       )}
 
                       <div className="flex items-start justify-between gap-3">
@@ -179,14 +195,17 @@ export function Header({
                           {/* Type label + time */}
                           <div className="flex items-center gap-2 mb-0.5">
                             <span
-                              className={`text-[10px] font-semibold uppercase tracking-wide ${
+                              className={`text-[10px] font-semibold uppercase tracking-wide inline-flex items-center gap-1 ${
                                 !n.isRead
                                   ? isCancelled
                                     ? "text-rose-600 font-bold"
-                                    : "text-brand"
+                                    : isSignRequest
+                                      ? "text-amber-800 font-bold"
+                                      : "text-brand"
                                   : "text-slate2-400"
                               }`}
                             >
+                              {isSignRequest && <Signature size={11} className="text-amber-600" />}
                               {TYPE_LABELS[n.type] || n.type}
                             </span>
                             <span className="text-[10px] text-slate2-400">
@@ -200,7 +219,9 @@ export function Header({
                               !n.isRead
                                 ? isCancelled
                                   ? "text-rose-950 font-bold"
-                                  : "text-slate2-900"
+                                  : isSignRequest
+                                    ? "text-amber-950 font-bold"
+                                    : "text-slate2-900"
                                 : "text-slate2-600"
                             }`}
                           >
@@ -220,12 +241,16 @@ export function Header({
                                 markRead(n.id);
                                 setNotifOpen(false);
                               }}
-                              className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium ${
-                                isCancelled ? "text-rose-600 hover:text-rose-700" : "text-brand"
+                              className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold ${
+                                isCancelled
+                                  ? "text-rose-600 hover:text-rose-700"
+                                  : isSignRequest
+                                    ? "text-amber-800 hover:text-amber-900"
+                                    : "text-brand"
                               } hover:underline`}
                             >
-                              <CalendarDays size={11} />
-                              View Meeting
+                              {isSignRequest ? <Signature size={11} /> : <CalendarDays size={11} />}
+                              {isSignRequest ? "Review & Sign Minutes" : "View Meeting"}
                             </Link>
                           )}
                         </div>

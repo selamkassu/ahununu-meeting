@@ -985,7 +985,7 @@ router.put(
         }
       }
 
-      if (status === "PENDING_SIGNATURES" && !existing.signaturesRequestedAt) {
+      if (status === "PENDING_SIGNATURES") {
         dataToUpdate.signaturesRequestedAt = new Date();
       }
       dataToUpdate.status = status;
@@ -1059,10 +1059,8 @@ router.put(
       // Notify participants and organizer if meeting status is PENDING_SIGNATURES
       if (status === "PENDING_SIGNATURES") {
         try {
-          const signedUserIds = new Set<string>(
-            (meeting.participantSignatures || []).map((s: any) => (s.userId || s.user?.id) as string).filter(Boolean)
-          );
-          const participantUserIds = (meeting.participants || []).map((p: any) => p.userId || p.user?.id).filter(Boolean);
+          const signedUserIds = new Set<string>((meeting.participantSignatures || []).map((s: any) => s.userId as string));
+          const participantUserIds = (meeting.participants || []).map((p: any) => p.userId);
 
           await createSignatureRequestNotifications(
             meeting.id,
@@ -1220,6 +1218,7 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
       id: true,
       status: true,
       organizerId: true,
+      departmentId: true,
       title: true,
       participants: { select: { userId: true } },
       participantSignatures: { select: { userId: true } },
@@ -1227,8 +1226,21 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
   });
   if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-  const authorized = await canApproveMeeting(meeting.organizerId, req);
-  if (!authorized) return res.status(403).json({ error: "Only organizers or administrators can initiate the signing phase." });
+  await ensureUserPermissions(req);
+  const isOrganizer = meeting.organizerId === req.user!.userId;
+  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+  const canApprove =
+    req.userPermissions?.includes("meetings:approve") ||
+    req.userPermissions?.includes("meetings:certify_lock");
+  const canEdit = checkOwnershipAccess(req, "meetings", "edit", {
+    departmentId: meeting.departmentId,
+    ownerId: meeting.organizerId,
+    participantIds: meeting.participants.map((p) => p.userId),
+  });
+
+  if (!isOrganizer && !hasAdminOverride && !canApprove && !canEdit) {
+    return res.status(403).json({ error: "Only organizers, department managers, or administrators can initiate the signing phase." });
+  }
 
   if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
   if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot request signatures for a cancelled meeting." });
@@ -1493,7 +1505,13 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
       error: "A valid reason is strictly required to unlock this meeting.",
     });
   }
-  const validTargetStatus = ["IN_PROGRESS", "COMPLETED", "DRAFT", "SCHEDULED"].includes(targetStatus)
+  const validTargetStatus = [
+    "IN_PROGRESS",
+    "COMPLETED",
+    "DRAFT",
+    "SCHEDULED",
+    "PENDING_SIGNATURES",
+  ].includes(targetStatus)
     ? targetStatus
     : "IN_PROGRESS";
 
@@ -1530,14 +1548,36 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
       ? reason.trim()
       : "Administrative override: meeting unlocked for modification";
 
+  const updateData: any = {
+    status: validTargetStatus,
+    bypassReason: `Unlocked by Administrator: ${recordedReason}`,
+  };
+  if (validTargetStatus === "PENDING_SIGNATURES") {
+    updateData.signaturesRequestedAt = new Date();
+  }
+
   const updated = await (prisma.meeting as any).update({
     where: { id: req.params.id },
-    data: {
-      status: validTargetStatus,
-      bypassReason: `Unlocked by Administrator: ${recordedReason}`,
-    },
+    data: updateData,
     include: detailInclude,
   });
+
+  if (validTargetStatus === "PENDING_SIGNATURES") {
+    try {
+      const signedUserIds = new Set<string>((updated.participantSignatures || []).map((s: any) => s.userId as string));
+      const participantUserIds = (updated.participants || []).map((p: any) => p.userId);
+
+      await createSignatureRequestNotifications(
+        updated.id,
+        updated.title,
+        updated.organizerId,
+        participantUserIds,
+        signedUserIds
+      );
+    } catch (notifErr) {
+      console.error("Failed to generate signature request notifications on unlock:", notifErr);
+    }
+  }
 
   res.json(updated);
 });

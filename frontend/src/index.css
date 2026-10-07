@@ -64,6 +64,22 @@ textarea {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   Popover & Floating Card Animation
+   ───────────────────────────────────────────────────────────── */
+@keyframes popoverFadeIn {
+  from {
+    transform: translateY(-3px) scale(0.98);
+  }
+  to {
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-popover-in {
+  animation: popoverFadeIn 130ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ─────────────────────────────────────────────────────────────
    Print Styles — A4 Layout & Department Performance
    ───────────────────────────────────────────────────────────── */
 @media print {

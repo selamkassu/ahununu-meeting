@@ -117,3 +117,6 @@ export function EmptyState({ title, description, action }: { title: string; desc
 export function CodeChip({ children }: { children: React.ReactNode }) {
   return <span className="code-chip">{children}</span>;
 }
+
+export { RecordHistoryPopover } from "./RecordHistoryPopover";
+export type { StatusHistoryEntry, RecordHistoryPopoverProps } from "./RecordHistoryPopover";

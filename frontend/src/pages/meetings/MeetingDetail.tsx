@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef } from "react";
+import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import { useParams, Link, useSearchParams } from "react-router-dom";
 import {
   MapPin,
@@ -45,6 +45,7 @@ import {
 import { api, ApiError, getToken, buildUrl } from "../../api/client";
 import { RichTextEditor } from "../../components/editor/RichTextEditor";
 import { RichTextRenderer } from "../../components/editor/RichTextRenderer";
+import { RecordHistoryPopover } from "../../components/ui/RecordHistoryPopover";
 import { printMeetingMinutes } from "../../utils/printUtility";
 import {
   exportMeetingMinutesToPdf,
@@ -158,12 +159,12 @@ const STATUS_CONFIG: Record<
   IN_PROGRESS: {
     bg: "bg-amber-50 text-amber-800",
     border: "border-amber-200 hover:border-amber-300",
-    dot: "bg-amber-500 animate-pulse",
+    dot: "bg-amber-500",
   },
   PENDING_SIGNATURES: {
     bg: "bg-orange-50 text-orange-800",
     border: "border-orange-200 hover:border-orange-300",
-    dot: "bg-orange-500 animate-pulse",
+    dot: "bg-orange-500",
   },
   READY_FOR_APPROVAL: {
     bg: "bg-teal-50 text-teal-800",
@@ -197,11 +198,23 @@ export default function MeetingDetail() {
   const [meeting, setMeeting] = useState<MeetingDetailType | null>(null);
   const [tab, setTab] = useState<TabKey>(tabParam || "overview");
 
+  const handleTabChange = (newTab: TabKey) => {
+    setTab(newTab);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("tab", newTab);
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
   useEffect(() => {
-    if (tabParam) {
+    if (tabParam && tabParam !== tab) {
       setTab(tabParam);
     }
-  }, [tabParam]);
+  }, [tabParam, tab]);
   const [loading, setLoading] = useState(true);
 
   const isLocked = isLockedMeeting(meeting?.status);
@@ -421,7 +434,19 @@ export default function MeetingDetail() {
 
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(async () => {
+    if (!id) return;
+    try {
+      const data = await api.get<MeetingDetailType>(`/meetings/${id}`);
+      setMeeting(data);
+      setLoadError(null);
+    } catch (err: any) {
+      console.error("Failed to load meeting details:", err);
+      setLoadError(err.message || "Failed to load meeting details.");
+    }
+  }, [id]);
+
+  useEffect(() => {
     if (!id) return;
     setLoading(true);
     setLoadError(null);
@@ -437,9 +462,7 @@ export default function MeetingDetail() {
         setMeeting(null);
       })
       .finally(() => setLoading(false));
-  };
-
-  useEffect(load, [id]);
+  }, [id]);
 
   // Handle RSVP action triggered from Email action buttons (?rsvp=ACCEPTED or ?rsvp=REJECTED)
   const rsvpHandledRef = useRef(false);
@@ -561,7 +584,7 @@ export default function MeetingDetail() {
     }
   };
 
-  if (loading) {
+  if (loading && !meeting) {
     return <div className="h-64 animate-pulse rounded-xl bg-slate2-100" />;
   }
   if (!meeting) {
@@ -611,15 +634,19 @@ export default function MeetingDetail() {
       </Link>
 
       {/* Executive Command Header Card */}
-      <Card className="overflow-hidden border border-slate2-200/90 shadow-sm bg-white">
+      <Card className="border border-slate2-200/90 shadow-sm bg-white">
         {/* Signature brand accent bar */}
-        <div className="h-1 w-full bg-gradient-to-r from-brand via-brand-light to-accent" />
+        <div className="h-1 w-full bg-gradient-to-r from-brand via-brand-light to-accent rounded-t-xl" />
 
         <div className="p-5 sm:p-6 space-y-4">
           {/* Top Classification Row: Code, Department, Priority, Status, Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate2-100">
             <div className="flex flex-wrap items-center gap-2">
               <CodeChip>{meeting.code}</CodeChip>
+              <RecordHistoryPopover
+                recordId={meeting.code}
+                meeting={meeting}
+              />
               {meeting.department?.name && (
                 <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate2-100 text-slate2-700 font-medium text-xs">
                   {meeting.department.name}
@@ -661,6 +688,27 @@ export default function MeetingDetail() {
                 >
                   <Unlock size={13} className="text-amber-700" />
                   <span>Unlock Meeting</span>
+                </Button>
+              )}
+
+              {/* Request Signatures Button (Prominent in Command Bar) */}
+              {canManage && (meeting.status === "IN_PROGRESS" || meeting.status === "COMPLETED" || meeting.status === "PENDING_SIGNATURES") && (
+                <Button
+                  variant="secondary"
+                  type="button"
+                  onClick={handleRequestSignatures}
+                  disabled={requestingSignatures}
+                  className="text-xs py-1.5 px-3 inline-flex items-center gap-1.5 bg-brand/5 hover:bg-brand/10 border border-brand/30 font-semibold text-brand-dark shadow-2xs transition-all cursor-pointer"
+                  title="Dispatch in-app signature requests to all unsigned participants"
+                >
+                  <Signature size={13} className="text-brand" />
+                  <span>
+                    {requestingSignatures
+                      ? "Sending..."
+                      : meeting.status === "PENDING_SIGNATURES"
+                        ? "Resend Signatures"
+                        : "Request Signatures"}
+                  </span>
                 </Button>
               )}
 
@@ -1119,7 +1167,7 @@ export default function MeetingDetail() {
           return (
             <button
               key={t.key}
-              onClick={() => setTab(t.key)}
+              onClick={() => handleTabChange(t.key)}
               className={`focus-ring flex items-center gap-2 whitespace-nowrap border-b-2 px-3.5 py-2.5 text-xs sm:text-sm font-semibold transition-all cursor-pointer ${isActive
                 ? "border-brand text-brand bg-brand/[0.03]"
                 : "border-transparent text-slate2-500 hover:text-slate2-800 hover:border-slate2-300"
@@ -1143,7 +1191,7 @@ export default function MeetingDetail() {
       </div>
 
       {tab === "overview" && (
-        <OverviewTab meeting={meeting} onNavigateTab={setTab} />
+        <OverviewTab meeting={meeting} onNavigateTab={handleTabChange} />
       )}
       {tab === "agenda" && (
         <AgendaTab meeting={meeting} canManage={canManage && canEdit} onChange={load} />
@@ -2429,7 +2477,7 @@ function MinutesTab({
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div className="flex items-start gap-3.5">
               <div className="rounded-lg bg-amber-100 p-2.5 text-amber-700 shrink-0">
-                <Clock size={22} className="animate-pulse" />
+                <Clock size={22} className="text-amber-700" />
               </div>
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2 flex-wrap">
