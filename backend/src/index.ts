@@ -3,6 +3,9 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
+import { validateEnv } from "./utils/env";
+
+validateEnv();
 
 import authRoutes from "./routes/auth.routes";
 import departmentsRoutes from "./routes/departments.routes";
@@ -90,3 +93,4 @@ process.on("unhandledRejection", (reason, promise) => {
 process.on("uncaughtException", (error) => {
   console.error("Uncaught Exception:", error);
 });
+ 

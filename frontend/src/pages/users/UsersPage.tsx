@@ -21,6 +21,7 @@ import {
   PauseCircle,
   PlayCircle,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { api, ApiError } from "../../api/client";
 import type { Department, User, UserStatus, RoleListItem } from "../../types";
@@ -71,6 +72,7 @@ export default function UsersPage() {
   const canCreate = hasPermission("users:create");
   const canEdit = hasPermission("users:edit");
   const canManageStatus = hasPermission("users:manage_status");
+  const canDelete = hasPermission("users:delete") || hasPermission("users:manage") || hasPermission("ADMIN_OVERRIDE");
 
   const [users, setUsers] = useState<User[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -87,6 +89,8 @@ export default function UsersPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [viewUser, setViewUser] = useState<User | null>(null);
   const [editUser, setEditUser] = useState<User | null>(null);
+  const [deleteConfirmUser, setDeleteConfirmUser] = useState<User | null>(null);
+  const [deletingUser, setDeletingUser] = useState(false);
   const [lifecycleConfirm, setLifecycleConfirm] = useState<{
     user: User;
     targetStatus: UserStatus;
@@ -157,6 +161,25 @@ export default function UsersPage() {
       });
     } finally {
       setStatusUpdating(false);
+    }
+  };
+
+  const handleDeleteUser = async (user: User) => {
+    setDeletingUser(true);
+    try {
+      await api.delete(`/users/${user.id}`);
+      setDeleteConfirmUser(null);
+      if (viewUser?.id === user.id) setViewUser(null);
+      if (editUser?.id === user.id) setEditUser(null);
+      load();
+    } catch (err: any) {
+      await alert({
+        title: "Cannot Delete User",
+        message: err instanceof ApiError ? err.message : (err?.message || "Failed to delete user."),
+        tone: "danger",
+      });
+    } finally {
+      setDeletingUser(false);
     }
   };
 
@@ -467,6 +490,16 @@ export default function UsersPage() {
                               )}
                             </>
                           )}
+
+                          {canDelete && (
+                            <button
+                              onClick={() => setDeleteConfirmUser(u)}
+                              className="rounded-lg p-1.5 text-slate2-400 hover:bg-rose-50 hover:text-rose-600 transition-colors"
+                              title="Delete user account"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -617,6 +650,52 @@ export default function UsersPage() {
                   : lifecycleConfirm.targetStatus === "SUSPENDED"
                   ? "Suspend User"
                   : "Deactivate User"}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete User Confirmation Dialog */}
+      {deleteConfirmUser && (
+        <Modal
+          open
+          onClose={() => { if (!deletingUser) setDeleteConfirmUser(null); }}
+          title="Confirm User Account Deletion"
+        >
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-lg bg-rose-50/80 border border-rose-200/60 p-3.5">
+              <AlertTriangle className="shrink-0 text-rose-600 mt-0.5" size={20} />
+              <div className="text-xs">
+                <p className="font-semibold text-rose-900">
+                  Are you sure you want to delete {deleteConfirmUser.name}?
+                </p>
+                <p className="mt-1 text-rose-700 leading-relaxed">
+                  Email: <span className="font-mono font-medium">{deleteConfirmUser.email}</span>
+                  <br />
+                  Department: <span className="font-medium">{deleteConfirmUser.department?.name || "Unassigned"}</span>
+                </p>
+                <p className="mt-2 text-rose-800/90 leading-relaxed">
+                  <strong>Notice:</strong> If this user has organized historical meetings, signed certified minutes, or leads a department, deletion will be blocked by system governance to preserve compliance integrity. In that case, consider <em>Suspending</em> or <em>Deactivating</em> the account instead.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-slate2-100 pt-3">
+              <Button
+                variant="secondary"
+                onClick={() => setDeleteConfirmUser(null)}
+                disabled={deletingUser}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => handleDeleteUser(deleteConfirmUser)}
+                disabled={deletingUser}
+                className="bg-rose-600 hover:bg-rose-700 text-white"
+              >
+                {deletingUser ? "Deleting..." : "Permanently Delete User"}
               </Button>
             </div>
           </div>

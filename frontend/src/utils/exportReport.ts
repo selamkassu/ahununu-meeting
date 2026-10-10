@@ -697,7 +697,7 @@ export function exportMeetingMinutesToExcel(meeting: MeetingDetail, minutesConte
       "Name": p.user.name,
       "Email": p.user.email,
       "Role": p.user.role?.name || "Participant",
-      "RSVP": p.status === "ACCEPTED" ? "Accepted" : (p.status === "REJECTED" || p.status === "DECLINED") ? "Rejected" : "Awaiting RSVP",
+      "Invitation Status": p.status === "ACCEPTED" ? "Accepted" : (p.status === "REJECTED" || p.status === "DECLINED") ? "Rejected" : "Awaiting Response",
       "Rejection Reason": p.rejectionReason || "",
       "Attended": p.participated ? "Yes" : "No",
     }));

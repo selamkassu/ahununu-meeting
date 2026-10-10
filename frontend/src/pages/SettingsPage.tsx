@@ -162,7 +162,7 @@ export default function SettingsPage() {
 
             {/* Portal Base URL (APP_URL) */}
             <div className="rounded-xl border border-slate2-200 bg-slate2-50/50 p-4">
-              <span className="text-xs font-medium text-slate2-500">Email RSVP Link URL</span>
+              <span className="text-xs font-medium text-slate2-500">Email Invitation Link URL</span>
               <p className="mt-2 truncate font-mono text-xs font-medium text-slate2-800" title={emailStatus?.appUrl}>
                 {emailStatus?.appUrl || "http://localhost:5173"}
               </p>
@@ -368,7 +368,7 @@ export default function SettingsPage() {
       <Card className="p-5">
         <p className="text-xs text-slate2-500">
           Signed in as <span className="font-medium text-slate2-700">{user?.name}</span> ({user?.email}). Outbound email delivery
-          is integrated with automated RSVP processing and task assignments.
+          is integrated with automated invitation processing and task assignments.
         </p>
       </Card>
     </div>

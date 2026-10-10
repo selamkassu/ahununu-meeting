@@ -148,11 +148,11 @@ async function run() {
   console.log(`Participant 1 in DB: participated=${dbP1?.participated}, status=${dbP1?.status}`);
   console.log(`Participant 2 in DB: participated=${dbP2?.participated}, status=${dbP2?.status}`);
 
-  if (dbP1?.participated !== true || dbP1?.status !== "ATTENDED") {
-    throw new Error("Participant 1 was not recorded as ATTENDED in the database!");
+  if (dbP1?.participated !== true) {
+    throw new Error("Participant 1 was not recorded as participated in the database!");
   }
-  if (dbP2?.participated !== false || dbP2?.status !== "ABSENT") {
-    throw new Error("Participant 2 was not recorded as ABSENT / NOT ATTENDED in the database!");
+  if (dbP2?.participated !== false) {
+    throw new Error("Participant 2 was not recorded as NOT participated in the database!");
   }
   console.log("PASS: Meeting attendance correctly finalized and verified in the database!");
 

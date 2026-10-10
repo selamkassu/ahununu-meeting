@@ -2,8 +2,9 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
-import { requireAuth, requirePermission } from "../middleware/auth";
+import { requireAuth, requirePermission, AuthedRequest } from "../middleware/auth";
 import { USER_STATUSES } from "../utils/enums";
+import { logAuditEvent } from "../utils/audit";
 
 const router = Router();
 router.use(requireAuth);
@@ -180,6 +181,84 @@ router.patch("/:id/status", requirePermission("users:manage_status"), async (req
     res.json(safeUser(user));
   } catch {
     res.status(404).json({ error: "User not found." });
+  }
+});
+
+// ---------- Delete User (with relationship safety checks & audit logging) ----------
+router.delete("/:id", requirePermission("users:delete"), async (req: AuthedRequest, res) => {
+  const targetId = req.params.id;
+  if (req.user?.userId === targetId) {
+    return res.status(400).json({ error: "You cannot delete your own account." });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: targetId },
+    include: {
+      _count: {
+        select: {
+          organizedMeetings: true,
+          approvedMeetings: true,
+          minutesAuthored: true,
+          participantSignatures: true,
+          headOfDepartments: true,
+          assignedActions: true,
+          actionAssignments: true,
+          participations: true,
+        },
+      },
+    },
+  });
+
+  if (!user) {
+    return res.status(404).json({ error: "User not found." });
+  }
+
+  const counts = user._count;
+  const blockers: string[] = [];
+  if (counts.organizedMeetings > 0) blockers.push(`${counts.organizedMeetings} organized meeting(s)`);
+  if (counts.approvedMeetings > 0) blockers.push(`${counts.approvedMeetings} approved meeting(s)`);
+  if (counts.minutesAuthored > 0) blockers.push(`${counts.minutesAuthored} authored meeting minutes`);
+  if (counts.participantSignatures > 0) blockers.push(`${counts.participantSignatures} formal digital signature(s)`);
+  if (counts.headOfDepartments > 0) blockers.push(`Department Head role`);
+
+  if (blockers.length > 0) {
+    return res.status(409).json({
+      error: `Cannot permanently delete user because they are tied to historical corporate records (${blockers.join(", ")}). To preserve legal auditability, please change their status to DEACTIVATED or SUSPENDED instead.`,
+      isHistoricalRecord: true,
+    });
+  }
+
+  try {
+    // Delete non-blocking relations in a transaction before removing user
+    await prisma.$transaction(async (tx) => {
+      // Clean up action assignments
+      await tx.actionItemAssignee.deleteMany({ where: { userId: targetId } });
+      // Clear assignedToId on pending action items
+      await tx.actionItem.updateMany({
+        where: { assignedToId: targetId },
+        data: { assignedToId: null },
+      });
+      // Delete user's notifications
+      await tx.notification.deleteMany({ where: { userId: targetId } });
+      // Delete participations
+      await tx.meetingParticipant.deleteMany({ where: { userId: targetId } });
+      // Finally delete user record
+      await tx.user.delete({ where: { id: targetId } });
+    });
+
+    logAuditEvent({
+      level: "INFO",
+      action: "USER_DELETED",
+      actorId: req.user?.userId,
+      resource: "User",
+      resourceId: targetId,
+      details: { name: user.name, email: user.email },
+    });
+
+    res.status(204).send();
+  } catch (err: any) {
+    console.error("Failed to delete user:", err);
+    res.status(500).json({ error: "Failed to delete user account." });
   }
 });
 

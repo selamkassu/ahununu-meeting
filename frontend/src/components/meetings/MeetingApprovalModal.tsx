@@ -226,6 +226,11 @@ export function MeetingApprovalModal({
       return;
     }
 
+    if (!allSigned && forceSubmit && forceReason.trim().length < 5) {
+      setError("A detailed justification reason (minimum 5 characters) is required for audit logging when force-approving without all attendee signatures.");
+      return;
+    }
+
     setSubmitting(true);
     try {
       const updated = await onApproveApi(signatureDataUrl, !allSigned && forceSubmit, forceReason);
@@ -540,11 +545,11 @@ export function MeetingApprovalModal({
               </div>
             </label>
 
-            {/* Override Reason (Optional) */}
+            {/* Override Reason (Mandatory for Force Approval) */}
             {forceSubmit && (
               <div className="pt-1">
                 <label className="block text-[11px] font-semibold text-amber-900 mb-1">
-                  Reason for Administrative Force Approval <span className="font-normal text-amber-700">(Optional)</span>
+                  Reason for Administrative Force Approval <span className="font-bold text-rose-600">* (Mandatory for Audit Trail)</span>
                 </label>
                 <input
                   type="text"
@@ -552,7 +557,11 @@ export function MeetingApprovalModal({
                   onChange={(e) => setForceReason(e.target.value)}
                   placeholder="e.g. Quorum satisfied; remaining participants unavailable or verbal approval obtained"
                   className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs text-slate2-800 placeholder:text-slate2-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-2xs"
+                  required
                 />
+                {forceReason.trim().length > 0 && forceReason.trim().length < 5 && (
+                  <p className="text-[11px] text-rose-600 mt-1 font-medium">Please enter at least 5 characters for the audit reason.</p>
+                )}
               </div>
             )}
           </div>
@@ -596,7 +605,7 @@ export function MeetingApprovalModal({
               submitting
               || !agreed
               || (tab === "draw" ? !hasDrawn : !typedName.trim())
-              || (!allSigned && !forceSubmit)
+              || (!allSigned && (!forceSubmit || forceReason.trim().length < 5))
             }
             className={`text-xs py-2 px-5 shadow-sm inline-flex items-center gap-2 font-semibold text-white transition-all ${
               !allSigned && forceSubmit

@@ -15,14 +15,17 @@ import {
   CheckCircle2,
   FileText,
   Filter,
+  Pencil,
 } from "lucide-react";
 import { api } from "../../api/client";
 import type { MeetingListItem, Department } from "../../types";
+import { isLockedMeeting } from "../../types";
 import { Card, EmptyState, Button, inputClass, Avatar } from "../../components/ui/Primitives";
 import { CodeChip } from "../../components/ui/Primitives";
 import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { useAuth } from "../../context/AuthContext";
 import MeetingCreateModal from "./MeetingCreateModal";
+import MeetingEditModal from "./MeetingEditModal";
 
 const STATUS_FILTERS = [
   { value: "", label: "All Sessions" },
@@ -45,8 +48,26 @@ export default function MeetingList() {
   const [departmentId, setDepartmentId] = useState(() => searchParams.get("departmentId") || "");
   const [q, setQ] = useState(() => searchParams.get("q") || "");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingMeeting, setEditingMeeting] = useState<MeetingListItem | null>(null);
+  const [feedbackToast, setFeedbackToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const canCreate = hasPermission("meetings:create");
+
+  const canEditMeeting = (m: MeetingListItem) => {
+    if (hasPermission("meetings:edit:all") || hasPermission("ADMIN_OVERRIDE")) return true;
+    if (hasPermission("meetings:edit:dept") && user?.department?.id === m.department?.id) return true;
+    if (hasPermission("meetings:edit:own") && user?.id === m.organizer?.id) return true;
+    return false;
+  };
+
+  const handleMeetingUpdated = (updated: any) => {
+    setFeedbackToast({
+      message: `Session "${updated.title}" (${updated.code}) updated successfully.`,
+      type: "success",
+    });
+    setTimeout(() => setFeedbackToast(null), 4000);
+    load();
+  };
 
   const load = () => {
     setLoading(true);
@@ -525,9 +546,27 @@ export default function MeetingList() {
                                 <StatusBadge status={m.status} />
                               </div>
 
-                              <div className="hidden sm:flex items-center gap-1 text-xs font-semibold text-slate2-400 group-hover:text-brand transition-colors pt-1">
-                                <span>Open</span>
-                                <ChevronRight size={13} />
+                              <div className="flex items-center gap-2 pt-1">
+                                {canEditMeeting(m) && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setEditingMeeting(m);
+                                    }}
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border border-slate2-200 bg-white hover:bg-slate2-50 text-slate2-700 hover:text-brand hover:border-brand/40 transition-colors shadow-2xs cursor-pointer"
+                                    title={isLockedMeeting(m.status) ? "Session locked (unlock required to modify)" : "Edit meeting details"}
+                                  >
+                                    <Pencil size={11} className="text-brand" />
+                                    <span>Edit</span>
+                                  </button>
+                                )}
+
+                                <div className="hidden sm:flex items-center gap-1 text-xs font-semibold text-slate2-400 group-hover:text-brand transition-colors">
+                                  <span>Open</span>
+                                  <ChevronRight size={13} />
+                                </div>
                               </div>
                             </div>
                           </div>
@@ -551,6 +590,29 @@ export default function MeetingList() {
             load();
           }}
         />
+      )}
+
+      {editingMeeting && (
+        <MeetingEditModal
+          meeting={editingMeeting}
+          departments={departments}
+          onClose={() => setEditingMeeting(null)}
+          onUpdated={handleMeetingUpdated}
+        />
+      )}
+
+      {feedbackToast && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl bg-slate2-900 text-white px-4 py-3 text-xs shadow-xl border border-slate2-700">
+          <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
+          <span>{feedbackToast.message}</span>
+          <button
+            type="button"
+            onClick={() => setFeedbackToast(null)}
+            className="ml-2 text-slate2-400 hover:text-white"
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
     </div>
   );

@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { Plus, Building2, Pencil, Trash2, AlertTriangle, Loader2, UserCircle, X, Users } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { Plus, Building2, Pencil, Trash2, AlertTriangle, Loader2, UserCircle, X, Users, Search } from "lucide-react";
 import { api, ApiError } from "../../api/client";
 import type { Department, DepartmentHeadUser, UserLite } from "../../types";
 import { Card, CardHeader, Button, Field, inputClass, EmptyState } from "../../components/ui/Primitives";
@@ -167,6 +167,8 @@ export default function DepartmentsPage() {
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
   const [deletingDepartment, setDeletingDepartment] = useState<Department | null>(null);
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "ACTIVE" | "INACTIVE">("ALL");
 
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const canCreate = hasAdminOverride || hasPermission("departments:create");
@@ -189,6 +191,26 @@ export default function DepartmentsPage() {
 
   useEffect(load, []);
 
+  const filteredDepartments = useMemo(() => {
+    return departments.filter((d) => {
+      const q = search.trim().toLowerCase();
+      const matchesSearch =
+        !q ||
+        d.name.toLowerCase().includes(q) ||
+        d.code.toLowerCase().includes(q) ||
+        (d.description || "").toLowerCase().includes(q) ||
+        (d.head?.name || "").toLowerCase().includes(q);
+      const matchesStatus =
+        statusFilter === "ALL" ||
+        (statusFilter === "ACTIVE" && d.isActive) ||
+        (statusFilter === "INACTIVE" && !d.isActive);
+      return matchesSearch && matchesStatus;
+    });
+  }, [departments, search, statusFilter]);
+
+  const activeCount = useMemo(() => departments.filter((d) => d.isActive).length, [departments]);
+  const inactiveCount = useMemo(() => departments.filter((d) => !d.isActive).length, [departments]);
+
   return (
     <div className="space-y-4">
       <Toast
@@ -210,27 +232,101 @@ export default function DepartmentsPage() {
           }
         />
 
+        {/* Search & Filter Toolbar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-3 text-xs">
+          <div className="relative flex-1 max-w-md">
+            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400" size={14} />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by department name, code, description, or head..."
+              className="w-full rounded-xl border border-slate2-200 bg-white py-2 pl-9 pr-8 text-xs text-slate2-800 placeholder:text-slate2-400 focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand shadow-2xs"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate2-400 hover:text-slate2-600"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto">
+            <button
+              type="button"
+              onClick={() => setStatusFilter("ALL")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                statusFilter === "ALL"
+                  ? "bg-[#0B7A6B] text-white shadow-2xs font-semibold"
+                  : "bg-white text-slate2-600 border border-slate2-200 hover:bg-slate2-50"
+              }`}
+            >
+              All ({departments.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter("ACTIVE")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                statusFilter === "ACTIVE"
+                  ? "bg-emerald-600 text-white shadow-2xs font-semibold"
+                  : "bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50"
+              }`}
+            >
+              Active ({activeCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter("INACTIVE")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                statusFilter === "INACTIVE"
+                  ? "bg-slate2-700 text-white shadow-2xs font-semibold"
+                  : "bg-white text-slate2-600 border border-slate2-200 hover:bg-slate2-50"
+              }`}
+            >
+              Inactive ({inactiveCount})
+            </button>
+          </div>
+        </div>
+
         {loading ? (
           <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="h-36 animate-pulse rounded-xl bg-slate2-100" />
             ))}
           </div>
-        ) : departments.length === 0 ? (
+        ) : filteredDepartments.length === 0 ? (
           <EmptyState
-            title="No departments yet"
-            description="Add your first department to start organizing teams and scheduling meetings."
+            title={departments.length === 0 ? "No departments yet" : "No departments match your search"}
+            description={
+              departments.length === 0
+                ? "Add your first department to start organizing teams and scheduling meetings."
+                : "Try adjusting your search query or filter."
+            }
             action={
-              canCreate && (
+              departments.length === 0 && canCreate ? (
                 <Button onClick={() => setCreateOpen(true)} className="mt-3">
                   <Plus size={15} /> Create first department
                 </Button>
-              )
+              ) : departments.length > 0 ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setSearch("");
+                    setStatusFilter("ALL");
+                  }}
+                  className="mt-2 text-xs"
+                >
+                  Reset filters
+                </Button>
+              ) : undefined
             }
           />
         ) : (
           <div className="grid grid-cols-1 gap-4 p-4 sm:p-5 md:grid-cols-2 xl:grid-cols-3">
-            {departments.map((d) => (
+            {filteredDepartments.map((d) => (
               <div
                 key={d.id}
                 className="flex flex-col justify-between rounded-2xl border border-slate2-200/90 bg-white p-4 sm:p-5 shadow-sm transition-all hover:shadow-md overflow-hidden min-w-0"

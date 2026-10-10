@@ -1,11 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ExternalLink, Pencil, Lock } from "lucide-react";
+import { ExternalLink, Pencil, Lock, Search, X } from "lucide-react";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import type { DecisionOverviewItem, DecisionStatus } from "../types";
 import { isLockedMeeting } from "../types";
-import { Card, CardHeader, EmptyState, CodeChip, inputClass } from "../components/ui/Primitives";
+import { Card, CardHeader, EmptyState, CodeChip, inputClass, Button } from "../components/ui/Primitives";
 import { StatusBadge } from "../components/ui/Badge";
 import { useAlert } from "../components/ui/AlertDialog";
 
@@ -15,6 +15,7 @@ export default function DecisionsPage() {
   const hasAdminOverride = hasPermission("ADMIN_OVERRIDE");
   const [items, setItems] = useState<DecisionOverviewItem[]>([]);
   const [status, setStatus] = useState("");
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
   const loadDecisions = () => {
@@ -29,6 +30,20 @@ export default function DecisionsPage() {
   useEffect(() => {
     loadDecisions();
   }, [status]);
+
+  const filteredItems = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(
+      (d) =>
+        d.title.toLowerCase().includes(q) ||
+        d.code.toLowerCase().includes(q) ||
+        (d.description || "").toLowerCase().includes(q) ||
+        d.meeting.title.toLowerCase().includes(q) ||
+        d.meeting.code.toLowerCase().includes(q) ||
+        d.meeting.department.name.toLowerCase().includes(q)
+    );
+  }, [items, search]);
 
   const updateStatus = async (id: string, newStatus: DecisionStatus) => {
     try {
@@ -66,25 +81,68 @@ export default function DecisionsPage() {
         title="Decisions"
         subtitle="Formal outcomes from every meeting, and the action items tracking them through to completion"
         action={
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className={`${inputClass} w-auto`}>
-            <option value="">All statuses</option>
-            <option value="OPEN">Open</option>
-            <option value="IMPLEMENTED">Implemented</option>
-            <option value="REVERSED">Reversed</option>
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-brand bg-brand/10 px-2.5 py-1 rounded-full">
+              {filteredItems.length} {filteredItems.length === 1 ? "Decision" : "Decisions"}
+            </span>
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className={`${inputClass} w-auto text-xs`}>
+              <option value="">All statuses</option>
+              <option value="OPEN">Open</option>
+              <option value="IMPLEMENTED">Implemented</option>
+              <option value="REVERSED">Reversed</option>
+            </select>
+          </div>
         }
       />
+
+      {/* Search Bar */}
+      <div className="border-b border-slate2-100 bg-slate2-50/50 px-5 py-3">
+        <div className="relative max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400" size={14} />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search decisions by title, code, description, meeting..."
+            className="w-full rounded-xl border border-slate2-200 bg-white py-2 pl-9 pr-8 text-xs text-slate2-800 placeholder:text-slate2-400 focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand shadow-2xs"
+          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate2-400 hover:text-slate2-600"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+
       {loading ? (
         <div className="space-y-2 p-5">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-16 animate-pulse rounded-lg bg-slate2-100" />
           ))}
         </div>
-      ) : items.length === 0 ? (
-        <EmptyState title="No decisions logged" description="Decisions recorded in any meeting will appear here." />
+      ) : filteredItems.length === 0 ? (
+        <EmptyState
+          title={items.length === 0 ? "No decisions logged" : "No decisions match your search"}
+          description={
+            items.length === 0
+              ? "Decisions recorded in any meeting will appear here."
+              : "Try adjusting your search terms or status filter."
+          }
+          action={
+            items.length > 0 && search ? (
+              <Button variant="secondary" onClick={() => setSearch("")} className="mt-2 text-xs">
+                Clear search
+              </Button>
+            ) : undefined
+          }
+        />
       ) : (
         <div className="divide-y divide-slate2-100">
-          {items.map((d) => {
+          {filteredItems.map((d) => {
             const completed = d.actionItems.filter((a) => a.status === "COMPLETED").length;
             const isApproved = d.meeting?.status === "APPROVED";
             const isMeetingLocked = isLockedMeeting(d.meeting?.status);

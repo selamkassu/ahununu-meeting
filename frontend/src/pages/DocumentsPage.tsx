@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, Eye, Download, X, ExternalLink } from "lucide-react";
+import { FileText, Eye, Download, X, ExternalLink, Search, Trash2, AlertTriangle } from "lucide-react";
 import { api, getToken, buildUrl } from "../api/client";
 import type { DocumentItem } from "../types";
-import { Card, CardHeader, EmptyState, CodeChip } from "../components/ui/Primitives";
+import { Card, CardHeader, EmptyState, CodeChip, Button } from "../components/ui/Primitives";
+import { Modal } from "../components/ui/Modal";
+import { useAuth } from "../context/AuthContext";
 
 function formatSize(bytes: number) {
   if (!bytes) return "—";
@@ -156,10 +158,15 @@ function InlineViewer({
 
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 export default function DocumentsPage() {
+  const { user, hasPermission } = useAuth();
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [viewing, setViewing] = useState<DocumentItem | null>(null);
+  const [documentToDelete, setDocumentToDelete] = useState<DocumentItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<"ALL" | "PDF" | "IMAGE" | "OFFICE" | "OTHER">("ALL");
 
   useEffect(() => {
     api
@@ -169,13 +176,59 @@ export default function DocumentsPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  const getDocCategory = (fileName: string): "PDF" | "IMAGE" | "OFFICE" | "OTHER" => {
+    const ext = getExt(fileName);
+    if (ext === "pdf") return "PDF";
+    if (["png", "jpg", "jpeg", "webp", "gif", "svg"].includes(ext)) return "IMAGE";
+    if (["docx", "doc", "xlsx", "xls", "pptx", "ppt", "csv"].includes(ext)) return "OFFICE";
+    return "OTHER";
+  };
+
+  const filteredDocuments = useMemo(() => {
+    return documents.filter((d) => {
+      const q = search.trim().toLowerCase();
+      const matchesSearch =
+        !q ||
+        d.fileName.toLowerCase().includes(q) ||
+        d.meeting.title.toLowerCase().includes(q) ||
+        d.meeting.code.toLowerCase().includes(q);
+      const cat = getDocCategory(d.fileName);
+      const matchesCategory = categoryFilter === "ALL" || cat === categoryFilter;
+      return matchesSearch && matchesCategory;
+    });
+  }, [documents, search, categoryFilter]);
+
+  const pdfCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "PDF").length, [documents]);
+  const imgCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "IMAGE").length, [documents]);
+  const officeCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "OFFICE").length, [documents]);
+
+  const canDeleteDoc = (d: DocumentItem) => {
+    if (hasPermission("ADMIN_OVERRIDE")) return true;
+    if (hasPermission("documents:delete")) return true;
+    if (hasPermission("meetings:edit:all")) return true;
+    if (user?.id === d.uploadedBy?.id || (d.meeting.organizerId && user?.id === d.meeting.organizerId)) return true;
+    return false;
+  };
+
+  const handleDelete = async (doc: DocumentItem) => {
+    setDeleting(true);
+    try {
+      await api.delete(`/meetings/${doc.meeting.id}/documents/${doc.id}`);
+      setDocuments((prev) => prev.filter((d) => d.id !== doc.id));
+      setDocumentToDelete(null);
+    } catch (err: any) {
+      setError(err.message || "Failed to delete document.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   // Smart open: PDFs/images show inline modal; Office files download directly
   const handleView = (d: DocumentItem) => {
     const ext = getExt(d.fileName);
     if (INLINE_VIEWABLE.includes(ext)) {
       setViewing(d);
     } else {
-      // Office files: download immediately so OS opens them natively
       triggerDownload(d.meeting.id, d.id, d.fileName, setError);
     }
   };
@@ -194,11 +247,125 @@ export default function DocumentsPage() {
         />
       )}
 
+      {/* Delete Confirmation Modal */}
+      {documentToDelete && (
+        <Modal
+          open
+          onClose={() => { if (!deleting) setDocumentToDelete(null); }}
+          title="Delete Attached Document"
+        >
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-lg bg-rose-50/80 border border-rose-200/70 p-3.5">
+              <AlertTriangle className="shrink-0 text-rose-600 mt-0.5" size={20} />
+              <div className="text-xs">
+                <p className="font-semibold text-rose-900">
+                  Delete &lsquo;{documentToDelete.fileName}&rsquo;?
+                </p>
+                <p className="mt-1 text-rose-700">
+                  Meeting: <span className="font-medium">{documentToDelete.meeting.title}</span> ({documentToDelete.meeting.code})
+                </p>
+                <p className="mt-2 text-rose-800/90 leading-relaxed">
+                  This action removes the document attachment from the meeting. The file record will be unlinked.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-slate2-100 pt-3">
+              <Button
+                variant="secondary"
+                onClick={() => setDocumentToDelete(null)}
+                disabled={deleting}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => handleDelete(documentToDelete)}
+                disabled={deleting}
+                className="bg-rose-600 hover:bg-rose-700 text-white"
+              >
+                {deleting ? "Deleting..." : "Delete Document"}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       <Card>
         <CardHeader
           title="Documents"
           subtitle="Files attached to meetings across Ahununu Logistics — attach from a meeting's page"
         />
+
+        {/* Search & Category Filter Toolbar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-3 text-xs">
+          <div className="relative flex-1 max-w-md">
+            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400" size={14} />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by file name or meeting..."
+              className="w-full rounded-xl border border-slate2-200 bg-white py-2 pl-9 pr-8 text-xs text-slate2-800 placeholder:text-slate2-400 focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand shadow-2xs"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate2-400 hover:text-slate2-600"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto">
+            <button
+              type="button"
+              onClick={() => setCategoryFilter("ALL")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                categoryFilter === "ALL"
+                  ? "bg-[#0B7A6B] text-white shadow-2xs font-semibold"
+                  : "bg-white text-slate2-600 border border-slate2-200 hover:bg-slate2-50"
+              }`}
+            >
+              All ({documents.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setCategoryFilter("PDF")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                categoryFilter === "PDF"
+                  ? "bg-rose-700 text-white shadow-2xs font-semibold"
+                  : "bg-white text-rose-800 border border-rose-200 hover:bg-rose-50"
+              }`}
+            >
+              PDFs ({pdfCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setCategoryFilter("IMAGE")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                categoryFilter === "IMAGE"
+                  ? "bg-sky-700 text-white shadow-2xs font-semibold"
+                  : "bg-white text-sky-800 border border-sky-200 hover:bg-sky-50"
+              }`}
+            >
+              Images ({imgCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setCategoryFilter("OFFICE")}
+              className={`px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer ${
+                categoryFilter === "OFFICE"
+                  ? "bg-amber-700 text-white shadow-2xs font-semibold"
+                  : "bg-white text-amber-800 border border-amber-200 hover:bg-amber-50"
+              }`}
+            >
+              Docs & Sheets ({officeCount})
+            </button>
+          </div>
+        </div>
 
         {error && (
           <p className="px-5 py-2 text-xs font-medium text-red-600">{error}</p>
@@ -210,15 +377,33 @@ export default function DocumentsPage() {
               <div key={i} className="h-14 animate-pulse rounded-lg bg-slate2-100" />
             ))}
           </div>
-        ) : documents.length === 0 ? (
+        ) : filteredDocuments.length === 0 ? (
           <EmptyState
-            title="No documents attached yet"
-            description="Attach presentation decks, reports or reference files from any meeting's page."
+            title={documents.length === 0 ? "No documents attached yet" : "No documents match your filter"}
+            description={
+              documents.length === 0
+                ? "Attach presentation decks, reports or reference files from any meeting's page."
+                : "Try clearing your search query or choosing another category."
+            }
+            action={
+              documents.length > 0 ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setSearch("");
+                    setCategoryFilter("ALL");
+                  }}
+                  className="mt-2 text-xs"
+                >
+                  Reset filters
+                </Button>
+              ) : undefined
+            }
           />
         ) : (
           <div className="divide-y divide-slate2-100">
-            {documents.map((d) => (
-              <div key={d.id} className="flex items-center gap-4 px-5 py-3">
+            {filteredDocuments.map((d) => (
+              <div key={d.id} className="flex items-center gap-4 px-5 py-3 hover:bg-slate2-50/50 transition-colors">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate2-100 text-slate2-500">
                   <FileText size={15} />
                 </div>
@@ -233,12 +418,17 @@ export default function DocumentsPage() {
                   >
                     {d.fileName}
                   </button>
-                  <Link
-                    to={`/meetings/${d.meeting.id}`}
-                    className="flex flex-wrap items-center gap-1.5 text-xs text-slate2-400 hover:text-brand"
-                  >
-                    {d.meeting.title} <CodeChip>{d.meeting.code}</CodeChip>
-                  </Link>
+                  <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                    <Link
+                      to={`/meetings/${d.meeting.id}`}
+                      className="flex items-center gap-1.5 text-xs text-slate2-500 hover:text-brand"
+                    >
+                      {d.meeting.title} <CodeChip>{d.meeting.code}</CodeChip>
+                    </Link>
+                    <span className="text-[11px] text-slate2-400">
+                      · {formatSize(d.fileSize)} · {new Date(d.createdAt).toLocaleDateString()}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
@@ -248,7 +438,7 @@ export default function DocumentsPage() {
                     onClick={() => handleView(d)}
                     title={INLINE_VIEWABLE.includes(getExt(d.fileName)) ? "Preview inline" : "Open file"}
                     style={{
-                      width: 36, height: 36,
+                      width: 34, height: 34,
                       display: "inline-flex", alignItems: "center", justifyContent: "center",
                       borderRadius: 8, border: "1.5px solid #cbd5e1",
                       background: "#ffffff", cursor: "pointer", flexShrink: 0,
@@ -263,7 +453,7 @@ export default function DocumentsPage() {
                       (e.currentTarget as HTMLElement).style.background = "#ffffff";
                     }}
                   >
-                    <Eye size={16} color="#475569" />
+                    <Eye size={15} color="#475569" />
                   </button>
 
                   {/* Download — always export/save */}
@@ -272,7 +462,7 @@ export default function DocumentsPage() {
                     onClick={() => handleDownload(d)}
                     title="Export / Download"
                     style={{
-                      width: 36, height: 36,
+                      width: 34, height: 34,
                       display: "inline-flex", alignItems: "center", justifyContent: "center",
                       borderRadius: 8, border: "1.5px solid #0B7A6B",
                       background: "#0B7A6B", cursor: "pointer", flexShrink: 0,
@@ -287,8 +477,34 @@ export default function DocumentsPage() {
                       (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
                     }}
                   >
-                    <Download size={16} color="#ffffff" />
+                    <Download size={15} color="#ffffff" />
                   </button>
+
+                  {/* Delete Document */}
+                  {canDeleteDoc(d) && (
+                    <button
+                      type="button"
+                      onClick={() => setDocumentToDelete(d)}
+                      title="Delete document attachment"
+                      style={{
+                        width: 34, height: 34,
+                        display: "inline-flex", alignItems: "center", justifyContent: "center",
+                        borderRadius: 8, border: "1.5px solid #fecdd3",
+                        background: "#fff1f2", cursor: "pointer", flexShrink: 0,
+                        transition: "background 0.15s, border-color 0.15s",
+                      }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = "#ffe4e6";
+                        (e.currentTarget as HTMLElement).style.borderColor = "#fda4af";
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = "#fff1f2";
+                        (e.currentTarget as HTMLElement).style.borderColor = "#fecdd3";
+                      }}
+                    >
+                      <Trash2 size={15} color="#e11d48" />
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

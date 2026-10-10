@@ -493,15 +493,12 @@ function htmlWrap(previewText: string, content: string): string {
 </html>`;
 }
 
-// ─────────────────────────────────────────────
-//  Reusable UI primitives
-// ─────────────────────────────────────────────
-function greeting(name: string) {
+function greeting(name: string): string {
   return `<p style="font-size:15px;color:#1e293b;margin:0 0 16px;">Hello <strong>${name}</strong>,</p>`;
 }
 
-function badge(text: string, color: string, bg: string) {
-  return `<span style="display:inline-block;background:${bg};color:${color};font-size:11px;font-weight:700;padding:2px 10px;border-radius:99px;text-transform:uppercase;letter-spacing:0.5px;">${text}</span>`;
+function badge(text: string, color: string, bg: string): string {
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;color:${color};background:${bg};text-transform:uppercase;">${text}</span>`;
 }
 
 // ══════════════════════════════════════════════
@@ -510,20 +507,19 @@ function badge(text: string, color: string, bg: string) {
 export async function sendMeetingInvitationEmail(opts: {
   toEmail: string;
   toName: string;
-  organizerName: string;
   meetingTitle: string;
   meetingDate: string;
   startTime: string;
   endTime: string;
-  location?: string;
-  onlineLink?: string;
-  description?: string;
+  location?: string | null;
+  onlineLink?: string | null;
+  description?: string | null;
+  organizerName: string;
   meetingId: string;
 }): Promise<boolean> {
   const {
     toEmail,
     toName,
-    organizerName,
     meetingTitle,
     meetingDate,
     startTime,
@@ -531,13 +527,14 @@ export async function sendMeetingInvitationEmail(opts: {
     location,
     onlineLink,
     description,
+    organizerName,
     meetingId,
   } = opts;
 
   const appUrl = getAppUrl();
   const meetingLink = `${appUrl}/meetings/${meetingId}`;
-  const acceptLink = `${appUrl}/meetings/${meetingId}?rsvp=ACCEPTED`;
-  const declineLink = `${appUrl}/meetings/${meetingId}?rsvp=REJECTED`;
+  const acceptLink = `${appUrl}/meetings/${meetingId}?invitation=ACCEPTED`;
+  const declineLink = `${appUrl}/meetings/${meetingId}?invitation=REJECTED`;
 
   const subject = `Invitation: ${meetingTitle} @ ${meetingDate} (${startTime} - ${endTime})`;
 
@@ -598,7 +595,7 @@ export async function sendMeetingInvitationEmail(opts: {
       </table>
     </div>
 
-    <!-- RSVP Section -->
+    <!-- Invitation Response Section -->
     <div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:10px;padding:22px 20px;text-align:center;margin:0 0 24px;">
       <p style="font-size:14px;font-weight:700;color:#1e293b;margin:0 0 14px;">
         Will you be attending this meeting?
@@ -618,13 +615,13 @@ export async function sendMeetingInvitationEmail(opts: {
             <a href="${declineLink}"
                style="display:inline-block;background:#ffffff;color:#b91c1c;border:1px solid #f87171;
                       text-decoration:none;font-size:13px;font-weight:700;padding:11px 24px;border-radius:8px;">
-              ✕ Decline
+              ✕ Decline Invitation
             </a>
           </td>
         </tr>
       </table>
 
-      <p style="margin:14px 0 0;font-size:12px;color:#64748b;line-height:1.4;">
+    <p style="margin:14px 0 0;font-size:12px;color:#64748b;line-height:1.4;">
         Accepting marks your attendance as confirmed. Declining will ask for a brief reason for the organizer.
       </p>
     </div>

@@ -453,7 +453,7 @@ export interface DocumentItem {
   fileType: string;
   fileSize: number;
   uploadedBy: { id: string; name: string };
-  meeting: { id: string; title: string; code: string; department: { name: string } };
+  meeting: { id: string; title: string; code: string; organizerId?: string; department: { name: string } };
   createdAt: string;
 }
 

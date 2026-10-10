@@ -18,6 +18,7 @@ import {
   sendMeetingInvitationEmail,
   sendMeetingCancellationEmail,
 } from "../utils/email";
+import { logAuditEvent } from "../utils/audit";
 
 const router = Router();
 router.use(requireAuth);
@@ -162,9 +163,16 @@ async function canUserManageAttendance(meeting: { organizerId: string }, req: Au
 
 /**
  * Check if user has permission to edit attendance after it has been finalized.
- * Users with ADMIN_OVERRIDE permission are permitted to override.
+ * If meeting is not in a locked state, any user authorized to manage attendance can edit.
+ * If meeting is locked, requires ADMIN_OVERRIDE.
  */
-function canEditFinalizedAttendance(req: AuthedRequest): boolean {
+async function canEditFinalizedAttendance(
+  meeting: { organizerId: string; status: string },
+  req: AuthedRequest
+): Promise<boolean> {
+  if (!isLockedMeetingStatus(meeting.status)) {
+    return canUserManageAttendance(meeting, req);
+  }
   return req.userPermissions?.includes("ADMIN_OVERRIDE") ?? false;
 }
 
@@ -691,14 +699,38 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`);
   },
 });
+
+const ALLOWED_DOCUMENT_EXTENSIONS = new Set([
+  "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt", "png", "jpg", "jpeg", "webp", "gif", "svg"
+]);
+
 const upload = multer({
   storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB maximum per document
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).slice(1).toLowerCase();
+    if (ALLOWED_DOCUMENT_EXTENSIONS.has(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File extension '.${ext}' is not permitted. Supported file types include PDF, Word, Excel, PowerPoint, Text, CSV, and standard image formats.`));
+    }
+  },
 });
 
 router.post(
   "/:id/documents",
   requirePermission("documents:upload"),
-  upload.single("file"),
+  (req, res, next) => {
+    upload.single("file")(req, res, (err: any) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({ error: "File exceeds the maximum allowable size of 50MB." });
+        }
+        return res.status(400).json({ error: err.message || "File upload failed validation." });
+      }
+      next();
+    });
+  },
   async (req: AuthedRequest, res) => {
     if (!req.file) return res.status(400).json({ error: "No file selected." });
     const meeting = await prisma.meeting.findUnique({
@@ -863,6 +895,36 @@ router.delete(
   },
 );
 
+router.delete(
+  "/documents/:documentId",
+  requirePermission("documents:delete:all", "documents:delete:dept", "documents:delete:own"),
+  async (req: AuthedRequest, res) => {
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.documentId },
+      include: { meeting: { select: { id: true, status: true, departmentId: true, organizerId: true } } },
+    });
+    if (!doc) return res.status(404).json({ error: "Document not found." });
+
+    const lockError = checkMeetingLock(doc.meeting, req);
+    if (lockError) return res.status(403).json({ error: lockError });
+
+    await ensureUserPermissions(req);
+    if (!checkOwnershipAccess(req, "documents", "delete", {
+      departmentId: doc.meeting.departmentId,
+      ownerId: doc.uploadedById,
+    })) {
+      return res.status(403).json({ error: "You do not have permission to delete this document outside your ownership scope." });
+    }
+
+    if (doc.storedName) {
+      const filePath = resolveFilePath(doc.storedName);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    await prisma.document.delete({ where: { id: doc.id } });
+    res.status(204).send();
+  },
+);
+
 // ---------- Detail ----------
 router.get("/:id", async (req: AuthedRequest, res) => {
   const meeting = await prisma.meeting.findUnique({
@@ -996,6 +1058,20 @@ router.put(
         where: { id: req.params.id },
         data: dataToUpdate,
         include: detailInclude,
+      });
+
+      logAuditEvent({
+        level: "INFO",
+        action: "MEETING_UPDATED",
+        resource: "meeting",
+        resourceId: meeting.id,
+        actorId: req.user!.userId,
+        details: {
+          title: meeting.title,
+          code: meeting.code,
+          status: meeting.status,
+          updatedFields: Object.keys(dataToUpdate),
+        },
       });
 
       // Notify participants and organizer if meeting status was transitioned to CANCELLED
@@ -1421,21 +1497,26 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
   }
 
   const isForceApproved = !allSigned && !!forceApprove;
-  const recordedBypassReason = isForceApproved
-    ? (typeof forceReason === "string" && forceReason.trim()
-      ? forceReason.trim()
-      : "Administrative override: approved before all attendee signatures collected")
-    : null;
-
-  // Also record the approving admin/reviewer signature in participantSignatures if not already present
-  const alreadySignedParticipant = meeting.participantSignatures.some((s: any) => s.userId === req.user!.userId);
-  if (!alreadySignedParticipant) {
-    const userRecord = await prisma.user.findUnique({
-      where: { id: req.user!.userId },
-      select: { name: true, jobTitle: true, role: { select: { name: true } } },
+  if (isForceApproved && (!forceReason || typeof forceReason !== "string" || forceReason.trim().length < 5)) {
+    return res.status(400).json({
+      error: "A mandatory, descriptive reason (minimum 5 characters) is strictly required for administrative force approval.",
+      requiresForceApprove: true,
+      pendingCount: pendingSignerIds.length,
     });
-    try {
-      await (prisma.participantSignature as any).create({
+  }
+
+  const recordedBypassReason = isForceApproved ? forceReason.trim() : null;
+
+  const userRecord = await prisma.user.findUnique({
+    where: { id: req.user!.userId },
+    select: { name: true, jobTitle: true, email: true, role: { select: { name: true } } },
+  });
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // Record or update approver's signature in participantSignatures
+    const alreadySignedParticipant = meeting.participantSignatures.some((s: any) => s.userId === req.user!.userId);
+    if (!alreadySignedParticipant) {
+      await (tx.participantSignature as any).create({
         data: {
           meetingId: req.params.id,
           userId: req.user!.userId,
@@ -1446,32 +1527,41 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
           bypassReason: recordedBypassReason,
         },
       });
-    } catch {
-      // ignore in case of race condition
-    }
-  } else if (isForceApproved) {
-    // If the approver already had a signature record, update its bypassReason
-    try {
-      await (prisma.participantSignature as any).updateMany({
+    } else if (isForceApproved) {
+      await (tx.participantSignature as any).updateMany({
         where: { meetingId: req.params.id, userId: req.user!.userId },
         data: { bypassReason: recordedBypassReason },
       });
-    } catch {
-      // ignore
     }
-  }
 
-  const updated = await (prisma.meeting as any).update({
-    where: { id: req.params.id },
-    data: {
-      status: "APPROVED",
-      approvedById: req.user!.userId,
-      approvedAt: new Date(),
-      approvalSignature: signature.trim(),
+    // Update meeting status to APPROVED with approver metadata
+    return (tx.meeting as any).update({
+      where: { id: req.params.id },
+      data: {
+        status: "APPROVED",
+        approvedById: req.user!.userId,
+        approvedAt: new Date(),
+        approvalSignature: signature.trim(),
+        forceApproved: isForceApproved,
+        bypassReason: recordedBypassReason,
+      },
+      include: detailInclude,
+    });
+  });
+
+  logAuditEvent({
+    level: isForceApproved ? "SECURITY" : "INFO",
+    action: isForceApproved ? "MEETING_FORCE_APPROVED" : "MEETING_APPROVED",
+    actorId: req.user!.userId,
+    actorEmail: userRecord?.email,
+    resource: "Meeting",
+    resourceId: meeting.id,
+    details: {
       forceApproved: isForceApproved,
       bypassReason: recordedBypassReason,
+      pendingCount: pendingSignerIds.length,
+      approverName: userRecord?.name,
     },
-    include: detailInclude,
   });
 
   res.json(updated);
@@ -1833,13 +1923,14 @@ router.delete(
   },
 );
 
-// ---------- Participant RSVP (Accept / Reject invitation with reason) ----------
-const rsvpSchema = z.object({
+// ---------- Participant Invitation Response (Accept / Reject invitation with optional reason) ----------
+const invitationSchema = z.object({
   status: z.enum(["ACCEPTED", "REJECTED", "DECLINED", "INVITED"]),
   rejectionReason: z.string().optional().nullable(),
 });
+const rsvpSchema = invitationSchema;
 
-router.patch("/:id/rsvp", async (req: AuthedRequest, res) => {
+async function handleInvitationResponse(req: AuthedRequest, res: any) {
   if (!req.user) return res.status(401).json({ error: "Not authenticated" });
   const meeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
@@ -1864,9 +1955,9 @@ router.patch("/:id/rsvp", async (req: AuthedRequest, res) => {
     return res.status(403).json({ error: "You are not an invited participant for this meeting." });
   }
 
-  const parsed = rsvpSchema.safeParse(req.body);
+  const parsed = invitationSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid RSVP status or payload." });
+    return res.status(400).json({ error: "Invalid invitation status or payload." });
   }
 
   const normalizedStatus =
@@ -1876,7 +1967,7 @@ router.patch("/:id/rsvp", async (req: AuthedRequest, res) => {
 
   const reason =
     normalizedStatus === "REJECTED"
-      ? parsed.data.rejectionReason?.trim() || "Due to another meeting"
+      ? parsed.data.rejectionReason?.trim() || "Due to scheduling conflict"
       : null;
 
   await prisma.meetingParticipant.update({
@@ -1903,18 +1994,34 @@ router.patch("/:id/rsvp", async (req: AuthedRequest, res) => {
         link: `/meetings/${meeting.id}`,
       },
     });
-
-    // Note: RSVP update uses in-app notification only; email notification omitted to avoid inbox clutter
   }
+
+  logAuditEvent({
+    level: "INFO",
+    action: "PARTICIPANT_INVITATION_RESPONSE",
+    actorId: req.user.userId,
+    actorEmail: participant.user.email,
+    resource: "MeetingParticipant",
+    resourceId: participant.id,
+    details: {
+      meetingId: meeting.id,
+      meetingTitle: meeting.title,
+      status: normalizedStatus,
+      rejectionReason: reason,
+    },
+  });
 
   const updatedMeeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
     include: detailInclude,
   });
   res.json(updatedMeeting);
-});
+}
 
-router.patch("/:id/participants/:participantId/rsvp", async (req: AuthedRequest, res) => {
+router.patch("/:id/invitation", handleInvitationResponse);
+router.patch("/:id/rsvp", handleInvitationResponse); // backward-compatible alias
+
+async function handleParticipantInvitationUpdate(req: AuthedRequest, res: any) {
   if (!req.user) return res.status(401).json({ error: "Not authenticated" });
   const meeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
@@ -1946,11 +2053,11 @@ router.patch("/:id/participants/:participantId/rsvp", async (req: AuthedRequest,
 
   const isSelf = participant.userId === req.user.userId;
   if (!canManage && !isSelf) {
-    return res.status(403).json({ error: "You are not authorized to update this participant's RSVP." });
+    return res.status(403).json({ error: "You are not authorized to update this participant's invitation status." });
   }
 
-  const parsed = rsvpSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid RSVP status or payload." });
+  const parsed = invitationSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid invitation status or payload." });
 
   const normalizedStatus =
     parsed.data.status === "DECLINED" || parsed.data.status === "REJECTED"
@@ -1959,7 +2066,7 @@ router.patch("/:id/participants/:participantId/rsvp", async (req: AuthedRequest,
 
   const reason =
     normalizedStatus === "REJECTED"
-      ? parsed.data.rejectionReason?.trim() || "Due to another meeting"
+      ? parsed.data.rejectionReason?.trim() || "Due to scheduling conflict"
       : null;
 
   await prisma.meetingParticipant.update({
@@ -1971,12 +2078,29 @@ router.patch("/:id/participants/:participantId/rsvp", async (req: AuthedRequest,
     },
   });
 
+  logAuditEvent({
+    level: "INFO",
+    action: "ADMIN_UPDATE_INVITATION_STATUS",
+    actorId: req.user.userId,
+    resource: "MeetingParticipant",
+    resourceId: participant.id,
+    details: {
+      meetingId: meeting.id,
+      participantUserId: participant.userId,
+      newStatus: normalizedStatus,
+      reason,
+    },
+  });
+
   const updatedMeeting = await prisma.meeting.findUnique({
     where: { id: req.params.id },
     include: detailInclude,
   });
   res.json(updatedMeeting);
-});
+}
+
+router.patch("/:id/participants/:participantId/invitation", handleParticipantInvitationUpdate);
+router.patch("/:id/participants/:participantId/rsvp", handleParticipantInvitationUpdate); // backward-compatible alias
 
 router.patch(
   "/:id/participants/:participantId/attendance",
@@ -1999,8 +2123,9 @@ router.patch(
       return res.status(403).json({ error: "You are not authorized to update participant attendance." });
     }
 
-    // If attendance is already finalized, only users with edit permission (System Admin) can modify
-    if (meeting.attendanceFinalized && !canEditFinalizedAttendance(req)) {
+    // If attendance is already finalized, only users with edit permission can modify
+    const canEditFinal = await canEditFinalizedAttendance(meeting, req);
+    if (meeting.attendanceFinalized && !canEditFinal) {
       return res.status(403).json({
         error: "Attendance has already been finalized. Editing requires authorized permission.",
       });
@@ -2030,7 +2155,6 @@ router.patch(
       where: { id: participant.id },
       data: {
         participated: parsed.data.participated,
-        status: parsed.data.participated ? "ATTENDED" : "ABSENT",
       },
       include: {
         user: {
@@ -2081,7 +2205,8 @@ router.post(
     }
 
     // 2. Validate if already finalized
-    if (meeting.attendanceFinalized && !canEditFinalizedAttendance(req)) {
+    const canEditFinal = await canEditFinalizedAttendance(meeting, req);
+    if (meeting.attendanceFinalized && !canEditFinal) {
       return res.status(403).json({
         error: "Attendance has already been finalized for this meeting.",
       });
@@ -2127,22 +2252,9 @@ router.post(
             },
             data: {
               participated: isAttended,
-              status: isAttended ? "ATTENDED" : "ABSENT",
             },
           });
         }),
-      );
-    } else {
-      // If no records explicitly passed, synchronize each existing participant status
-      await prisma.$transaction(
-        meeting.participants.map((p) =>
-          prisma.meetingParticipant.update({
-            where: { id: p.id },
-            data: {
-              status: p.participated ? "ATTENDED" : "ABSENT",
-            },
-          }),
-        ),
       );
     }
 
@@ -2158,6 +2270,46 @@ router.post(
     const updated = await prisma.meeting.findUnique({
       where: { id: req.params.id },
       include: detailInclude,
+    });
+
+    res.json(updated);
+  },
+);
+
+router.post(
+  "/:id/attendance/reopen",
+  async (req: AuthedRequest, res) => {
+    if (!req.user) return res.status(401).json({ error: "Not authenticated" });
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, status: true, organizerId: true, departmentId: true, attendanceFinalized: true },
+    });
+    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+
+    const lockError = checkMeetingLock(meeting, req);
+    if (lockError) return res.status(403).json({ error: lockError });
+
+    const authorized = await canUserManageAttendance(meeting, req);
+    if (!authorized) {
+      return res.status(403).json({ error: "You are not authorized to reopen attendance for this meeting." });
+    }
+
+    const updated = await prisma.meeting.update({
+      where: { id: req.params.id },
+      data: {
+        attendanceFinalized: false,
+        attendanceFinalizedAt: null,
+      },
+      include: detailInclude,
+    });
+
+    logAuditEvent({
+      level: "INFO",
+      action: "REOPEN_ATTENDANCE",
+      actorId: req.user.userId,
+      resource: "Meeting",
+      resourceId: meeting.id,
+      details: { meetingId: meeting.id },
     });
 
     res.json(updated);

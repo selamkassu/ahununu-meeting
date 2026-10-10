@@ -12,23 +12,10 @@ function daysFromNow(n: number, hour = 9, minute = 0) {
 }
 
 async function main() {
-  console.log("Seeding Ahununu Logistics Meeting Management Portal...");
-
-  await prisma.notification.deleteMany();
-  await prisma.document.deleteMany();
-  await prisma.actionItem.deleteMany();
-  await prisma.decision.deleteMany();
-  await prisma.meetingMinutes.deleteMany();
-  await prisma.agendaItem.deleteMany();
-  await prisma.meetingParticipant.deleteMany();
-  await prisma.meeting.deleteMany();
-  await prisma.user.deleteMany();
-  await prisma.rolePermission.deleteMany();
-  await prisma.role.deleteMany();
-  await prisma.department.deleteMany();
+  console.log("Seeding Ahununu Logistics Meeting Management Portal (Safe & Idempotent)...");
 
   // ──────────────────────────────────────────────────────────────
-  // CREATE SYSTEM ROLES WITH PERMISSIONS
+  // CREATE / UPSERT SYSTEM ROLES WITH PERMISSIONS (Non-destructive)
   // ──────────────────────────────────────────────────────────────
   const roleDefinitions = [
     { name: "System Admin", code: "SYSTEM_ADMIN", description: "Full system access — manage users, roles, departments, and all portal features." },
@@ -39,46 +26,71 @@ async function main() {
   ];
 
   const roles = await Promise.all(
-    roleDefinitions.map((rd) =>
-      prisma.role.create({
-        data: {
+    roleDefinitions.map(async (rd) => {
+      const role = await prisma.role.upsert({
+        where: { code: rd.code },
+        update: {
+          name: rd.name,
+          description: rd.description,
+          isSystem: true,
+        },
+        create: {
           name: rd.name,
           code: rd.code,
           description: rd.description,
           isSystem: true,
-          permissions: {
-            create: (SYSTEM_ROLE_PERMISSIONS[rd.code] || []).map((p) => ({ permission: p })),
-          },
         },
-      })
-    )
+      });
+
+      const requiredPerms = SYSTEM_ROLE_PERMISSIONS[rd.code] || [];
+      for (const perm of requiredPerms) {
+        const exists = await prisma.rolePermission.findFirst({
+          where: { roleId: role.id, permission: perm },
+        });
+        if (!exists) {
+          await prisma.rolePermission.create({
+            data: { roleId: role.id, permission: perm },
+          });
+        }
+      }
+
+      return role;
+    })
   );
 
   const roleByCode = Object.fromEntries(roles.map((r) => [r.code, r]));
-  console.log(`Created ${roles.length} system roles with permissions.`);
+  console.log(`Verified ${roles.length} system roles with permissions.`);
 
   // ──────────────────────────────────────────────────────────────
-  // DEPARTMENTS
+  // DEPARTMENTS (Non-destructive upsert)
   // ──────────────────────────────────────────────────────────────
+  const departmentDefs = [
+    { name: "Management", code: "MGT", description: "Executive leadership and corporate strategy" },
+    { name: "IT", code: "IT", description: "Systems, infrastructure and digital platforms" },
+    { name: "Operations", code: "OPS", description: "Fleet operations and route planning" },
+    { name: "Logistics", code: "LOG", description: "Freight coordination and supply chain" },
+    { name: "Finance", code: "FIN", description: "Accounts, budgeting and payroll" },
+    { name: "HR", code: "HR", description: "People operations and recruitment" },
+    { name: "Customer Service", code: "CS", description: "Client support and dispute resolution" },
+    { name: "Sales & Marketing", code: "S&M", description: "Business development and branding" },
+    { name: "Warehouse", code: "WH", description: "Storage, inventory and dispatch" },
+  ];
+
   const departments = await Promise.all(
-    [
-      { name: "Management", code: "MGT", description: "Executive leadership and corporate strategy" },
-      { name: "IT", code: "IT", description: "Systems, infrastructure and digital platforms" },
-      { name: "Operations", code: "OPS", description: "Fleet operations and route planning" },
-      { name: "Logistics", code: "LOG", description: "Freight coordination and supply chain" },
-      { name: "Finance", code: "FIN", description: "Accounts, budgeting and payroll" },
-      { name: "HR", code: "HR", description: "People operations and recruitment" },
-      { name: "Customer Service", code: "CS", description: "Client support and dispute resolution" },
-      { name: "Sales & Marketing", code: "S&M", description: "Business development and branding" },
-      { name: "Warehouse", code: "WH", description: "Storage, inventory and dispatch" },
-    ].map((d) => prisma.department.create({ data: d }))
+    departmentDefs.map((d) =>
+      prisma.department.upsert({
+        where: { code: d.code },
+        update: { name: d.name, description: d.description },
+        create: d,
+      })
+    )
   );
 
   const byCode = Object.fromEntries(departments.map((d) => [d.code, d]));
   const passwordHash = await bcrypt.hash("Ahununu@123", 10);
 
   // ──────────────────────────────────────────────────────────────
-  // USERS — now using roleId FK
+  // USERS — Non-destructive upsert
   // ──────────────────────────────────────────────────────────────
   const userDefs = [
     { name: "Dawit Bekele", email: "dawit.bekele@ahununulogistics.com", roleCode: "SYSTEM_ADMIN", dept: "IT", title: "Systems Administrator" },
@@ -121,13 +133,19 @@ async function main() {
   const colors = ["#0B7A6B", "#1F6F5C", "#B4571C", "#3B5166", "#7A4FA3", "#1F9D63", "#C0392B", "#2E7BB0"];
   const users = await Promise.all(
     userDefs.map((u, idx) => {
-      // Set one user suspended and one deactivated for demonstrating lifecycle states
       let status = "ACTIVE";
       if (u.name === "Samuel Wolde") status = "SUSPENDED";
       if (u.name === "Firehiwot Abera") status = "DEACTIVATED";
 
-      return prisma.user.create({
-        data: {
+      return prisma.user.upsert({
+        where: { email: u.email },
+        update: {
+          name: u.name,
+          roleId: roleByCode[u.roleCode].id,
+          departmentId: byCode[u.dept].id,
+          jobTitle: u.title,
+        },
+        create: {
           name: u.name,
           email: u.email,
           phone: phoneList[idx % phoneList.length],
@@ -160,6 +178,16 @@ async function main() {
   const invOfficer = byEmail["nathnael.yohannes@ahununulogistics.com"];
   const netEng = byEmail["liya.desta@ahununulogistics.com"];
   const accountant = byEmail["firehiwot.abera@ahununulogistics.com"];
+
+  // ──────────────────────────────────────────────────────────────
+  // SAMPLE DATA CHECK: Do not overwrite or duplicate existing meetings
+  // ──────────────────────────────────────────────────────────────
+  const existingMeetingCount = await prisma.meeting.count();
+  if (existingMeetingCount > 0) {
+    console.log(`Database already has ${existingMeetingCount} meetings. Skipping demo meeting creation to preserve existing data.`);
+    console.log("Seed complete (system roles, departments, and core users safely upserted).");
+    return;
+  }
 
   let mtgSeq = 0;
   let decSeq = 0;

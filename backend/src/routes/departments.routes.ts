@@ -1,4 +1,4 @@
-﻿import { Router } from "express";
+import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requirePermission } from "../middleware/auth";
@@ -19,6 +19,15 @@ router.get("/", async (_req, res) => {
     include: HEAD_INCLUDE,
   });
   res.json(departments);
+});
+
+router.get("/:id", async (req, res) => {
+  const dept = await prisma.department.findUnique({
+    where: { id: req.params.id },
+    include: HEAD_INCLUDE,
+  });
+  if (!dept) return res.status(404).json({ error: "Department not found." });
+  res.json(dept);
 });
 
 const upsertSchema = z.object({

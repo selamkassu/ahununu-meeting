@@ -584,7 +584,7 @@ export function generateFullMeetingMinutesHtml(meeting: MeetingDetail, minutesCo
           if (!isPresent && (p.status === "REJECTED" || p.status === "DECLINED")) {
             statusDisplay = `Rejected${p.rejectionReason ? ` ➜ '${p.rejectionReason}'` : ""}`;
           } else if (!isPresent && p.status === "ACCEPTED") {
-            statusDisplay = "Accepted (RSVP)";
+            statusDisplay = "Accepted (Invitation)";
           }
           const statusColor = isPresent
             ? "#15803d"
