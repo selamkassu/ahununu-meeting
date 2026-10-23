@@ -4,7 +4,7 @@ import { prisma } from "../lib/prisma";
 import { requireAuth, requirePermission, AuthedRequest } from "../middleware/auth";
 import { ACTION_ITEM_STATUSES, PRIORITIES, isOverdue, isLockedMeetingStatus } from "../utils/enums";
 import { checkOwnershipAccess, ensureUserPermissions } from "../utils/ownership";
-import { makeCode } from "../utils/codes";
+import { makeCode, getNextCode, getNextCodes } from "../utils/codes";
 import { sendActionItemAssignedEmail } from "../utils/email";
 
 const router = Router();
@@ -117,189 +117,194 @@ const createSchema = z.object({
 });
 
 router.post("/", requirePermission("action_items:create"), async (req: AuthedRequest, res) => {
-  const parsed = createSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Check title, assignees, department and deadline.", details: parsed.error.flatten() });
-  }
+  try {
+    const parsed = createSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Check title, assignees, department and deadline.", details: parsed.error.flatten() });
+    }
 
-  // Gather unique target user IDs (from assigneeIds or assignedToId)
-  const rawAssignees = [
-    ...(parsed.data.assigneeIds || []),
-    ...(parsed.data.assignedToId ? [parsed.data.assignedToId] : []),
-  ];
-  const targetUserIds = Array.from(new Set(rawAssignees)).filter(Boolean);
+    // Gather unique target user IDs (from assigneeIds or assignedToId)
+    const rawAssignees = [
+      ...(parsed.data.assigneeIds || []),
+      ...(parsed.data.assignedToId ? [parsed.data.assignedToId] : []),
+    ];
+    const targetUserIds = Array.from(new Set(rawAssignees)).filter(Boolean);
 
-  if (targetUserIds.length === 0) {
-    return res.status(400).json({ error: "Please select at least one assignee for this action item." });
-  }
+    if (targetUserIds.length === 0) {
+      return res.status(400).json({ error: "Please select at least one assignee for this action item." });
+    }
 
-  // Enforce meeting lock
-  const meeting = await prisma.meeting.findUnique({
-    where: { id: parsed.data.meetingId },
-    select: { id: true, title: true, status: true, departmentId: true, organizerId: true },
-  });
-  await ensureUserPermissions(req);
-  if (meeting && isLockedMeetingStatus(meeting.status)) {
-    return res.status(403).json({
-      error: `Meeting is locked (${meeting.status.replace("_", " ")}). Cannot assign new action items. The meeting must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
+    // Enforce meeting lock
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: parsed.data.meetingId },
+      select: { id: true, title: true, status: true, departmentId: true, organizerId: true },
     });
-  }
-
-  // Enforce that deadline cannot be in the past
-  const deadlineDate = new Date(parsed.data.deadline);
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  if (deadlineDate.getTime() < startOfToday.getTime()) {
-    return res.status(400).json({ error: "Action item deadline cannot be in the past." });
-  }
-
-  // Resolve assigner name
-  const assigner = await prisma.user.findUnique({
-    where: { id: req.user!.userId },
-    select: { name: true },
-  });
-  const assignerName = assigner?.name || "Meeting Organizer";
-  const deadlineFormatted = deadlineDate.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-
-  // Resolve departmentId
-  let deptId = parsed.data.departmentId || meeting?.departmentId;
-  if (!deptId) {
-    const firstUser = await prisma.user.findUnique({
-      where: { id: targetUserIds[0] },
-      select: { departmentId: true },
-    });
-    deptId = firstUser?.departmentId || "";
-  }
-  if (!deptId) {
-    const firstDept = await prisma.department.findFirst({ select: { id: true } });
-    deptId = firstDept?.id || "";
-  }
-
-  const assignmentMode = parsed.data.assignmentMode || "SHARED";
-  const count = await prisma.actionItem.count();
-
-  // Mode: INDIVIDUAL -> create separate action item for each selected user
-  if (assignmentMode === "INDIVIDUAL" && targetUserIds.length > 1) {
-    const createdItems: any[] = [];
-    let currentIdx = 0;
-
-    for (const userId of targetUserIds) {
-      currentIdx++;
-      let userDeptId = deptId;
-      const userObj = await prisma.user.findUnique({ where: { id: userId }, select: { departmentId: true } });
-      if (userObj?.departmentId) userDeptId = userObj.departmentId;
-
-      const item = await prisma.actionItem.create({
-        data: {
-          code: makeCode("ACT", count + currentIdx),
-          meetingId: parsed.data.meetingId,
-          decisionId: parsed.data.decisionId || undefined,
-          title: parsed.data.title,
-          description: parsed.data.description,
-          assignedToId: userId,
-          departmentId: userDeptId,
-          priority: parsed.data.priority,
-          deadline: deadlineDate,
-          assignees: {
-            create: [{ userId }],
-          },
-        },
-        include: withMeta,
+    await ensureUserPermissions(req);
+    if (meeting && isLockedMeetingStatus(meeting.status)) {
+      return res.status(403).json({
+        error: `Meeting is locked (${meeting.status.replace("_", " ")}). Cannot assign new action items. The meeting must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
       });
+    }
 
+    // Enforce that deadline cannot be in the past
+    const deadlineDate = new Date(parsed.data.deadline);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    if (deadlineDate.getTime() < startOfToday.getTime()) {
+      return res.status(400).json({ error: "Action item deadline cannot be in the past." });
+    }
+
+    // Resolve assigner name
+    const assigner = await prisma.user.findUnique({
+      where: { id: req.user!.userId },
+      select: { name: true },
+    });
+    const assignerName = assigner?.name || "Meeting Organizer";
+    const deadlineFormatted = deadlineDate.toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+
+    // Resolve departmentId
+    let deptId = parsed.data.departmentId || meeting?.departmentId;
+    if (!deptId) {
+      const firstUser = await prisma.user.findUnique({
+        where: { id: targetUserIds[0] },
+        select: { departmentId: true },
+      });
+      deptId = firstUser?.departmentId || "";
+    }
+    if (!deptId) {
+      const firstDept = await prisma.department.findFirst({ select: { id: true } });
+      deptId = firstDept?.id || "";
+    }
+
+    const assignmentMode = parsed.data.assignmentMode || "SHARED";
+
+    // Mode: INDIVIDUAL -> create separate action item for each selected user
+    if (assignmentMode === "INDIVIDUAL" && targetUserIds.length > 1) {
+      const createdItems: any[] = [];
+      const generatedCodes = await getNextCodes("ACT", targetUserIds.length);
+
+      for (let i = 0; i < targetUserIds.length; i++) {
+        const userId = targetUserIds[i];
+        let userDeptId = deptId;
+        const userObj = await prisma.user.findUnique({ where: { id: userId }, select: { departmentId: true } });
+        if (userObj?.departmentId) userDeptId = userObj.departmentId;
+
+        const item = await prisma.actionItem.create({
+          data: {
+            code: generatedCodes[i],
+            meetingId: parsed.data.meetingId,
+            decisionId: parsed.data.decisionId || undefined,
+            title: parsed.data.title,
+            description: parsed.data.description,
+            assignedToId: userId,
+            departmentId: userDeptId,
+            priority: parsed.data.priority,
+            deadline: deadlineDate,
+            assignees: {
+              create: [{ userId }],
+            },
+          },
+          include: withMeta,
+        });
+
+        await prisma.notification.create({
+          data: {
+            userId,
+            type: "ACTION_ASSIGNED",
+            title: "New action item assigned",
+            message: `"${item.title}" (${item.code}) is due ${new Date(item.deadline).toDateString()}.`,
+            link: `/action-items/${item.id}`,
+          },
+        });
+
+        // Send email strictly to this assigned individual
+        if (item.assignedTo?.email) {
+          sendActionItemAssignedEmail({
+            assignees: [{ email: item.assignedTo.email, name: item.assignedTo.name || "Assignee" }],
+            taskTitle: item.title,
+            deadline: deadlineFormatted,
+            priority: item.priority,
+            meetingTitle: meeting?.title || "Meeting",
+            assignedByName: assignerName,
+            meetingId: parsed.data.meetingId,
+            taskCode: item.code,
+            description: item.description || undefined,
+          }).catch(console.error);
+        }
+
+        createdItems.push(shapeActionItem(item));
+      }
+
+      return res.status(201).json({
+        ...createdItems[0],
+        createdItems,
+        multipleCreated: true,
+        count: createdItems.length,
+      });
+    }
+
+    // Mode: SHARED (or single user) -> 1 action item with all assignees
+    const itemCode = await getNextCode("ACT");
+    const item = await prisma.actionItem.create({
+      data: {
+        code: itemCode,
+        meetingId: parsed.data.meetingId,
+        decisionId: parsed.data.decisionId || undefined,
+        title: parsed.data.title,
+        description: parsed.data.description,
+        assignedToId: targetUserIds[0], // primary assignee for backward compat
+        departmentId: deptId,
+        priority: parsed.data.priority,
+        deadline: deadlineDate,
+        assignees: {
+          create: targetUserIds.map((userId) => ({ userId })),
+        },
+      },
+      include: withMeta,
+    });
+
+    // Notify ALL assigned users
+    for (const uid of targetUserIds) {
       await prisma.notification.create({
         data: {
-          userId,
+          userId: uid,
           type: "ACTION_ASSIGNED",
           title: "New action item assigned",
           message: `"${item.title}" (${item.code}) is due ${new Date(item.deadline).toDateString()}.`,
           link: `/action-items/${item.id}`,
         },
       });
-
-      // Send email strictly to this assigned individual
-      if (item.assignedTo?.email) {
-        sendActionItemAssignedEmail({
-          assignees: [{ email: item.assignedTo.email, name: item.assignedTo.name || "Assignee" }],
-          taskTitle: item.title,
-          deadline: deadlineFormatted,
-          priority: item.priority,
-          meetingTitle: meeting?.title || "Meeting",
-          assignedByName: assignerName,
-          meetingId: parsed.data.meetingId,
-          taskCode: item.code,
-          description: item.description || undefined,
-        }).catch(console.error);
-      }
-
-      createdItems.push(shapeActionItem(item));
     }
 
-    return res.status(201).json({
-      ...createdItems[0],
-      createdItems,
-      multipleCreated: true,
-      count: createdItems.length,
-    });
-  }
+    // Send email strictly to each designated assignee
+    const assigneesToSend = (item.assignees || []).map((a: any) => a.user).filter((u: any) => u && u.email);
+    if (assigneesToSend.length === 0 && item.assignedTo?.email) {
+      assigneesToSend.push(item.assignedTo);
+    }
+    for (const u of assigneesToSend) {
+      sendActionItemAssignedEmail({
+        assignees: [{ email: u.email, name: u.name || "Assignee" }],
+        taskTitle: item.title,
+        deadline: deadlineFormatted,
+        priority: item.priority,
+        meetingTitle: meeting?.title || "Meeting",
+        assignedByName: assignerName,
+        meetingId: parsed.data.meetingId,
+        taskCode: item.code,
+        description: item.description || undefined,
+      }).catch(console.error);
+    }
 
-  // Mode: SHARED (or single user) -> 1 action item with all assignees
-  const item = await prisma.actionItem.create({
-    data: {
-      code: makeCode("ACT", count + 1),
-      meetingId: parsed.data.meetingId,
-      decisionId: parsed.data.decisionId || undefined,
-      title: parsed.data.title,
-      description: parsed.data.description,
-      assignedToId: targetUserIds[0], // primary assignee for backward compat
-      departmentId: deptId,
-      priority: parsed.data.priority,
-      deadline: deadlineDate,
-      assignees: {
-        create: targetUserIds.map((userId) => ({ userId })),
-      },
-    },
-    include: withMeta,
-  });
-
-  // Notify ALL assigned users
-  for (const uid of targetUserIds) {
-    await prisma.notification.create({
-      data: {
-        userId: uid,
-        type: "ACTION_ASSIGNED",
-        title: "New action item assigned",
-        message: `"${item.title}" (${item.code}) is due ${new Date(item.deadline).toDateString()}.`,
-        link: `/action-items/${item.id}`,
-      },
-    });
+    return res.status(201).json(shapeActionItem(item));
+  } catch (err: any) {
+    console.error("Action item creation error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to create action item." });
   }
-
-  // Send email strictly to each designated assignee
-  const assigneesToSend = (item.assignees || []).map((a: any) => a.user).filter((u: any) => u && u.email);
-  if (assigneesToSend.length === 0 && item.assignedTo?.email) {
-    assigneesToSend.push(item.assignedTo);
-  }
-  for (const u of assigneesToSend) {
-    sendActionItemAssignedEmail({
-      assignees: [{ email: u.email, name: u.name || "Assignee" }],
-      taskTitle: item.title,
-      deadline: deadlineFormatted,
-      priority: item.priority,
-      meetingTitle: meeting?.title || "Meeting",
-      assignedByName: assignerName,
-      meetingId: parsed.data.meetingId,
-      taskCode: item.code,
-      description: item.description || undefined,
-    }).catch(console.error);
-  }
-
-  res.status(201).json(shapeActionItem(item));
 });
 
 // ---------- Batch Create (Multiple action items to one user or multiple users) ----------
@@ -319,94 +324,166 @@ const batchCreateSchema = z.object({
 });
 
 router.post("/batch", requirePermission("action_items:create"), async (req: AuthedRequest, res) => {
-  const parsed = batchCreateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid batch action items payload.", details: parsed.error.flatten() });
-  }
-
-  const meeting = await prisma.meeting.findUnique({
-    where: { id: parsed.data.meetingId },
-    select: { id: true, title: true, status: true, departmentId: true, organizerId: true },
-  });
-  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
-
-  await ensureUserPermissions(req);
-  if (isLockedMeetingStatus(meeting.status)) {
-    return res.status(403).json({
-      error: `Meeting is locked (${meeting.status.replace("_", " ")}). The meeting must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
-    });
-  }
-
-  // Resolve assigner name
-  const assigner = await prisma.user.findUnique({
-    where: { id: req.user!.userId },
-    select: { name: true },
-  });
-  const assignerName = assigner?.name || "Meeting Organizer";
-
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-
-  let currentCount = await prisma.actionItem.count();
-  const createdList: any[] = [];
-
-  for (const itemData of parsed.data.items) {
-    const rawAssignees = Array.from(new Set(itemData.assigneeIds)).filter(Boolean);
-    if (rawAssignees.length === 0) continue;
-
-    const deadlineDate = new Date(itemData.deadline);
-    if (deadlineDate.getTime() < startOfToday.getTime()) {
-      return res.status(400).json({ error: `Deadline for "${itemData.title}" cannot be in the past.` });
+  try {
+    const parsed = batchCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid batch action items payload.", details: parsed.error.flatten() });
     }
 
-    const deadlineFormatted = deadlineDate.toLocaleDateString("en-US", {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: parsed.data.meetingId },
+      select: { id: true, title: true, status: true, departmentId: true, organizerId: true },
     });
+    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-    const assignmentMode = itemData.assignmentMode || "SHARED";
+    await ensureUserPermissions(req);
+    if (isLockedMeetingStatus(meeting.status)) {
+      return res.status(403).json({
+        error: `Meeting is locked (${meeting.status.replace("_", " ")}). The meeting must be unlocked first by an administrator with ADMIN_OVERRIDE permission providing a reason.`,
+      });
+    }
 
-    if (assignmentMode === "INDIVIDUAL" && rawAssignees.length > 1) {
-      for (const uid of rawAssignees) {
-        currentCount++;
+    // Resolve assigner name
+    const assigner = await prisma.user.findUnique({
+      where: { id: req.user!.userId },
+      select: { name: true },
+    });
+    const assignerName = assigner?.name || "Meeting Organizer";
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    // Calculate how many codes are needed
+    let totalCodesNeeded = 0;
+    for (const itemData of parsed.data.items) {
+      const rawAssignees = Array.from(new Set(itemData.assigneeIds)).filter(Boolean);
+      if (rawAssignees.length === 0) continue;
+      const assignmentMode = itemData.assignmentMode || "SHARED";
+      if (assignmentMode === "INDIVIDUAL" && rawAssignees.length > 1) {
+        totalCodesNeeded += rawAssignees.length;
+      } else {
+        totalCodesNeeded += 1;
+      }
+    }
+
+    const batchCodes = await getNextCodes("ACT", totalCodesNeeded);
+    let codeIndex = 0;
+    const createdList: any[] = [];
+
+    for (const itemData of parsed.data.items) {
+      const rawAssignees = Array.from(new Set(itemData.assigneeIds)).filter(Boolean);
+      if (rawAssignees.length === 0) continue;
+
+      const deadlineDate = new Date(itemData.deadline);
+      if (deadlineDate.getTime() < startOfToday.getTime()) {
+        return res.status(400).json({ error: `Deadline for "${itemData.title}" cannot be in the past.` });
+      }
+
+      const deadlineFormatted = deadlineDate.toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+
+      const assignmentMode = itemData.assignmentMode || "SHARED";
+
+      if (assignmentMode === "INDIVIDUAL" && rawAssignees.length > 1) {
+        for (const uid of rawAssignees) {
+          const itemCode = batchCodes[codeIndex++] || (await getNextCode("ACT"));
+          let uDeptId = meeting.departmentId;
+          const u = await prisma.user.findUnique({ where: { id: uid }, select: { departmentId: true } });
+          if (u?.departmentId) uDeptId = u.departmentId;
+
+          const it = await prisma.actionItem.create({
+            data: {
+              code: itemCode,
+              meetingId: parsed.data.meetingId,
+              decisionId: itemData.decisionId || undefined,
+              title: itemData.title,
+              description: itemData.description,
+              assignedToId: uid,
+              departmentId: uDeptId,
+              priority: itemData.priority || "MEDIUM",
+              deadline: deadlineDate,
+              assignees: {
+                create: [{ userId: uid }],
+              },
+            },
+            include: withMeta,
+          });
+
+          await prisma.notification.create({
+            data: {
+              userId: uid,
+              type: "ACTION_ASSIGNED",
+              title: "New action item assigned",
+              message: `"${it.title}" (${it.code}) is due ${new Date(it.deadline).toDateString()}.`,
+              link: `/action-items/${it.id}`,
+            },
+          });
+
+          // Send email strictly to this assigned individual
+          if (it.assignedTo?.email) {
+            sendActionItemAssignedEmail({
+              assignees: [{ email: it.assignedTo.email, name: it.assignedTo.name || "Assignee" }],
+              taskTitle: it.title,
+              deadline: deadlineFormatted,
+              priority: it.priority,
+              meetingTitle: meeting.title || "Meeting",
+              assignedByName: assignerName,
+              meetingId: parsed.data.meetingId,
+              taskCode: it.code,
+              description: it.description || undefined,
+            }).catch(console.error);
+          }
+
+          createdList.push(shapeActionItem(it));
+        }
+      } else {
+        const itemCode = batchCodes[codeIndex++] || (await getNextCode("ACT"));
         let uDeptId = meeting.departmentId;
-        const u = await prisma.user.findUnique({ where: { id: uid }, select: { departmentId: true } });
+        const u = await prisma.user.findUnique({ where: { id: rawAssignees[0] }, select: { departmentId: true } });
         if (u?.departmentId) uDeptId = u.departmentId;
 
         const it = await prisma.actionItem.create({
           data: {
-            code: makeCode("ACT", currentCount),
+            code: itemCode,
             meetingId: parsed.data.meetingId,
             decisionId: itemData.decisionId || undefined,
             title: itemData.title,
             description: itemData.description,
-            assignedToId: uid,
+            assignedToId: rawAssignees[0],
             departmentId: uDeptId,
             priority: itemData.priority || "MEDIUM",
             deadline: deadlineDate,
             assignees: {
-              create: [{ userId: uid }],
+              create: rawAssignees.map((userId) => ({ userId })),
             },
           },
           include: withMeta,
         });
 
-        await prisma.notification.create({
-          data: {
-            userId: uid,
-            type: "ACTION_ASSIGNED",
-            title: "New action item assigned",
-            message: `"${it.title}" (${it.code}) is due ${new Date(it.deadline).toDateString()}.`,
-            link: `/action-items/${it.id}`,
-          },
-        });
+        for (const uid of rawAssignees) {
+          await prisma.notification.create({
+            data: {
+              userId: uid,
+              type: "ACTION_ASSIGNED",
+              title: "New action item assigned",
+              message: `"${it.title}" (${it.code}) is due ${new Date(it.deadline).toDateString()}.`,
+              link: `/action-items/${it.id}`,
+            },
+          });
+        }
 
-        // Send email strictly to this assigned individual
-        if (it.assignedTo?.email) {
+        // Send email strictly to each designated assignee
+        const assigneesToSend = (it.assignees || []).map((a: any) => a.user).filter((u: any) => u && u.email);
+        if (assigneesToSend.length === 0 && it.assignedTo?.email) {
+          assigneesToSend.push(it.assignedTo);
+        }
+        for (const u of assigneesToSend) {
           sendActionItemAssignedEmail({
-            assignees: [{ email: it.assignedTo.email, name: it.assignedTo.name || "Assignee" }],
+            assignees: [{ email: u.email, name: u.name || "Assignee" }],
             taskTitle: it.title,
             deadline: deadlineFormatted,
             priority: it.priority,
@@ -420,66 +497,13 @@ router.post("/batch", requirePermission("action_items:create"), async (req: Auth
 
         createdList.push(shapeActionItem(it));
       }
-    } else {
-      currentCount++;
-      let uDeptId = meeting.departmentId;
-      const u = await prisma.user.findUnique({ where: { id: rawAssignees[0] }, select: { departmentId: true } });
-      if (u?.departmentId) uDeptId = u.departmentId;
-
-      const it = await prisma.actionItem.create({
-        data: {
-          code: makeCode("ACT", currentCount),
-          meetingId: parsed.data.meetingId,
-          decisionId: itemData.decisionId || undefined,
-          title: itemData.title,
-          description: itemData.description,
-          assignedToId: rawAssignees[0],
-          departmentId: uDeptId,
-          priority: itemData.priority || "MEDIUM",
-          deadline: deadlineDate,
-          assignees: {
-            create: rawAssignees.map((userId) => ({ userId })),
-          },
-        },
-        include: withMeta,
-      });
-
-      for (const uid of rawAssignees) {
-        await prisma.notification.create({
-          data: {
-            userId: uid,
-            type: "ACTION_ASSIGNED",
-            title: "New action item assigned",
-            message: `"${it.title}" (${it.code}) is due ${new Date(it.deadline).toDateString()}.`,
-            link: `/action-items/${it.id}`,
-          },
-        });
-      }
-
-      // Send email strictly to each designated assignee
-      const assigneesToSend = (it.assignees || []).map((a: any) => a.user).filter((u: any) => u && u.email);
-      if (assigneesToSend.length === 0 && it.assignedTo?.email) {
-        assigneesToSend.push(it.assignedTo);
-      }
-      for (const u of assigneesToSend) {
-        sendActionItemAssignedEmail({
-          assignees: [{ email: u.email, name: u.name || "Assignee" }],
-          taskTitle: it.title,
-          deadline: deadlineFormatted,
-          priority: it.priority,
-          meetingTitle: meeting.title || "Meeting",
-          assignedByName: assignerName,
-          meetingId: parsed.data.meetingId,
-          taskCode: it.code,
-          description: it.description || undefined,
-        }).catch(console.error);
-      }
-
-      createdList.push(shapeActionItem(it));
     }
-  }
 
-  res.status(201).json({ createdItems: createdList, count: createdList.length });
+    return res.status(201).json({ createdItems: createdList, count: createdList.length });
+  } catch (err: any) {
+    console.error("Batch action item creation error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to create batch action items." });
+  }
 });
 
 router.get("/:id", async (req: AuthedRequest, res) => {

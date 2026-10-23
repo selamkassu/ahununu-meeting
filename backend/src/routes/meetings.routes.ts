@@ -13,7 +13,7 @@ import {
   isLockedMeetingStatus,
 } from "../utils/enums";
 import { checkOwnershipAccess, ensureUserPermissions } from "../utils/ownership";
-import { makeCode } from "../utils/codes";
+import { makeCode, getNextCode } from "../utils/codes";
 import {
   sendMeetingInvitationEmail,
   sendMeetingCancellationEmail,
@@ -397,11 +397,11 @@ router.post(
       });
     }
 
-    const count = await prisma.meeting.count();
+    const meetingCode = await getNextCode("MTG");
 
     const meeting = await prisma.meeting.create({
       data: {
-        code: makeCode("MTG", count + 1),
+        code: meetingCode,
         title: data.title,
         description: data.description,
         date: new Date(data.date),
@@ -2787,11 +2787,11 @@ router.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ error: "Give the decision a title." });
-    const count = await prisma.decision.count();
+    const decisionCode = await getNextCode("DEC");
     const decision = await prisma.decision.create({
       data: {
         ...parsed.data,
-        code: makeCode("DEC", count + 1),
+        code: decisionCode,
         meetingId: req.params.id,
       },
     });

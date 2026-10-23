@@ -59,10 +59,25 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const res = await fetch(buildUrl(path), {
-    ...options,
-    headers: { ...(options.headers as Record<string, string>), ...headers },
-  });
+  const controller = new AbortController();
+  const timeoutMs = 30000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(buildUrl(path), {
+      ...options,
+      signal: options.signal || controller.signal,
+      headers: { ...(options.headers as Record<string, string>), ...headers },
+    });
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new ApiError("Request timed out. Please try again.", 408);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (res.status === 204) return undefined as unknown as T;
 
