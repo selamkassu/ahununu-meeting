@@ -1,5 +1,5 @@
-import React from "react";
-import { NavLink } from "react-router-dom";
+import React, { useState, useRef, useEffect } from "react";
+import { NavLink, Link, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   CalendarDays,
@@ -14,6 +14,9 @@ import {
   NotebookText,
   Paperclip,
   ShieldCheck,
+  User,
+  ChevronsUpDown,
+  LogOut,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { Logo } from "../ui/Logo";
@@ -36,7 +39,20 @@ const nav = [
 ];
 
 export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "desktop" | "mobile"; onNavigate?: () => void }) {
-  const { hasPermission } = useAuth();
+  const { user, logout, hasPermission } = useAuth();
+  const navigate = useNavigate();
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const wrapperClass =
     variant === "desktop"
@@ -82,14 +98,94 @@ export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "deskto
           ))}
       </nav>
 
-      {/* Need help? card */}
-      <div className="border-t border-slate2-100 p-4">
-        <div className="rounded-xl border border-accent/40 bg-accent/20 p-3.5">
-          <p className="text-xs font-bold text-brand">Need help?</p>
-          <p className="mt-1 text-[11px] leading-relaxed text-slate2-500">
-            Contact the portal admin or meeting secretary for support.
-          </p>
-        </div>
+      {/* User profile footer card with popover */}
+      <div className="relative border-t border-slate2-100 p-3" ref={userMenuRef}>
+        {userMenuOpen && (
+          <div className="absolute bottom-full left-3 mb-2 w-64 rounded-2xl border border-slate2-200/90 bg-white p-2 shadow-2xl z-50">
+            <Link
+              to="/profile"
+              onClick={() => {
+                setUserMenuOpen(false);
+                onNavigate?.();
+              }}
+              className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
+            >
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-slate2-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
+                <User size={18} strokeWidth={1.8} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Profile</p>
+                <p className="text-xs text-slate2-400">Personal details</p>
+              </div>
+            </Link>
+
+            <Link
+              to="/settings"
+              onClick={() => {
+                setUserMenuOpen(false);
+                onNavigate?.();
+              }}
+              className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
+            >
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-teal-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
+                <Settings size={18} strokeWidth={1.8} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Settings</p>
+                <p className="text-xs text-slate2-400">Credentials & active sessions</p>
+              </div>
+            </Link>
+
+            <div className="my-1.5 border-t border-slate2-100" />
+
+            <button
+              onClick={() => {
+                setUserMenuOpen(false);
+                logout();
+                navigate("/login");
+              }}
+              className="flex w-full items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-rose-50/70 group cursor-pointer"
+            >
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-rose-200/80 bg-rose-50 text-rose-600 transition-colors group-hover:bg-rose-100/80">
+                <LogOut size={18} strokeWidth={1.8} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-rose-600">Sign out</p>
+              </div>
+            </button>
+          </div>
+        )}
+
+        <button
+          onClick={() => setUserMenuOpen((v) => !v)}
+          className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-slate2-100 cursor-pointer focus:outline-none"
+        >
+          <div className="relative shrink-0">
+            <div
+              className="flex h-9 w-9 items-center justify-center rounded-lg text-xs font-bold text-slate2-800"
+              style={{ backgroundColor: user?.avatarColor || "#AED580" }}
+            >
+              {user?.name
+                ? user.name
+                    .split(" ")
+                    .map((p) => p[0])
+                    .slice(0, 2)
+                    .join("")
+                    .toUpperCase()
+                : "U"}
+            </div>
+            <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-emerald-500" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-slate2-800 truncate">
+              {user?.name}
+            </p>
+            <p className="text-[11px] text-slate2-400 truncate">
+              {user?.email}
+            </p>
+          </div>
+          <ChevronsUpDown size={15} className="text-slate2-400 shrink-0" />
+        </button>
       </div>
     </aside>
   );

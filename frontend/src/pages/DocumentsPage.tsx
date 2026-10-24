@@ -1,6 +1,19 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, Eye, Download, X, ExternalLink, Search, Trash2, AlertTriangle } from "lucide-react";
+import {
+  FileText,
+  Eye,
+  Download,
+  X,
+  ExternalLink,
+  Search,
+  Trash2,
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+} from "lucide-react";
 import { api, getToken, buildUrl } from "../api/client";
 import type { DocumentItem } from "../types";
 import { Card, CardHeader, EmptyState, CodeChip, Button } from "../components/ui/Primitives";
@@ -168,6 +181,9 @@ export default function DocumentsPage() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<"ALL" | "PDF" | "IMAGE" | "OFFICE" | "OTHER">("ALL");
 
+  const ITEMS_PER_PAGE = 10;
+  const [currentPage, setCurrentPage] = useState(1);
+
   useEffect(() => {
     api
       .get<DocumentItem[]>("/meetings/documents-overview/all")
@@ -175,6 +191,11 @@ export default function DocumentsPage() {
       .catch(() => setError("Failed to load documents."))
       .finally(() => setLoading(false));
   }, []);
+
+  // Reset to first page whenever search query or category filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, categoryFilter]);
 
   const getDocCategory = (fileName: string): "PDF" | "IMAGE" | "OFFICE" | "OTHER" => {
     const ext = getExt(fileName);
@@ -184,8 +205,9 @@ export default function DocumentsPage() {
     return "OTHER";
   };
 
-  const filteredDocuments = useMemo(() => {
-    return documents.filter((d) => {
+  // Filtered and sorted by createdAt descending (newest on top)
+  const sortedDocuments = useMemo(() => {
+    const list = documents.filter((d) => {
       const q = search.trim().toLowerCase();
       const matchesSearch =
         !q ||
@@ -196,7 +218,22 @@ export default function DocumentsPage() {
       const matchesCategory = categoryFilter === "ALL" || cat === categoryFilter;
       return matchesSearch && matchesCategory;
     });
+
+    return list.sort((a, b) => {
+      const timeA = new Date(a.createdAt).getTime();
+      const timeB = new Date(b.createdAt).getTime();
+      return timeB - timeA;
+    });
   }, [documents, search, categoryFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedDocuments.length / ITEMS_PER_PAGE));
+  const validCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+
+  // Exactly 10 items per page using slice
+  const paginatedDocuments = useMemo(() => {
+    const startIndex = (validCurrentPage - 1) * ITEMS_PER_PAGE;
+    return sortedDocuments.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [sortedDocuments, validCurrentPage]);
 
   const pdfCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "PDF").length, [documents]);
   const imgCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "IMAGE").length, [documents]);
@@ -377,7 +414,7 @@ export default function DocumentsPage() {
               <div key={i} className="h-14 animate-pulse rounded-lg bg-slate2-100" />
             ))}
           </div>
-        ) : filteredDocuments.length === 0 ? (
+        ) : sortedDocuments.length === 0 ? (
           <EmptyState
             title={documents.length === 0 ? "No documents attached yet" : "No documents match your filter"}
             description={
@@ -401,8 +438,9 @@ export default function DocumentsPage() {
             }
           />
         ) : (
-          <div className="divide-y divide-slate2-100">
-            {filteredDocuments.map((d) => (
+          <div>
+            <div className="divide-y divide-slate2-100">
+              {paginatedDocuments.map((d) => (
               <div key={d.id} className="flex items-center gap-4 px-5 py-3 hover:bg-slate2-50/50 transition-colors">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate2-100 text-slate2-500">
                   <FileText size={15} />
@@ -509,7 +547,86 @@ export default function DocumentsPage() {
               </div>
             ))}
           </div>
-        )}
+
+          {/* Pagination Controls */}
+          {sortedDocuments.length > 0 && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-slate2-100 bg-slate2-50/50 px-5 py-3.5 text-xs text-slate2-600">
+              <div className="flex items-center gap-2">
+                <span>
+                  Showing{" "}
+                  <span className="font-semibold text-slate2-900">
+                    {(validCurrentPage - 1) * ITEMS_PER_PAGE + 1}
+                  </span>{" "}
+                  to{" "}
+                  <span className="font-semibold text-slate2-900">
+                    {Math.min(validCurrentPage * ITEMS_PER_PAGE, sortedDocuments.length)}
+                  </span>{" "}
+                  of{" "}
+                  <span className="font-semibold text-slate2-900">
+                    {sortedDocuments.length}
+                  </span>{" "}
+                  items
+                </span>
+                <span className="text-slate2-300">·</span>
+                <span>
+                  Page <span className="font-semibold text-slate2-900">{validCurrentPage}</span> of{" "}
+                  <span className="font-semibold text-slate2-900">{totalPages}</span>
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                {/* First page button */}
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(1)}
+                  disabled={validCurrentPage <= 1}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate2-200 bg-white font-medium text-slate2-700 hover:bg-slate2-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white shadow-2xs cursor-pointer"
+                  title="Go to first page"
+                >
+                  <ChevronsLeft size={14} />
+                  <span>First</span>
+                </button>
+
+                {/* Previous page button */}
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={validCurrentPage <= 1}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate2-200 bg-white font-medium text-slate2-700 hover:bg-slate2-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white shadow-2xs cursor-pointer"
+                  title="Go to previous page"
+                >
+                  <ChevronLeft size={14} />
+                  <span>Previous</span>
+                </button>
+
+                {/* Next page button */}
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={validCurrentPage >= totalPages}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate2-200 bg-white font-medium text-slate2-700 hover:bg-slate2-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white shadow-2xs cursor-pointer"
+                  title="Go to next page"
+                >
+                  <span>Next</span>
+                  <ChevronRight size={14} />
+                </button>
+
+                {/* Last page button */}
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={validCurrentPage >= totalPages}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate2-200 bg-white font-medium text-slate2-700 hover:bg-slate2-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white shadow-2xs cursor-pointer"
+                  title="Go to last page"
+                >
+                  <span>Last</span>
+                  <ChevronsRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       </Card>
     </>
   );

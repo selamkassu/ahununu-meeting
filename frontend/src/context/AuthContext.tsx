@@ -8,6 +8,8 @@ interface AuthContextValue {
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  updateUser: (user: User) => void;
+  refreshUser: () => Promise<void>;
   /** Check if the current user's role includes the given permission */
   hasPermission: (permission: string) => boolean;
   /** Check if the current user's role includes ANY of the given permissions */
@@ -86,8 +88,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [hasPermission]
   );
 
+  const updateUser = useCallback((updated: User) => {
+    setUser(updated);
+  }, []);
+
+  const refreshUser = useCallback(async () => {
+    await loadMe();
+  }, [loadMe]);
+
   return (
-    <AuthContext.Provider value={{ user, loading, error, login, logout, hasPermission, hasAnyPermission }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        error,
+        login,
+        logout,
+        updateUser,
+        refreshUser,
+        hasPermission,
+        hasAnyPermission,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

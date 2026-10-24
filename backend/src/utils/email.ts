@@ -918,3 +918,65 @@ Ahununu Logistics Meeting Portal`;
     text
   );
 }
+
+// ══════════════════════════════════════════════
+//  8. Password Reset Request
+// ══════════════════════════════════════════════
+export async function sendPasswordResetEmail(opts: {
+  toEmail: string;
+  userName: string;
+  resetUrl: string;
+}): Promise<EmailDeliveryResult> {
+  const subject = `[Ahununu Portal] Password Reset Request`;
+
+  const body = `
+    ${greeting(opts.userName)}
+    
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #0b7a6b;border-radius:8px;padding:20px 24px;margin:0 0 20px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:#0b7a6b;margin-bottom:4px;">
+        Account Security
+      </div>
+      <h2 style="margin:0 0 8px;font-size:18px;font-weight:700;color:#0f172a;line-height:1.3;">
+        Reset Your Account Password
+      </h2>
+      <p style="margin:0;font-size:13px;color:#475569;line-height:1.5;">
+        A request has been received to reset the password for your Ahununu Logistics Meeting Management Portal account. Click the button below to set a new password:
+      </p>
+    </div>
+
+    <div style="text-align:center;margin:28px 0;">
+      <a href="${opts.resetUrl}"
+        style="display:inline-block;background:#0b7a6b;color:#ffffff;text-decoration:none;
+               font-size:14px;font-weight:700;padding:12px 32px;border-radius:8px;letter-spacing:0.3px;">
+        Reset My Password
+      </a>
+    </div>
+
+    <p style="font-size:12px;color:#64748b;line-height:1.5;margin:16px 0 0;">
+      This password reset link is valid for <strong>1 hour</strong>. If you did not request this reset, you can safely disregard this email — your existing password will remain unchanged.
+    </p>
+    <p style="font-size:11px;color:#94a3b8;line-height:1.4;margin:12px 0 0;word-break:break-all;">
+      If the button above does not work, copy and paste this link into your browser:<br/>
+      <a href="${opts.resetUrl}" style="color:#0b7a6b;">${opts.resetUrl}</a>
+    </p>
+  `;
+
+  const text = `AHUNUNU PORTAL - PASSWORD RESET REQUEST
+Hello ${opts.userName},
+
+A request has been received to reset the password for your Ahununu Logistics Meeting Management Portal account.
+Please visit the link below to choose a new password:
+
+${opts.resetUrl}
+
+This link is valid for 1 hour. If you did not make this request, you can safely disregard this email.
+
+Ahununu Logistics`;
+
+  return await sendEmailDetailed(
+    opts.toEmail,
+    subject,
+    htmlWrap("Password Reset Request", body),
+    text
+  );
+}

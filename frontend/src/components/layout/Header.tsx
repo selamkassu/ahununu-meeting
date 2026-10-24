@@ -9,6 +9,8 @@ import {
   CheckCircle2,
   MailOpen,
   Signature,
+  User,
+  Settings,
 } from "lucide-react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
@@ -307,15 +309,51 @@ export function Header({
             <ChevronDown size={14} className="text-slate2-400" />
           </button>
           {menuOpen && (
-            <div className="absolute right-0 mt-2 w-48 rounded-xl border border-slate2-200 bg-white py-1 shadow-xl">
+            <div className="absolute right-0 mt-2 w-64 rounded-2xl border border-slate2-200/90 bg-white p-2 shadow-2xl z-50">
+              <Link
+                to="/profile"
+                onClick={() => setMenuOpen(false)}
+                className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
+              >
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-slate2-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
+                  <User size={18} strokeWidth={1.8} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Profile</p>
+                  <p className="text-xs text-slate2-400">Personal details</p>
+                </div>
+              </Link>
+
+              <Link
+                to="/settings"
+                onClick={() => setMenuOpen(false)}
+                className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
+              >
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-teal-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
+                  <Settings size={18} strokeWidth={1.8} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Settings</p>
+                  <p className="text-xs text-slate2-400">Credentials & active sessions</p>
+                </div>
+              </Link>
+
+              <div className="my-1.5 border-t border-slate2-100" />
+
               <button
                 onClick={() => {
+                  setMenuOpen(false);
                   logout();
                   navigate("/login");
                 }}
-                className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate2-600 hover:bg-slate2-50"
+                className="flex w-full items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-rose-50/70 group cursor-pointer"
               >
-                <LogOut size={15} /> Sign out
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-rose-200/80 bg-rose-50 text-rose-600 transition-colors group-hover:bg-rose-100/80">
+                  <LogOut size={18} strokeWidth={1.8} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-rose-600">Sign out</p>
+                </div>
               </button>
             </div>
           )}

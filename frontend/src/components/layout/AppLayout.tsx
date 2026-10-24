@@ -20,6 +20,7 @@ const titles: Record<string, string> = {
   "/notifications": "Notifications",
   "/reports": "Reports",
   "/settings": "Settings",
+  "/profile": "My Profile",
 };
 
 function pageTitle(pathname: string): string {
