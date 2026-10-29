@@ -40,7 +40,8 @@ export function MeetingApprovalModal({
   onApproveSuccess,
   onApproveApi,
 }: MeetingApprovalModalProps) {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
+  const isAuthorizedApprover = hasPermission("meetings:approve") || hasPermission("ADMIN_OVERRIDE");
 
   const [tab, setTab] = useState<"draw" | "type">("draw");
   const [typedName, setTypedName] = useState(user?.name || "");
@@ -219,6 +220,10 @@ export function MeetingApprovalModal({
 
   const handleSubmit = async () => {
     setError(null);
+    if (!isAuthorizedApprover) {
+      setError("Access Denied: You do not have permission to approve meetings. This requires the 'Approve Meetings (or Approve Meeting & Minutes)' permission.");
+      return;
+    }
     let signatureDataUrl = "";
     if (tab === "draw") {
       if (!hasDrawn || !canvasRef.current) {
@@ -279,6 +284,19 @@ export function MeetingApprovalModal({
             </div>
           </div>
         </div>
+
+        {/* Permission Denied Warning */}
+        {!isAuthorizedApprover && (
+          <div className="flex items-start gap-2.5 rounded-lg bg-rose-50 border border-rose-200 p-3.5 text-xs text-rose-800">
+            <AlertCircle size={16} className="shrink-0 text-rose-600 mt-0.5" />
+            <div>
+              <p className="font-semibold text-rose-900">Permission Required</p>
+              <p className="mt-0.5 text-rose-700 leading-relaxed">
+                Your role does not have the <strong>Approve Meetings</strong> permission. Only authorized meeting approvers or system administrators can certify and approve meetings.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Reviewer & Timestamp */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-lg border border-slate2-200/80 bg-slate2-50/60 p-3 text-xs">
@@ -617,6 +635,7 @@ export function MeetingApprovalModal({
             onClick={handleSubmit}
             disabled={
               submitting
+              || !isAuthorizedApprover
               || !agreed
               || (tab === "draw" ? !hasDrawn : !typedName.trim())
               || (!allSigned && (!forceSubmit || forceReason.trim().length < 5))

@@ -89,8 +89,7 @@ const detailInclude = {
       signedAt: true,
       bypassReason: true,
       userAgent: true,
-      // signatureDataUrl intentionally excluded from the main meeting response
-      // (it can be up to 200KB of base64 per signer). Fetch via GET /:id/signatures when needed.
+      signatureDataUrl: true,
       user: { select: { id: true, name: true, avatarColor: true, jobTitle: true, role: { select: { name: true } } } },
     },
     orderBy: { signedAt: "asc" as const },
@@ -115,6 +114,7 @@ const workflowInclude = {
       signedAt: true,
       bypassReason: true,
       userAgent: true,
+      signatureDataUrl: true,
       user: { select: { id: true, name: true, avatarColor: true, jobTitle: true, role: { select: { name: true } } } },
     },
     orderBy: { signedAt: "asc" as const },
@@ -133,25 +133,24 @@ function checkMeetingLock(meeting: { status: string }, req: AuthedRequest): stri
 }
 
 /**
- * Check if user is authorized to approve the meeting (Organizer or authorized role with meetings:approve / ADMIN_OVERRIDE)
+ * Check if user is authorized to approve the meeting.
+ * Strictly requires the "meetings:approve" permission (or system administrator ADMIN_OVERRIDE).
+ * Being the meeting organizer or having "meetings:certify_lock" does NOT grant approval authority.
  */
-async function canApproveMeeting(organizerId: string, req: AuthedRequest): Promise<boolean> {
+async function canApproveMeeting(req: AuthedRequest): Promise<boolean> {
   if (!req.user) return false;
   await ensureUserPermissions(req);
   if (req.userPermissions?.includes("ADMIN_OVERRIDE")) return true;
-  if (organizerId === req.user.userId) return true;
 
-  return (
-    req.userPermissions?.includes("meetings:approve") ||
-    req.userPermissions?.includes("meetings:certify_lock") ||
-    false
-  );
+  return req.userPermissions?.includes("meetings:approve") || false;
 }
 
 /**
  * Check if a meeting has reached its conclusion (status is COMPLETED or current server time >= meeting end datetime)
  */
 function hasMeetingEnded(meeting: { date: Date | string; endTime: string; status: string }): boolean {
+  if (meeting.status === "CANCELLED") return false;
+
   // If the meeting has progressed beyond SCHEDULED, attendance can be finalized
   if (
     [
@@ -164,12 +163,19 @@ function hasMeetingEnded(meeting: { date: Date | string; endTime: string; status
   ) {
     return true;
   }
-  if (meeting.status === "CANCELLED") return false;
 
+  // Meetings on today's calendar date or in the past can finalize attendance
+  // (real-world sessions frequently conclude early or record roster during proceedings)
   const dateObj = typeof meeting.date === "string" ? new Date(meeting.date) : meeting.date;
-  const dateStr = dateObj.toISOString().split("T")[0];
+  const meetingDateStr = dateObj.toISOString().split("T")[0];
+  const nowDateStr = new Date().toISOString().split("T")[0];
+
+  if (meetingDateStr <= nowDateStr) {
+    return true;
+  }
+
   const [endHours, endMinutes] = (meeting.endTime || "00:00").split(":").map(Number);
-  const [year, month, day] = dateStr.split("-").map(Number);
+  const [year, month, day] = meetingDateStr.split("-").map(Number);
 
   // Accounts for East Africa Time (UTC+3, which is 3 hours ahead of UTC server time on Render)
   const utcEnd = Date.UTC(year, month - 1, day, endHours || 0, endMinutes || 0, 0);
@@ -1341,9 +1347,7 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
     await ensureUserPermissions(req);
     const isOrganizer = meeting.organizerId === req.user!.userId;
     const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-    const canApprove =
-      req.userPermissions?.includes("meetings:approve") ||
-      req.userPermissions?.includes("meetings:certify_lock");
+    const canApprove = req.userPermissions?.includes("meetings:approve");
     const canEdit = checkOwnershipAccess(req, "meetings", "edit", {
       departmentId: meeting.departmentId,
       ownerId: meeting.organizerId,
@@ -1519,10 +1523,10 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
 
     if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-    const authorized = await canApproveMeeting(meeting.organizerId, req);
+    const authorized = await canApproveMeeting(req);
     if (!authorized) {
       return res.status(403).json({
-        error: "Only the meeting organizer or an authorized administrator can approve this meeting.",
+        error: "Access Denied: You do not have permission to approve meetings. This requires the 'Approve Meetings (or Approve Meeting & Minutes)' permission.",
       });
     }
 
@@ -2344,13 +2348,18 @@ router.post(
       );
     }
 
-    // Mark meeting attendance as finalized
+    // Mark meeting attendance as finalized (and move SCHEDULED meetings to IN_PROGRESS)
+    const updateData: any = {
+      attendanceFinalized: true,
+      attendanceFinalizedAt: new Date(),
+    };
+    if (meeting.status === "SCHEDULED") {
+      updateData.status = "IN_PROGRESS";
+    }
+
     const updated = await (prisma.meeting as any).update({
       where: { id: req.params.id },
-      data: {
-        attendanceFinalized: true,
-        attendanceFinalizedAt: new Date(),
-      },
+      data: updateData,
       include: {
         ...workflowInclude,
         participants: {

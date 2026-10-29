@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { MinutesOverviewItem, MeetingDetail } from "../types";
 import { Card, CardHeader, EmptyState, CodeChip, Button } from "../components/ui/Primitives";
 import { RichTextRenderer } from "../components/editor/RichTextRenderer";
+import { useAuth } from "../context/AuthContext";
 import { printHtml, printMeetingMinutes } from "../utils/printUtility";
 import {
   exportAllMinutesToExcel,
@@ -14,6 +15,8 @@ import {
 } from "../utils/exportReport";
 
 export default function MinutesOverviewPage() {
+  const { hasPermission } = useAuth();
+  const canExport = hasPermission("reports:export") || hasPermission("ADMIN_OVERRIDE");
   const [items, setItems] = useState<MinutesOverviewItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -155,7 +158,7 @@ export default function MinutesOverviewPage() {
     }
   };
 
-  const headerActions = (
+  const headerActions = canExport ? (
     <div className="flex items-center gap-2">
       <Button
         variant="secondary"
@@ -223,7 +226,7 @@ export default function MinutesOverviewPage() {
         )}
       </div>
     </div>
-  );
+  ) : null;
 
   return (
     <Card>
@@ -258,28 +261,32 @@ export default function MinutesOverviewPage() {
                 </p>
               </div>
               <div className="shrink-0 flex flex-wrap items-center gap-2 self-start sm:self-center">
-                <Button
-                  variant="secondary"
-                  type="button"
-                  onClick={() => handlePrintSingleMinute(m)}
-                  disabled={actionLoadingId === `print-${m.id}`}
-                  className="text-xs py-1 px-2.5 h-7 inline-flex items-center gap-1 bg-white hover:bg-slate2-50 text-slate2-700 border border-slate2-200"
-                  title="Print Full Official Meeting Minutes"
-                >
-                  <Printer size={12} className={actionLoadingId === `print-${m.id}` ? "animate-spin text-brand" : "text-slate2-600"} />
-                  <span>{actionLoadingId === `print-${m.id}` ? "Loading..." : "Print Report"}</span>
-                </Button>
-                <Button
-                  variant="secondary"
-                  type="button"
-                  onClick={() => handleExportSingleMinutePdf(m)}
-                  disabled={actionLoadingId === `pdf-${m.id}`}
-                  className="text-xs py-1 px-2.5 h-7 inline-flex items-center gap-1 bg-white hover:bg-slate2-50 text-slate2-700 border border-slate2-200"
-                  title="Export Full PDF Report"
-                >
-                  <Download size={12} className={actionLoadingId === `pdf-${m.id}` ? "animate-spin text-brand" : "text-brand"} />
-                  <span>{actionLoadingId === `pdf-${m.id}` ? "Exporting..." : "Export PDF"}</span>
-                </Button>
+                {canExport && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      type="button"
+                      onClick={() => handlePrintSingleMinute(m)}
+                      disabled={actionLoadingId === `print-${m.id}`}
+                      className="text-xs py-1 px-2.5 h-7 inline-flex items-center gap-1 bg-white hover:bg-slate2-50 text-slate2-700 border border-slate2-200"
+                      title="Print Full Official Meeting Minutes"
+                    >
+                      <Printer size={12} className={actionLoadingId === `print-${m.id}` ? "animate-spin text-brand" : "text-slate2-600"} />
+                      <span>{actionLoadingId === `print-${m.id}` ? "Loading..." : "Print Report"}</span>
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      type="button"
+                      onClick={() => handleExportSingleMinutePdf(m)}
+                      disabled={actionLoadingId === `pdf-${m.id}`}
+                      className="text-xs py-1 px-2.5 h-7 inline-flex items-center gap-1 bg-white hover:bg-slate2-50 text-slate2-700 border border-slate2-200"
+                      title="Export Full PDF Report"
+                    >
+                      <Download size={12} className={actionLoadingId === `pdf-${m.id}` ? "animate-spin text-brand" : "text-brand"} />
+                      <span>{actionLoadingId === `pdf-${m.id}` ? "Exporting..." : "Export PDF"}</span>
+                    </Button>
+                  </>
+                )}
                 <Link
                   to={`/meetings/${m.meeting.id}`}
                   className="text-xs text-brand hover:underline font-medium px-2 py-1"

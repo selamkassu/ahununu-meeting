@@ -154,22 +154,24 @@ export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "deskto
               </div>
             </Link>
 
-            <Link
-              to="/settings"
-              onClick={() => {
-                setUserMenuOpen(false);
-                onNavigate?.();
-              }}
-              className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
-            >
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-teal-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
-                <Settings size={18} strokeWidth={1.8} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Settings</p>
-                <p className="text-xs text-slate2-400">Credentials & active sessions</p>
-              </div>
-            </Link>
+            {hasPermission("settings:view") && (
+              <Link
+                to="/settings"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  onNavigate?.();
+                }}
+                className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
+              >
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-teal-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
+                  <Settings size={18} strokeWidth={1.8} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Settings</p>
+                  <p className="text-xs text-slate2-400">Credentials & active sessions</p>
+                </div>
+              </Link>
+            )}
 
             <div className="my-1.5 border-t border-slate2-100" />
 

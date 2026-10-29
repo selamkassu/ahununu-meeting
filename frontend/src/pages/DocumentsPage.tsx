@@ -73,15 +73,16 @@ async function triggerDownload(
   }
 }
 
-// ─── Inline Viewer Modal (PDF / images only) ──────────────────────────────────
 function InlineViewer({
   doc,
   onClose,
   onDownload,
+  canDownload = true,
 }: {
   doc: DocumentItem;
   onClose: () => void;
   onDownload: () => void;
+  canDownload?: boolean;
 }) {
   const viewUrl = buildViewUrl(doc.meeting.id, doc.id);
 
@@ -134,16 +135,18 @@ function InlineViewer({
             >
               <ExternalLink size={14} color="#475569" />
             </a>
-            <button type="button" onClick={onDownload} title="Download"
-              style={{
-                width: 32, height: 32, display: "inline-flex",
-                alignItems: "center", justifyContent: "center",
-                borderRadius: 6, border: "1.5px solid #0B7A6B",
-                background: "#0B7A6B", cursor: "pointer",
-              }}
-            >
-              <Download size={14} color="#fff" />
-            </button>
+            {canDownload && (
+              <button type="button" onClick={onDownload} title="Download"
+                style={{
+                  width: 32, height: 32, display: "inline-flex",
+                  alignItems: "center", justifyContent: "center",
+                  borderRadius: 6, border: "1.5px solid #0B7A6B",
+                  background: "#0B7A6B", cursor: "pointer",
+                }}
+              >
+                <Download size={14} color="#fff" />
+              </button>
+            )}
             <button type="button" onClick={onClose} title="Close (Esc)"
               style={{
                 width: 32, height: 32, display: "inline-flex",
@@ -239,11 +242,23 @@ export default function DocumentsPage() {
   const imgCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "IMAGE").length, [documents]);
   const officeCount = useMemo(() => documents.filter((d) => getDocCategory(d.fileName) === "OFFICE").length, [documents]);
 
+  const canDownload = hasPermission("documents:download") || hasPermission("ADMIN_OVERRIDE");
+
   const canDeleteDoc = (d: DocumentItem) => {
     if (hasPermission("ADMIN_OVERRIDE")) return true;
-    if (hasPermission("documents:delete")) return true;
-    if (hasPermission("meetings:edit:all")) return true;
-    if (user?.id === d.uploadedBy?.id || (d.meeting.organizerId && user?.id === d.meeting.organizerId)) return true;
+    if (hasPermission("documents:delete:all")) return true;
+    const meetingDeptId = (d.meeting as any)?.departmentId || (d.meeting?.department as any)?.id;
+    const sameDept = (user?.department?.id && meetingDeptId === user.department.id) ||
+      (user?.department?.name && d.meeting?.department?.name === user.department.name);
+    if (hasPermission("documents:delete:dept") && sameDept) {
+      return true;
+    }
+    if (
+      (hasPermission("documents:delete:own") || hasPermission("documents:delete")) &&
+      (user?.id === d.uploadedBy?.id || (d.meeting.organizerId && user?.id === d.meeting.organizerId))
+    ) {
+      return true;
+    }
     return false;
   };
 
@@ -281,6 +296,7 @@ export default function DocumentsPage() {
           doc={viewing}
           onClose={() => setViewing(null)}
           onDownload={() => { triggerDownload(viewing.meeting.id, viewing.id, viewing.fileName, setError); }}
+          canDownload={canDownload}
         />
       )}
 
@@ -494,29 +510,31 @@ export default function DocumentsPage() {
                     <Eye size={15} color="#475569" />
                   </button>
 
-                  {/* Download — always export/save */}
-                  <button
-                    type="button"
-                    onClick={() => handleDownload(d)}
-                    title="Export / Download"
-                    style={{
-                      width: 34, height: 34,
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                      borderRadius: 8, border: "1.5px solid #0B7A6B",
-                      background: "#0B7A6B", cursor: "pointer", flexShrink: 0,
-                      transition: "background 0.15s, border-color 0.15s",
-                    }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = "#095f55";
-                      (e.currentTarget as HTMLElement).style.borderColor = "#095f55";
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = "#0B7A6B";
-                      (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
-                    }}
-                  >
-                    <Download size={15} color="#ffffff" />
-                  </button>
+                  {/* Download — export/save */}
+                  {canDownload && (
+                    <button
+                      type="button"
+                      onClick={() => handleDownload(d)}
+                      title="Export / Download"
+                      style={{
+                        width: 34, height: 34,
+                        display: "inline-flex", alignItems: "center", justifyContent: "center",
+                        borderRadius: 8, border: "1.5px solid #0B7A6B",
+                        background: "#0B7A6B", cursor: "pointer", flexShrink: 0,
+                        transition: "background 0.15s, border-color 0.15s",
+                      }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = "#095f55";
+                        (e.currentTarget as HTMLElement).style.borderColor = "#095f55";
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as HTMLElement).style.background = "#0B7A6B";
+                        (e.currentTarget as HTMLElement).style.borderColor = "#0B7A6B";
+                      }}
+                    >
+                      <Download size={15} color="#ffffff" />
+                    </button>
+                  )}
 
                   {/* Delete Document */}
                   {canDeleteDoc(d) && (

@@ -54,7 +54,7 @@ export function Header({
   title: string;
   onMenuClick: () => void;
 }) {
-  const { user, logout } = useAuth();
+  const { user, logout, hasPermission } = useAuth();
   const { notifications, unreadCount, markRead, markAllRead } =
     useNotifications();
   const navigate = useNavigate();
@@ -103,25 +103,26 @@ export function Header({
       {/* Right: notification bell + user menu */}
       <div className="flex items-center gap-2">
         {/* ── Notification Bell ── */}
-        <div className="relative" ref={notifRef}>
-          <button
-            id="notification-bell-btn"
-            onClick={() => setNotifOpen((v) => !v)}
-            className="focus-ring relative rounded-full p-2 text-slate2-500 hover:bg-slate2-100"
-            aria-label={`Notifications${unreadCount > 0 ? `, ${unreadCount} unread` : ""}`}
-          >
-            <Bell size={19} />
-            {/* Red unread count badge */}
-            {unreadCount > 0 && (
-              <span className="absolute -right-0.5 -top-0.5 flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">
-                {displayCount}
-              </span>
-            )}
-          </button>
+        {hasPermission("notifications:view") && (
+          <div className="relative" ref={notifRef}>
+            <button
+              id="notification-bell-btn"
+              onClick={() => setNotifOpen((v) => !v)}
+              className="focus-ring relative rounded-full p-2 text-slate2-500 hover:bg-slate2-100"
+              aria-label={`Notifications${unreadCount > 0 ? `, ${unreadCount} unread` : ""}`}
+            >
+              <Bell size={19} />
+              {/* Red unread count badge */}
+              {unreadCount > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">
+                  {displayCount}
+                </span>
+              )}
+            </button>
 
-          {/* ── Notification Dropdown Panel ── */}
-          {notifOpen && (
-            <div className="absolute right-0 mt-2 w-96 max-w-[calc(100vw-2rem)] rounded-xl border border-slate2-200 bg-white shadow-2xl">
+            {/* ── Notification Dropdown Panel ── */}
+            {notifOpen && (
+              <div className="absolute right-0 mt-2 w-96 max-w-[calc(100vw-2rem)] rounded-xl border border-slate2-200 bg-white shadow-2xl">
               {/* Header row */}
               <div className="flex items-center justify-between border-b border-slate2-100 px-4 py-3">
                 <div className="flex items-center gap-2">
@@ -290,6 +291,7 @@ export function Header({
             </div>
           )}
         </div>
+        )}
 
         {/* ── User menu ── */}
         <div className="relative" ref={menuRef}>
@@ -330,19 +332,21 @@ export function Header({
                 </div>
               </Link>
 
-              <Link
-                to="/settings"
-                onClick={() => setMenuOpen(false)}
-                className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
-              >
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-teal-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
-                  <Settings size={18} strokeWidth={1.8} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Settings</p>
-                  <p className="text-xs text-slate2-400">Credentials & active sessions</p>
-                </div>
-              </Link>
+              {hasPermission("settings:view") && (
+                <Link
+                  to="/settings"
+                  onClick={() => setMenuOpen(false)}
+                  className="flex items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-slate2-50 group"
+                >
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate2-200 bg-white text-teal-600 transition-colors group-hover:border-brand/40 group-hover:text-brand">
+                    <Settings size={18} strokeWidth={1.8} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-slate2-800 group-hover:text-brand">Settings</p>
+                    <p className="text-xs text-slate2-400">Credentials & active sessions</p>
+                  </div>
+                </Link>
+              )}
 
               <div className="my-1.5 border-t border-slate2-100" />
 

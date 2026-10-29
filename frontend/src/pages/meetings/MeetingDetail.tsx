@@ -198,6 +198,25 @@ export default function MeetingDetail() {
   const [meeting, setMeeting] = useState<MeetingDetailType | null>(null);
   const [tab, setTab] = useState<TabKey>(tabParam || "overview");
 
+  const visibleTabs = useMemo(() => {
+    return TABS.filter((t) => {
+      if (t.key === "overview" || t.key === "participants") return true;
+      if (t.key === "agenda") return hasPermission("agenda:view");
+      if (t.key === "minutes") return hasPermission("minutes:view");
+      if (t.key === "decisions") return hasPermission("decisions:view");
+      if (t.key === "actions") return hasPermission("action_items:view");
+      if (t.key === "documents") return hasPermission("documents:view");
+      return true;
+    });
+  }, [hasPermission]);
+
+  // If active tab is not visible/allowed, fallback to "overview"
+  useEffect(() => {
+    if (visibleTabs.length > 0 && !visibleTabs.some((t) => t.key === tab)) {
+      setTab(visibleTabs[0].key);
+    }
+  }, [visibleTabs, tab]);
+
   const handleTabChange = (newTab: TabKey) => {
     setTab(newTab);
     setSearchParams(
@@ -239,7 +258,7 @@ export default function MeetingDetail() {
   const canApprove = !!(
     meeting &&
     !["APPROVED", "CANCELLED"].includes(meeting.status) &&
-    (isOrganizer || hasAdminOverride || hasPermission("meetings:approve") || hasPermission("meetings:certify_lock"))
+    (hasAdminOverride || hasPermission("meetings:approve"))
   );
 
   // Approval button is shown only when meeting is ready for approval, or if admin override during pre-signing/completed
@@ -1083,8 +1102,8 @@ export default function MeetingDetail() {
       )}
 
       {/* Structured Tab Bar with Live Counters */}
-      <div className="flex gap-6 overflow-x-auto border-b border-slate2-200 mt-2">
-        {TABS.map((t) => {
+      <div className="flex gap-2 sm:gap-4 overflow-x-auto border-b border-slate2-200 mt-2 scrollbar-none">
+        {visibleTabs.map((t) => {
           const isActive = tab === t.key;
           let badgeContent: React.ReactNode = null;
           if (t.key === "agenda") {
@@ -1108,17 +1127,22 @@ export default function MeetingDetail() {
           return (
             <button
               key={t.key}
+              type="button"
               onClick={() => handleTabChange(t.key)}
-              className={`focus-ring flex items-center gap-2 whitespace-nowrap border-b-2 py-3 text-xs sm:text-sm font-semibold transition-colors cursor-pointer ${isActive
-                ? "border-brand text-brand"
-                : "border-transparent text-slate2-500 hover:text-slate2-900 hover:border-slate2-300"
-                }`}
+              className={`group relative flex items-center gap-2 whitespace-nowrap px-3.5 py-3 text-xs sm:text-sm font-medium transition-all -mb-px border-b-2 outline-none focus-visible:ring-2 focus-visible:ring-brand/30 focus-visible:ring-offset-1 rounded-t-lg cursor-pointer ${
+                isActive
+                  ? "border-brand text-brand font-semibold"
+                  : "border-transparent text-slate2-500 hover:text-slate2-900 hover:border-slate2-300"
+              }`}
             >
               <span>{t.label}</span>
               {badgeContent !== null && badgeContent !== undefined && (
                 <span
-                  className={`px-1.5 py-0.5 rounded-sm text-[10px] font-bold ${isActive ? "bg-brand/10 text-brand" : "bg-slate2-100 text-slate2-500"
-                    }`}
+                  className={`px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums transition-colors ${
+                    isActive
+                      ? "bg-brand/10 text-brand font-bold"
+                      : "bg-slate2-100 text-slate2-500 group-hover:bg-slate2-200/80 group-hover:text-slate2-700"
+                  }`}
                 >
                   {badgeContent}
                 </span>
@@ -1131,10 +1155,10 @@ export default function MeetingDetail() {
       {tab === "overview" && (
         <OverviewTab meeting={meeting} onNavigateTab={handleTabChange} />
       )}
-      {tab === "agenda" && (
+      {tab === "agenda" && hasPermission("agenda:view") && (
         <AgendaTab meeting={meeting} canManage={canManage && canEdit} onChange={load} />
       )}
-      {tab === "minutes" && (
+      {tab === "minutes" && hasPermission("minutes:view") && (
         <MinutesTab
           meeting={meeting}
           canManage={canManage && canEdit}
@@ -1151,14 +1175,14 @@ export default function MeetingDetail() {
           signedCount={signedCount}
         />
       )}
-      {tab === "decisions" && (
+      {tab === "decisions" && hasPermission("decisions:view") && (
         <DecisionsTab
           meeting={meeting}
           canManage={canManage && canEdit}
           onChange={load}
         />
       )}
-      {tab === "actions" && (
+      {tab === "actions" && hasPermission("action_items:view") && (
         <ActionsTab
           meeting={meeting}
           canCreate={canManage && canEdit}
@@ -1173,7 +1197,7 @@ export default function MeetingDetail() {
           onSignSelf={() => setIsParticipantSignModalOpen(true)}
         />
       )}
-      {tab === "documents" && (
+      {tab === "documents" && hasPermission("documents:view") && (
         <DocumentsTab
           meeting={meeting}
           canManage={canManage && canEdit}
@@ -1801,6 +1825,9 @@ function AgendaTab({
   canManage: boolean;
   onChange: () => void;
 }) {
+  const { hasPermission } = useAuth();
+  const canCreateAgenda = (hasPermission("agenda:create") || hasPermission("ADMIN_OVERRIDE")) && canManage && !isLockedMeeting(meeting.status);
+  const canEditAgenda = (hasPermission("agenda:edit") || hasPermission("ADMIN_OVERRIDE")) && canManage && !isLockedMeeting(meeting.status);
   const { confirm } = useAlert();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -1907,7 +1934,7 @@ function AgendaTab({
   }, [meeting.agendaItems]);
 
   return (
-    <div className="bg-white border border-slate2-200 overflow-hidden">
+    <div className="bg-white border border-slate2-200 rounded-2xl shadow-card overflow-hidden">
       {/* Timetable Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate2-200 px-6 py-5">
         <div>
@@ -1925,7 +1952,7 @@ function AgendaTab({
             <span>Total: {totalAgendaMinutes} mins</span>
           </span>
 
-          {canManage && !isLockedMeeting(meeting.status) && (
+          {canCreateAgenda && (
             <Button
               type="button"
               onClick={() => setIsAddModalOpen(true)}
@@ -1945,7 +1972,7 @@ function AgendaTab({
               title="No agenda topics scheduled yet"
               description="Outline the discussion topics, assign presenters, and estimate durations."
               action={
-                canManage && !isLockedMeeting(meeting.status) ? (
+                canCreateAgenda ? (
                   <Button
                     type="button"
                     onClick={() => setIsAddModalOpen(true)}
@@ -2135,7 +2162,7 @@ function AgendaTab({
                   </div>
                 </div>
 
-                {canManage && (
+                {canEditAgenda && (
                   <div className="flex items-center gap-1 self-end sm:self-start shrink-0">
                     <button
                       type="button"
@@ -2369,6 +2396,16 @@ function MinutesTab({
   const isPendingSignatures = meeting.status === "PENDING_SIGNATURES";
   const isReadyForApproval = meeting.status === "READY_FOR_APPROVAL";
   const isReadOnly = isLockedMeeting(meeting.status) || !canManage;
+  const canRecordMinutes =
+    (hasPermission("minutes:create") || hasPermission("ADMIN_OVERRIDE")) && !isReadOnly;
+  const canEditMinutes =
+    (hasPermission("minutes:edit:all") ||
+      hasPermission("ADMIN_OVERRIDE") ||
+      (hasPermission("minutes:edit:dept") && user?.department?.id === meeting.department?.id) ||
+      (hasPermission("minutes:edit:own") && user?.id === meeting.organizer?.id) ||
+      hasPermission("minutes:edit")) &&
+    !isReadOnly;
+  const canExportMinutes = hasPermission("reports:export") || hasPermission("ADMIN_OVERRIDE");
 
   const [isEditing, setIsEditing] = useState(false);
   const [summaryContent, setSummaryContent] = useState("");
@@ -2635,27 +2672,31 @@ function MinutesTab({
       )}
 
       {canManage && (meeting.status === "IN_PROGRESS" || meeting.status === "SCHEDULED" || meeting.status === "COMPLETED" || meeting.status === "PENDING_SIGNATURES") && (
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-brand/20 bg-brand/5 px-4 py-3 text-xs">
-          <div className="flex items-center gap-2.5 text-brand-dark">
-            <Signature size={18} className="text-brand shrink-0" />
-            <span>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 rounded-2xl border border-brand/20 bg-brand/5 p-4 text-xs shadow-2xs">
+          <div className="flex items-start sm:items-center gap-3 text-brand-dark">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand/15 text-brand">
+              <Signature size={18} />
+            </div>
+            <div>
               {meeting.status === "PENDING_SIGNATURES" ? (
                 <>
-                  <strong>Signature Collection in Progress:</strong> {signedCount} of {totalSignersCount} signatures collected. You can resend in-app signature requests to notify unsigned signers.
+                  <p className="font-semibold text-brand-dark text-sm leading-tight">Signature Collection in Progress</p>
+                  <p className="text-slate2-600 mt-0.5 text-xs">{signedCount} of {totalSignersCount} participant signatures collected. You can resend signature requests to notify unsigned signers.</p>
                 </>
               ) : (
                 <>
-                  <strong>Minutes Drafting:</strong> Meeting summary recorded. When finalized, request digital signatures from all participants.
+                  <p className="font-semibold text-brand-dark text-sm leading-tight">Minutes Drafting & Signatures</p>
+                  <p className="text-slate2-600 mt-0.5 text-xs">Meeting summary recorded. When finalized, request digital signatures from all participants.</p>
                 </>
               )}
-            </span>
+            </div>
           </div>
           <Button
-            variant="secondary"
+            variant="primary"
             type="button"
             onClick={onRequestSignaturesClick}
             disabled={requestingSignatures}
-            className="border-brand/30 text-brand hover:bg-brand/10 text-xs py-1.5 px-3 shrink-0 inline-flex items-center gap-1.5 font-medium bg-white disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+            className="bg-brand hover:bg-brand-dark text-white text-xs py-2 px-3.5 shrink-0 inline-flex items-center gap-1.5 font-semibold rounded-xl shadow-xs disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
           >
             <Signature size={13} /> {requestingSignatures ? "Sending Notifications..." : meeting.status === "PENDING_SIGNATURES" ? "Resend Signature Requests" : "Request Participant Signatures"}
           </Button>
@@ -2665,9 +2706,9 @@ function MinutesTab({
       {/* ─────────────────────────────────────────────────────────────
           MEETING SUMMARY CARD
           ───────────────────────────────────────────────────────────── */}
-      <div className="border border-slate2-200 bg-white p-6">
+      <div className="rounded-2xl border border-slate2-200 bg-white p-6 shadow-card">
         {/* Top Header Row */}
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate2-100 pb-5">
           <div className="flex items-center gap-3.5">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#E6F4F1] text-[#0B7A6B]">
               <FileText size={20} className="text-[#0B7A6B]" />
@@ -2682,21 +2723,36 @@ function MinutesTab({
 
           {/* Action Buttons on Top Right */}
           <div className="flex items-center gap-2">
-            {summaryMinute?.content && !isEditing && (
+            {canEditMinutes && summaryMinute?.content && !isEditing && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEditing(true);
+                  setSummaryContent(summaryMinute.content);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate2-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate2-700 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs cursor-pointer"
+                title="Edit Meeting Summary"
+              >
+                <Pencil size={13} className="text-slate2-500" />
+                <span>Edit Summary</span>
+              </button>
+            )}
+
+            {canExportMinutes && summaryMinute?.content && !isEditing && (
               <>
                 {/* Print Button */}
                 <button
                   type="button"
                   onClick={handlePrintMinutes}
                   id="print-minutes-btn"
-                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate2-200 bg-white text-slate2-700 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs cursor-pointer"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate2-200 bg-white text-slate2-700 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs cursor-pointer"
                   title="Print Meeting Minutes (Clean Corporate Letterhead)"
                 >
-                  <Printer size={16} className="text-slate2-700" />
+                  <Printer size={15} className="text-slate2-700" />
                 </button>
 
                 {/* Export Split Dropdown Button */}
-                <div className="relative inline-flex items-center h-9 rounded-lg border border-slate2-200 bg-white text-slate2-700 shadow-2xs" ref={exportMenuRef}>
+                <div className="relative inline-flex items-center h-8 rounded-lg border border-slate2-200 bg-white text-slate2-700 shadow-2xs" ref={exportMenuRef}>
                   <button
                     type="button"
                     id="export-minutes-btn"
@@ -2704,7 +2760,7 @@ function MinutesTab({
                     className="flex h-full px-2.5 items-center justify-center hover:bg-slate2-50 hover:text-slate2-900 rounded-l-lg transition-colors border-r border-slate2-200 cursor-pointer"
                     title="Export Meeting Minutes to PDF (.pdf)"
                   >
-                    <Download size={16} className="text-slate2-700" />
+                    <Download size={15} className="text-slate2-700" />
                   </button>
                   <button
                     type="button"
@@ -2714,7 +2770,7 @@ function MinutesTab({
                     title="Export format options"
                     aria-label="Export format options"
                   >
-                    <ChevronDown size={14} className="text-slate2-700" />
+                    <ChevronDown size={13} className="text-slate2-700" />
                   </button>
 
                   {exportMenuOpen && (
@@ -2759,41 +2815,41 @@ function MinutesTab({
 
             {isApproved && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
-                <Lock size={12} /> Certified & Locked (Read-only)
+                <Lock size={12} /> Certified & Locked
               </span>
             )}
             {isCompleted && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
-                <Lock size={12} /> Meeting Completed (Read-only)
+                <Lock size={12} /> Completed
               </span>
             )}
             {isCancelled && (
               <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700">
-                <Lock size={12} /> Meeting Cancelled (Read-only)
+                <Lock size={12} /> Cancelled
               </span>
             )}
             {isPendingSignatures && (
               <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 border border-amber-200">
-                <Lock size={12} /> Signing In Progress (Read-only)
+                <Lock size={12} /> Signing In Progress
               </span>
             )}
             {isReadyForApproval && (
               <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2.5 py-1 text-xs font-medium text-teal-800 border border-teal-200">
-                <Lock size={12} /> Ready for Approval (Read-only)
+                <Lock size={12} /> Ready for Approval
               </span>
             )}
             {!isApproved && !isCompleted && !isCancelled && !isPendingSignatures && !isReadyForApproval && !canManage && (
               <span className="inline-flex items-center gap-1 rounded-full bg-slate2-100 px-2.5 py-1 text-xs font-medium text-slate2-600">
-                <Lock size={12} /> Read-only View
+                <Lock size={12} /> Read-only
               </span>
             )}
           </div>
         </div>
 
-        {/* Meeting Summary Content & Footer */}
+        {/* Meeting Summary Content */}
         {isEditing ? (
           <div className="mt-5 space-y-4">
-            <div className="rounded-2xl border border-slate2-200 overflow-hidden bg-white p-2">
+            <div className="rounded-xl border border-slate2-200 overflow-hidden bg-white p-2">
               <RichTextEditor
                 value={summaryContent}
                 onChange={setSummaryContent}
@@ -2803,7 +2859,7 @@ function MinutesTab({
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
               <p className="text-xs text-slate2-400">
-                Use headings (H1, H2, H3), bold, lists, quotes, links, tables, images, and attachments as needed.
+                Use headings, bold, lists, quotes, links, tables, images, and attachments as needed.
               </p>
               <div className="flex items-center gap-2">
                 <Button
@@ -2814,7 +2870,7 @@ function MinutesTab({
                     setIsEditing(false);
                     setSummaryContent(summaryMinute?.content || "");
                   }}
-                  className="text-xs sm:text-sm py-2 px-4 rounded-xl"
+                  className="text-xs py-2 px-4 rounded-xl"
                 >
                   Cancel
                 </Button>
@@ -2823,15 +2879,15 @@ function MinutesTab({
                   type="button"
                   disabled={savingSummary || !summaryContent.trim()}
                   onClick={handleSaveSummary}
-                  className="bg-brand hover:bg-brand-dark text-white text-xs sm:text-sm py-2 px-5 shadow-sm inline-flex items-center gap-1.5 rounded-xl font-semibold"
+                  className="bg-brand hover:bg-brand-dark text-white text-xs py-2 px-5 shadow-sm inline-flex items-center gap-1.5 rounded-xl font-semibold"
                 >
                   {savingSummary ? (
                     <>
-                      <Loader2 size={15} className="animate-spin" /> Saving...
+                      <Loader2 size={14} className="animate-spin" /> Saving...
                     </>
                   ) : (
                     <>
-                      <Save size={15} /> Save Meeting Summary
+                      <Save size={14} /> Save Meeting Summary
                     </>
                   )}
                 </Button>
@@ -2839,45 +2895,34 @@ function MinutesTab({
             </div>
           </div>
         ) : summaryMinute?.content ? (
-          <div className="mt-5 space-y-4">
-            {/* The Main Content Box */}
-            <div className="rounded-2xl border border-slate2-200 bg-white p-5 min-h-[90px] shadow-2xs">
+          <div className="mt-5 space-y-3">
+            <div className="rounded-xl bg-slate2-50/50 border border-slate2-100 p-5 text-sm text-slate2-800 leading-relaxed min-h-[60px]">
               <RichTextRenderer content={summaryMinute.content} />
             </div>
 
-            {/* Bottom Row: Last recorded by ... & Edit Summary button */}
-            <div className="flex flex-wrap items-center justify-end gap-3.5 text-xs pt-0.5">
-              <span className="text-slate2-500">
+            <div className="flex items-center justify-between text-xs text-slate2-500 pt-1">
+              <span>
                 Last recorded by{" "}
-                <strong className="font-semibold text-slate2-800">
-                  {summaryMinute.recordedBy?.name || meeting.organizer?.name || "Dawit Bekele"}
+                <strong className="font-semibold text-slate2-700">
+                  {summaryMinute.recordedBy?.name || meeting.organizer?.name || "Organizer"}
                 </strong>
                 {" · "}
-                {new Date(summaryMinute.updatedAt || summaryMinute.createdAt).toLocaleDateString("en-US")}
+                {new Date(summaryMinute.updatedAt || summaryMinute.createdAt).toLocaleDateString("en-US", {
+                  year: "numeric",
+                  month: "short",
+                  day: "numeric",
+                })}
               </span>
-              {!isReadOnly && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsEditing(true);
-                    setSummaryContent(summaryMinute.content);
-                  }}
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate2-200 bg-white px-4 py-2 text-xs font-semibold text-slate2-800 hover:bg-slate2-50 hover:border-slate2-300 transition-colors shadow-2xs cursor-pointer"
-                >
-                  <Pencil size={14} className="text-slate2-600" />
-                  <span>Edit Summary</span>
-                </button>
-              )}
             </div>
           </div>
         ) : (
-          <div className="mt-5 rounded-2xl border border-dashed border-slate2-200 bg-slate2-50/40 p-8 text-center">
+          <div className="mt-5 rounded-xl border border-dashed border-slate2-200 bg-slate2-50/40 p-8 text-center">
             <FileText size={28} className="mx-auto text-slate2-300 mb-2" />
             <p className="text-sm font-medium text-slate2-700">No meeting summary recorded yet</p>
             <p className="mt-1 text-xs text-slate2-400 max-w-sm mx-auto">
               Capture the general overview and key discussion points so nothing gets lost.
             </p>
-            {!isReadOnly && (
+            {canRecordMinutes && (
               <div className="mt-4">
                 <Button
                   variant="primary"
@@ -2885,7 +2930,7 @@ function MinutesTab({
                     setIsEditing(true);
                     setSummaryContent("");
                   }}
-                  className="text-xs py-2 px-4 bg-brand hover:bg-brand-dark text-white inline-flex items-center gap-1.5 rounded-xl font-semibold"
+                  className="text-xs py-2 px-4 bg-brand hover:bg-brand-dark text-white inline-flex items-center gap-1.5 rounded-xl font-semibold shadow-xs"
                 >
                   <Plus size={14} /> Write Meeting Summary
                 </Button>
@@ -2902,7 +2947,7 @@ function MinutesTab({
         meeting.status === "READY_FOR_APPROVAL" ||
         meeting.status === "APPROVED" ||
         (meeting.participantSignatures && meeting.participantSignatures.length > 0)) && (
-          <div className="overflow-hidden border border-slate2-200 bg-white">
+          <div className="overflow-hidden rounded-2xl border border-slate2-200 bg-white shadow-card">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate2-100 bg-slate2-50/50 px-5 py-4">
               <div>
                 <div className="flex items-center gap-2">
@@ -3022,11 +3067,25 @@ function MinutesTab({
 
                         {sig ? (
                           <div className="mt-2 rounded-lg border border-emerald-100 bg-white p-2 text-center">
-                            <img
-                              src={sig.signatureDataUrl}
-                              alt={`${signer.user.name}'s signature`}
-                              className="h-10 max-w-[140px] mx-auto object-contain"
-                            />
+                            {sig.signatureDataUrl ? (
+                              <img
+                                src={sig.signatureDataUrl}
+                                alt={`${signer.user.name}'s signature`}
+                                className="h-10 max-w-[140px] mx-auto object-contain"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLElement).style.display = "none";
+                                  const fallbackEl = e.currentTarget.parentElement?.querySelector(".sig-fallback");
+                                  if (fallbackEl) (fallbackEl as HTMLElement).style.display = "flex";
+                                }}
+                              />
+                            ) : null}
+                            <div
+                              className="sig-fallback h-10 items-center justify-center gap-1.5 text-xs text-brand font-serif italic tracking-wide"
+                              style={{ display: sig.signatureDataUrl ? "none" : "flex" }}
+                            >
+                              <Signature size={13} className="text-brand shrink-0" />
+                              <span>{signer.user.name}</span>
+                            </div>
                             <div className="mt-1 pt-1 border-t border-slate2-100 flex items-center justify-between text-[9px] text-slate2-400">
                               <span>Attested</span>
                               <span>{new Date(sig.signedAt).toLocaleDateString()}</span>
@@ -3067,7 +3126,32 @@ function DecisionsTab({
   canManage: boolean;
   onChange: () => void;
 }) {
+  const { user, hasPermission } = useAuth();
   const { alert, confirm } = useAlert();
+  const isMeetingLocked = isLockedMeeting(meeting.status);
+  const canCreateDecision =
+    !isMeetingLocked &&
+    canManage &&
+    (hasPermission("decisions:create") || hasPermission("ADMIN_OVERRIDE"));
+
+  const canEditDecision =
+    !isMeetingLocked &&
+    canManage &&
+    (hasPermission("ADMIN_OVERRIDE") ||
+      hasPermission("decisions:edit:all") ||
+      (hasPermission("decisions:edit:dept") && user?.department?.id === meeting.department?.id) ||
+      (hasPermission("decisions:edit:own") && user?.id === meeting.organizer?.id) ||
+      hasPermission("decisions:edit"));
+
+  const canDeleteDecision =
+    !isMeetingLocked &&
+    canManage &&
+    (hasPermission("ADMIN_OVERRIDE") ||
+      hasPermission("decisions:delete:all") ||
+      (hasPermission("decisions:delete:dept") && user?.department?.id === meeting.department?.id) ||
+      (hasPermission("decisions:delete:own") && user?.id === meeting.organizer?.id) ||
+      hasPermission("decisions:delete"));
+
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -3188,7 +3272,7 @@ function DecisionsTab({
   }, [meeting.decisions]);
 
   return (
-    <div className="bg-white border border-slate2-200 overflow-hidden">
+    <div className="bg-white border border-slate2-200 rounded-2xl shadow-card overflow-hidden">
       {/* Decisions Registry Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate2-200 px-6 py-5">
         <div>
@@ -3206,7 +3290,7 @@ function DecisionsTab({
             <span>{(meeting.decisions || []).length} Decisions</span>
           </span>
 
-          {canManage && !isLockedMeeting(meeting.status) && (
+          {canCreateDecision && (
             <Button
               type="button"
               onClick={() => setIsAddModalOpen(true)}
@@ -3242,7 +3326,7 @@ function DecisionsTab({
               title="No formal decisions logged yet"
               description="Record official decisions and outcomes reached during this meeting session."
               action={
-                canManage && !isLockedMeeting(meeting.status) ? (
+                canCreateDecision ? (
                   <Button
                     type="button"
                     onClick={() => setIsAddModalOpen(true)}
@@ -3379,29 +3463,33 @@ function DecisionsTab({
                 <div className="flex items-center gap-2 self-end sm:self-start shrink-0">
                   <StatusBadge status={d.status} />
 
-                  {canManage && (
+                  {(canEditDecision || canDeleteDecision) && (
                     <div className="flex items-center gap-1 ml-1">
-                      <button
-                        type="button"
-                        onClick={() => startEdit(d)}
-                        className="rounded-lg p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
-                        title="Edit decision"
-                      >
-                        <Pencil size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => deleteDecision(d.id, d.code)}
-                        disabled={deletingId === d.id}
-                        className="rounded-lg p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors disabled:opacity-50"
-                        title="Delete decision"
-                      >
-                        {deletingId === d.id ? (
-                          <Loader2 size={14} className="animate-spin text-danger" />
-                        ) : (
-                          <Trash2 size={14} />
-                        )}
-                      </button>
+                      {canEditDecision && (
+                        <button
+                          type="button"
+                          onClick={() => startEdit(d)}
+                          className="rounded-lg p-1.5 text-slate2-400 hover:bg-slate2-100 hover:text-slate2-700 transition-colors"
+                          title="Edit decision"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                      )}
+                      {canDeleteDecision && (
+                        <button
+                          type="button"
+                          onClick={() => deleteDecision(d.id, d.code)}
+                          disabled={deletingId === d.id}
+                          className="rounded-lg p-1.5 text-slate2-400 hover:bg-red-50 hover:text-danger transition-colors disabled:opacity-50"
+                          title="Delete decision"
+                        >
+                          {deletingId === d.id ? (
+                            <Loader2 size={14} className="animate-spin text-danger" />
+                          ) : (
+                            <Trash2 size={14} />
+                          )}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3565,6 +3653,10 @@ function ActionsTab({
   const isLocked = isLockedMeeting(meeting.status);
   // Meeting lock freezes creation and structural changes, but action item status updates remain independent and allowed post-meeting
   const isActionItemsLocked = isLocked;
+  const canCreateAction =
+    canCreate &&
+    !isActionItemsLocked &&
+    (hasPermission("action_items:create") || hasPermission("ADMIN_OVERRIDE"));
 
   // Action items are post-meeting deliverables: assignees & permitted users can update status even when meeting is locked
   const canUpdateItemStatus = (item: (typeof meeting.actionItems)[number]) => {
@@ -3592,12 +3684,17 @@ function ActionsTab({
 
   const canDeleteItem = (item: (typeof meeting.actionItems)[number]) => {
     if (isActionItemsLocked || meeting.status === "COMPLETED") return false;
-    if (user && user.id === meeting.organizer?.id) return true;
     if (hasPermission("ADMIN_OVERRIDE")) return true;
-    if (hasPermission("action_items:delete:all") || hasPermission("meetings:edit:all")) return true;
+    if (hasPermission("action_items:delete:all")) return true;
     if (
-      (hasPermission("action_items:delete:dept") || hasPermission("meetings:edit:dept")) &&
+      hasPermission("action_items:delete:dept") &&
       user?.department?.id === meeting.department?.id
+    ) {
+      return true;
+    }
+    if (
+      (hasPermission("action_items:delete:own") || hasPermission("action_items:delete")) &&
+      (user?.id === meeting.organizer?.id || getActionItemAssignees(item).some((u) => u.id === user?.id))
     ) {
       return true;
     }
@@ -3826,7 +3923,7 @@ function ActionsTab({
   const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   return (
-    <div className="bg-white border border-slate2-200 overflow-hidden">
+    <div className="bg-white border border-slate2-200 rounded-2xl shadow-card overflow-hidden">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate2-200 px-6 py-5">
         <div>
           <div className="flex items-center gap-2.5 mb-1">
@@ -3849,7 +3946,7 @@ function ActionsTab({
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {canCreate && !isActionItemsLocked && (
+          {canCreateAction && (
             <Button
               type="button"
               onClick={() => setIsAddModalOpen(true)}
@@ -3977,7 +4074,7 @@ function ActionsTab({
                 : "Assign accountability and follow through on decisions made during the session."
             }
             action={
-              canCreate && !isActionItemsLocked && assigneeFilter === "ALL" ? (
+              canCreateAction && assigneeFilter === "ALL" ? (
                 <Button
                   type="button"
                   onClick={() => setIsAddModalOpen(true)}
@@ -4940,11 +5037,13 @@ function InlineDocViewer({
   doc,
   onClose,
   onDownload,
+  canDownload = true,
 }: {
   meetingId: string;
   doc: { id: string; fileName: string; fileSize: number };
   onClose: () => void;
   onDownload: () => void;
+  canDownload?: boolean;
 }) {
   const viewUrl = buildMeetingDocViewUrl(meetingId, doc.id);
   const sizeMB = (doc.fileSize / 1024 / 1024).toFixed(2);
@@ -4995,14 +5094,16 @@ function InlineDocViewer({
             >
               <ExternalLink size={15} />
             </a>
-            <button
-              type="button"
-              onClick={onDownload}
-              title="Download file"
-              className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand hover:bg-brand-dark text-white transition-colors shadow-2xs cursor-pointer"
-            >
-              <Download size={15} />
-            </button>
+            {canDownload && (
+              <button
+                type="button"
+                onClick={onDownload}
+                title="Download file"
+                className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand hover:bg-brand-dark text-white transition-colors shadow-2xs cursor-pointer"
+              >
+                <Download size={15} />
+              </button>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -5036,6 +5137,7 @@ function DocumentsTab({
   canManage: boolean;
   onChange: () => void;
 }) {
+  const { user, hasPermission } = useAuth();
   const { confirm } = useAlert();
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -5047,6 +5149,24 @@ function DocumentsTab({
   const totalDocs = (meeting.documents || []).length;
   const totalBytes = (meeting.documents || []).reduce((acc, d) => acc + (d.fileSize || 0), 0);
   const totalSizeFormatted = (totalBytes / (1024 * 1024)).toFixed(2);
+
+  const isMeetingLocked = isLockedMeeting(meeting.status);
+  const canUploadDoc =
+    !isMeetingLocked &&
+    canManage &&
+    (hasPermission("documents:upload") || hasPermission("ADMIN_OVERRIDE"));
+
+  const canDownloadDoc =
+    hasPermission("documents:download") || hasPermission("ADMIN_OVERRIDE");
+
+  const canDeleteDoc = (d: any) =>
+    !isMeetingLocked &&
+    canManage &&
+    (hasPermission("ADMIN_OVERRIDE") ||
+      hasPermission("documents:delete:all") ||
+      (hasPermission("documents:delete:dept") && user?.department?.id === meeting.department?.id) ||
+      ((hasPermission("documents:delete:own") || hasPermission("documents:delete")) &&
+        (user?.id === d.uploadedBy?.id || user?.id === meeting.organizer?.id)));
 
   // Smart view: previewable files open in modal; Office files download directly
   const handleView = (d: { id: string; fileName: string; fileSize: number }) => {
@@ -5121,8 +5241,6 @@ function DocumentsTab({
     onChange();
   };
 
-  const isMeetingLocked = isLockedMeeting(meeting.status);
-
   return (
     <>
       {viewing && (
@@ -5131,9 +5249,10 @@ function DocumentsTab({
           doc={viewing}
           onClose={() => setViewing(null)}
           onDownload={() => download(viewing.id, viewing.fileName)}
+          canDownload={canDownloadDoc}
         />
       )}
-      <div className="bg-white border border-slate2-200 overflow-hidden">
+      <div className="bg-white border border-slate2-200 rounded-2xl shadow-card overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate2-200 px-6 py-5">
           <div>
             <div className="flex items-center gap-2.5 mb-1">
@@ -5155,7 +5274,7 @@ function DocumentsTab({
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {canManage && !isMeetingLocked && (
+            {canUploadDoc && (
               <Button
                 type="button"
                 onClick={() => {
@@ -5227,7 +5346,7 @@ function DocumentsTab({
                 title="No documents attached yet"
                 description="Upload presentations, briefing packets, or supplementary files for this session."
                 action={
-                  canManage && !isMeetingLocked ? (
+                  canUploadDoc ? (
                     <Button
                       type="button"
                       onClick={() => {
@@ -5298,17 +5417,19 @@ function DocumentsTab({
                     </button>
 
                     {/* Download button */}
-                    <button
-                      type="button"
-                      onClick={() => download(d.id, d.fileName)}
-                      title="Download file to device"
-                      className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand hover:bg-brand-dark text-white transition-all shadow-2xs cursor-pointer"
-                    >
-                      <Download size={16} />
-                    </button>
+                    {canDownloadDoc && (
+                      <button
+                        type="button"
+                        onClick={() => download(d.id, d.fileName)}
+                        title="Download file to device"
+                        className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand hover:bg-brand-dark text-white transition-all shadow-2xs cursor-pointer"
+                      >
+                        <Download size={16} />
+                      </button>
+                    )}
 
                     {/* Delete button */}
-                    {canManage && !isMeetingLocked && (
+                    {canDeleteDoc(d) && (
                       <button
                         type="button"
                         onClick={() => remove(d.id)}
@@ -5537,6 +5658,11 @@ function ParticipantsTab({
     (hasPermission("meetings:edit:dept") && user?.department?.id === meeting.department?.id) ||
     !!propCanManage
   );
+  const canManageParticipants = canEdit && (
+    hasAdminOverride ||
+    isOrganizer ||
+    hasPermission("meetings:manage_participants")
+  );
 
   const meetingEnded = hasMeetingEnded(meeting);
   const isAttendanceFinalized = !!meeting.attendanceFinalized;
@@ -5750,7 +5876,7 @@ function ParticipantsTab({
       : 0;
 
   return (
-    <div className="bg-white border border-slate2-200 overflow-hidden">
+    <div className="bg-white border border-slate2-200 rounded-2xl shadow-card overflow-hidden">
       <Toast
         message={toast?.message || null}
         type={toast?.type}
@@ -5838,7 +5964,7 @@ function ParticipantsTab({
             </span>
           )}
 
-          {canManage && !isParticipantsLocked && (
+          {canManageParticipants && !isParticipantsLocked && (
             <Button
               type="button"
               onClick={() => {
@@ -5974,7 +6100,7 @@ function ParticipantsTab({
                   : "Invite committee members and stakeholders to track attendance and attestations."
               }
               action={
-                canManage && !isParticipantsLocked && invitationFilter === "ALL" ? (
+                canManageParticipants && !isParticipantsLocked && invitationFilter === "ALL" ? (
                   <Button
                     type="button"
                     onClick={() => {
@@ -6172,7 +6298,7 @@ function ParticipantsTab({
                   })()}
 
                   {/* Remove Participant Action */}
-                  {canManage && !isParticipantsLocked && (
+                  {canManageParticipants && !isParticipantsLocked && (
                     <button
                       type="button"
                       onClick={() => setParticipantToDelete(p)}
@@ -6376,56 +6502,100 @@ function ParticipantsTab({
           onClose={() => {
             if (!isFinalizing) setFinalizeModalOpen(false);
           }}
-          title="Finalize Meeting Attendance"
+          title="Finalize Attendance Roster"
+          subtitle="Confirm participant attendance and record official presence."
           wide
         >
           <div className="space-y-4">
-            <div className="rounded-xl border border-brand/20 bg-brand/5 p-4">
+            {/* Header info badge */}
+            <div className="rounded-xl border border-emerald-200/80 bg-emerald-50/70 p-4">
               <div className="flex items-start gap-3">
-                <CheckCircle2
-                  className="shrink-0 text-brand mt-0.5"
-                  size={20}
-                />
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-xs">
+                  <CheckCircle2 size={18} />
+                </div>
                 <div className="space-y-1">
-                  <p className="text-sm font-semibold text-slate2-800">
-                    The meeting has ended. Please confirm the attendance of all
-                    participants.
+                  <p className="text-sm font-semibold text-emerald-950">
+                    Official Quorum & Attendance Verification
                   </p>
-                  <p className="text-xs text-slate2-500">
-                    Ensure each participant is accurately recorded as Attended
-                    or Not Attended. Finalizing will lock the attendance
-                    record.
+                  <p className="text-xs text-emerald-800/90 leading-relaxed">
+                    Verify each participant's attendance status below. Once finalized, the attendance records become official and the roster will be locked.
                   </p>
                 </div>
               </div>
             </div>
 
+            {/* Quick action buttons */}
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs font-medium text-slate2-600">
+                Participant Roster ({totalParticipants})
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated: Record<string, "ATTENDED" | "NOT ATTENDED"> = {};
+                    for (const p of meeting.participants || []) {
+                      updated[p.id] = "ATTENDED";
+                    }
+                    setStagedAttendance(updated);
+                  }}
+                  disabled={isFinalizing}
+                  className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-900 hover:underline cursor-pointer transition-colors"
+                >
+                  Mark all Attended
+                </button>
+                <span className="text-slate2-300">·</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated: Record<string, "ATTENDED" | "NOT ATTENDED"> = {};
+                    for (const p of meeting.participants || []) {
+                      updated[p.id] = "NOT ATTENDED";
+                    }
+                    setStagedAttendance(updated);
+                  }}
+                  disabled={isFinalizing}
+                  className="text-[11px] font-semibold text-slate2-600 hover:text-slate2-800 hover:underline cursor-pointer transition-colors"
+                >
+                  Mark all Absent
+                </button>
+              </div>
+            </div>
+
             {/* Participant list in modal */}
-            <div className="max-h-[50vh] overflow-y-auto divide-y divide-slate2-100 rounded-lg border border-slate2-200">
+            <div className="max-h-[46vh] overflow-y-auto divide-y divide-slate2-100 rounded-xl border border-slate2-200/90 bg-white shadow-2xs">
               {(meeting.participants || []).map((p) => {
                 const currentStatus =
                   stagedAttendance[p.id] || "NOT ATTENDED";
+                const isAttended = currentStatus === "ATTENDED";
                 return (
                   <div
                     key={p.id}
-                    className="flex items-center justify-between gap-3 p-3 hover:bg-slate2-50/50"
+                    className="flex items-center justify-between gap-3 p-3.5 hover:bg-slate2-50/70 transition-colors"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="flex items-center gap-3 min-w-0">
                       <Avatar
                         name={p.user?.name || "Participant"}
                         color={p.user?.avatarColor || "#0B7A6B"}
                       />
                       <div className="min-w-0">
-                        <p className="text-xs font-semibold text-slate2-800 truncate">
-                          {p.user?.name || "Participant"}
-                        </p>
-                        <p className="text-[11px] text-slate2-400 truncate">
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs font-semibold text-slate2-900 truncate">
+                            {p.user?.name || "Participant"}
+                          </p>
+                          {(p.user?.role?.name || p.user?.jobTitle) && (
+                            <span className="rounded bg-slate2-100 px-1.5 py-0.5 text-[10px] font-medium text-slate2-600">
+                              {p.user?.role?.name || p.user?.jobTitle}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate2-500 truncate">
                           {p.user?.email || ""}
                         </p>
                       </div>
                     </div>
 
-                    <div className="inline-flex items-center rounded-lg bg-slate2-100 p-0.5 border border-slate2-200 shrink-0">
+                    <div className="inline-flex items-center rounded-lg bg-slate2-100 p-0.5 border border-slate2-200/90 shrink-0">
                       <button
                         type="button"
                         onClick={() =>
@@ -6435,11 +6605,13 @@ function ParticipantsTab({
                           }))
                         }
                         disabled={isFinalizing}
-                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${currentStatus === "ATTENDED"
-                          ? "bg-brand text-white shadow-sm"
-                          : "text-slate2-600 hover:text-slate2-900"
-                          }`}
+                        className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded-md transition-all ${
+                          isAttended
+                            ? "bg-emerald-600 text-white shadow-2xs"
+                            : "text-slate2-600 hover:text-slate2-900"
+                        }`}
                       >
+                        {isAttended && <Check size={12} className="stroke-[2.5]" />}
                         ATTENDED
                       </button>
                       <button
@@ -6451,12 +6623,14 @@ function ParticipantsTab({
                           }))
                         }
                         disabled={isFinalizing}
-                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${currentStatus === "NOT ATTENDED"
-                          ? "bg-slate2-700 text-white shadow-sm"
-                          : "text-slate2-500 hover:text-slate2-800"
-                          }`}
+                        className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded-md transition-all ${
+                          !isAttended
+                            ? "bg-slate2-700 text-white shadow-2xs"
+                            : "text-slate2-500 hover:text-slate2-800"
+                        }`}
                       >
-                        NOT ATTENDED
+                        {!isAttended && <X size={12} className="stroke-[2.5]" />}
+                        ABSENT
                       </button>
                     </div>
                   </div>
@@ -6464,16 +6638,27 @@ function ParticipantsTab({
               })}
             </div>
 
-            {/* Attendance Summary */}
-            <div className="flex items-center justify-between rounded-lg bg-slate2-50 p-3 text-xs">
-              <span className="text-slate2-500 font-medium">Summary:</span>
-              <strong className="text-slate2-800 font-semibold">
-                {totalParticipants} invited · {modalAttendedCount} attended (
-                {modalPct}% attendance)
-              </strong>
+            {/* Attendance Summary & Progress Bar */}
+            <div className="rounded-xl bg-slate2-50/90 border border-slate2-200/80 p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate2-600 font-medium">
+                  Attendance Progress:
+                </span>
+                <strong className="text-slate2-900 font-semibold">
+                  {modalAttendedCount} of {totalParticipants} present ({modalPct}%)
+                </strong>
+              </div>
+              <div className="h-2 w-full rounded-full bg-slate2-200 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${
+                    modalPct >= 50 ? "bg-emerald-600" : "bg-amber-500"
+                  }`}
+                  style={{ width: `${modalPct}%` }}
+                />
+              </div>
             </div>
 
-            <div className="flex justify-end gap-2 border-t border-slate2-100 pt-3">
+            <div className="flex items-center justify-end gap-2.5 border-t border-slate2-100 pt-3">
               <Button
                 variant="secondary"
                 onClick={() => setFinalizeModalOpen(false)}
@@ -6488,11 +6673,12 @@ function ParticipantsTab({
               >
                 {isFinalizing ? (
                   <>
-                    <Loader2 size={14} className="animate-spin" /> Finalizing
-                    Attendance...
+                    <Loader2 size={14} className="animate-spin" /> Finalizing...
                   </>
                 ) : (
-                  "Confirm & Finalize Attendance"
+                  <>
+                    <CheckCircle2 size={14} /> Confirm & Finalize Attendance
+                  </>
                 )}
               </Button>
             </div>

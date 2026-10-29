@@ -330,7 +330,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, Permission[]> = {
   ],
   MEETING_SECRETARY: [
     "meetings:view:all", "meetings:create", "meetings:edit:all", "meetings:delete:all",
-    "meetings:manage_participants", "meetings:approve", "meetings:certify_lock",
+    "meetings:manage_participants", "meetings:certify_lock",
     "agenda:view", "agenda:create", "agenda:edit",
     "minutes:view:all", "minutes:create", "minutes:edit:all", "minutes:sign",
     "decisions:view:all", "decisions:create", "decisions:edit:all", "decisions:delete:all",

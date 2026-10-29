@@ -213,56 +213,58 @@ export default function SettingsPage() {
           )}
 
           {/* Interactive Live Email Tester */}
-          <div className="rounded-xl border border-slate2-200 bg-slate2-50/40 p-4">
-            <h4 className="font-semibold text-sm text-slate2-800 mb-1 flex items-center gap-1.5">
-              <Send className="h-4 w-4 text-brand" /> Test Live Email Dispatch
-            </h4>
-            <p className="text-xs text-slate2-500 mb-4">
-              Send a real test notification to verify your email connection and deliverability right now.
-            </p>
+          {isAdmin && (
+            <div className="rounded-xl border border-slate2-200 bg-slate2-50/40 p-4">
+              <h4 className="font-semibold text-sm text-slate2-800 mb-1 flex items-center gap-1.5">
+                <Send className="h-4 w-4 text-brand" /> Test Live Email Dispatch
+              </h4>
+              <p className="text-xs text-slate2-500 mb-4">
+                Send a real test notification to verify your email connection and deliverability right now.
+              </p>
 
-            <form onSubmit={handleSendTest} className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <input
-                type="email"
-                value={testEmail}
-                onChange={(e) => setTestEmail(e.target.value)}
-                placeholder="Enter recipient email (e.g. name@company.com)"
-                className={`${inputClass} max-w-md`}
-                required
-              />
-              <Button type="submit" disabled={isSendingTest || !testEmail.trim()}>
-                {isSendingTest ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" /> Dispatching Test...
-                  </>
-                ) : (
-                  <>
-                    <Send className="h-4 w-4" /> Send Test Notification
-                  </>
-                )}
-              </Button>
-            </form>
+              <form onSubmit={handleSendTest} className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <input
+                  type="email"
+                  value={testEmail}
+                  onChange={(e) => setTestEmail(e.target.value)}
+                  placeholder="Enter recipient email (e.g. name@company.com)"
+                  className={`${inputClass} max-w-md`}
+                  required
+                />
+                <Button type="submit" disabled={isSendingTest || !testEmail.trim()}>
+                  {isSendingTest ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" /> Dispatching Test...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4" /> Send Test Notification
+                    </>
+                  )}
+                </Button>
+              </form>
 
-            {testResult && (
-              <div
-                className={`mt-4 rounded-lg p-3 text-xs flex items-start gap-2.5 ${
-                  testResult.ok
-                    ? "border border-emerald-200 bg-emerald-50 text-emerald-900"
-                    : "border border-rose-200 bg-rose-50 text-rose-900"
-                }`}
-              >
-                {testResult.ok ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-                ) : (
-                  <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
-                )}
-                <div>
-                  <p className="font-semibold">{testResult.ok ? "Delivery Confirmed" : "Delivery Failed"}</p>
-                  <p className="mt-0.5">{testResult.message}</p>
+              {testResult && (
+                <div
+                  className={`mt-4 rounded-lg p-3 text-xs flex items-start gap-2.5 ${
+                    testResult.ok
+                      ? "border border-emerald-200 bg-emerald-50 text-emerald-900"
+                      : "border border-rose-200 bg-rose-50 text-rose-900"
+                  }`}
+                >
+                  {testResult.ok ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                  )}
+                  <div>
+                    <p className="font-semibold">{testResult.ok ? "Delivery Confirmed" : "Delivery Failed"}</p>
+                    <p className="mt-0.5">{testResult.message}</p>
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </Card>
 

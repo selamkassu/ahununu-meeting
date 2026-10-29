@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { DashboardResponse } from "../types";
 import { Card, Button } from "../components/ui/Primitives";
 import { Logo } from "../components/ui/Logo";
+import { useAuth } from "../context/AuthContext";
 import {
   exportDepartmentPerformanceToExcel,
   exportDepartmentPerformanceToPdf,
@@ -11,6 +12,8 @@ import {
 } from "../utils/exportReport";
 
 export default function ReportsPage() {
+  const { hasPermission } = useAuth();
+  const canExport = hasPermission("reports:export") || hasPermission("ADMIN_OVERRIDE");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [printDate, setPrintDate] = useState<string>(() => formatReportDateTime());
@@ -71,9 +74,11 @@ export default function ReportsPage() {
         {/* Full Report Header Banner */}
         <div className="flex items-center justify-between bg-brand-dark px-6 py-5 text-white dept-no-print">
           <Logo size={42} withText textVariant="light" subtitle="Meeting Management Portal — Company Report" />
-          <Button variant="secondary" onClick={handlePrintFullReport} className="no-print">
-            <Printer size={14} /> Print / Export
-          </Button>
+          {canExport && (
+            <Button variant="secondary" onClick={handlePrintFullReport} className="no-print">
+              <Printer size={14} /> Print / Export
+            </Button>
+          )}
         </div>
 
         <div className="p-6 report-card-body print:p-0">
@@ -133,16 +138,17 @@ export default function ReportsPage() {
             {/* Screen Section Header with Action Buttons */}
             <div className="flex flex-wrap items-center justify-between gap-3 no-print">
               <p className="text-xs font-bold uppercase tracking-wide text-slate2-400">Department performance</p>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  onClick={handlePrintDepartment}
-                  id="print-dept-performance-btn"
-                  className="h-8 px-3 text-xs font-medium"
-                >
-                  <Printer size={13} />
-                  <span>Print</span>
-                </Button>
+              {canExport && (
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={handlePrintDepartment}
+                    id="print-dept-performance-btn"
+                    className="h-8 px-3 text-xs font-medium"
+                  >
+                    <Printer size={13} />
+                    <span>Print</span>
+                  </Button>
 
                 <div className="relative inline-flex" ref={exportMenuRef}>
                   <Button
@@ -194,6 +200,7 @@ export default function ReportsPage() {
                   )}
                 </div>
               </div>
+              )}
             </div>
 
             {/* Department Performance Table */}
