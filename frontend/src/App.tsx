@@ -1,9 +1,10 @@
 import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { AuthProvider } from "./context/AuthContext";
+import { AuthProvider, useAuth } from "./context/AuthContext";
 import { NotificationProvider } from "./context/NotificationContext";
 import { AlertProvider } from "./components/ui/AlertDialog";
 import { AppLayout } from "./components/layout/AppLayout";
+import { GoogleOAuthProvider } from "@react-oauth/google";
 
 import Login from "./pages/Login";
 import ResetPassword from "./pages/ResetPassword";
@@ -17,6 +18,7 @@ import DecisionsPage from "./pages/DecisionsPage";
 import ActionItemsPage from "./pages/actionitems/ActionItemsPage";
 import DepartmentsPage from "./pages/departments/DepartmentsPage";
 import UsersPage from "./pages/users/UsersPage";
+import UserApprovalsPage from "./pages/users/UserApprovalsPage";
 import RolesPage from "./pages/roles/RolesPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import NotificationsPage from "./pages/NotificationsPage";
@@ -24,13 +26,22 @@ import ReportsPage from "./pages/ReportsPage";
 import SettingsPage from "./pages/SettingsPage";
 import ProfilePage from "./pages/ProfilePage";
 
+function GoogleWrapper({ children }: { children: React.ReactNode }) {
+  const { googleClientId, isGoogleConfigured } = useAuth();
+  if (isGoogleConfigured && googleClientId && googleClientId.length > 10 && !googleClientId.includes("your-google")) {
+    return <GoogleOAuthProvider clientId={googleClientId}>{children}</GoogleOAuthProvider>;
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <NotificationProvider>
-          <AlertProvider>
-            <Routes>
+        <GoogleWrapper>
+          <NotificationProvider>
+            <AlertProvider>
+              <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route element={<AppLayout />}>
@@ -45,6 +56,8 @@ export default function App() {
               <Route path="/action-items/:id" element={<ActionItemsPage />} />
               <Route path="/departments" element={<DepartmentsPage />} />
               <Route path="/users" element={<UsersPage />} />
+              <Route path="/admin/user-approvals" element={<UserApprovalsPage />} />
+              <Route path="/user-approvals" element={<UserApprovalsPage />} />
               <Route path="/roles" element={<RolesPage />} />
               <Route path="/documents" element={<DocumentsPage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
@@ -56,7 +69,8 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </AlertProvider>
-      </NotificationProvider>
+        </NotificationProvider>
+      </GoogleWrapper>
       </AuthProvider>
     </BrowserRouter>
   );

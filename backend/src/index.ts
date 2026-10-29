@@ -15,9 +15,12 @@ import meetingsRoutes from "./routes/meetings.routes";
 import actionItemsRoutes from "./routes/actionItems.routes";
 import dashboardRoutes from "./routes/dashboard.routes";
 import notificationsRoutes from "./routes/notifications.routes";
+import { ensureAdminWorkflowInfrastructure } from "./lib/adminNotifications";
+
+ensureAdminWorkflowInfrastructure().catch(console.error);
 
 const app = express();
-// Auth forgot-password trigger reload
+// Workflow optimizations reloaded: updated approval queue queries
 const PORT = process.env.PORT || 4000;
 
 const corsOriginEnv = process.env.CORS_ORIGIN;

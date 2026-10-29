@@ -42,7 +42,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const token = getToken();
   const isFormData =
     typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -60,7 +60,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   const controller = new AbortController();
-  const timeoutMs = 30000;
+  const timeoutMs = options.timeoutMs ?? 30000;
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   let res: Response;
@@ -99,7 +99,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path, { method: "GET" }),
-  post: <T>(path: string, data?: unknown) =>
+  post: <T>(path: string, data?: unknown, opts?: { timeoutMs?: number }) =>
     request<T>(path, {
       method: "POST",
       body:
@@ -108,6 +108,7 @@ export const api = {
           : data
             ? JSON.stringify(data)
             : undefined,
+      timeoutMs: opts?.timeoutMs,
     }),
   put: <T>(path: string, data?: unknown) =>
     request<T>(path, {

@@ -980,3 +980,241 @@ Ahununu Logistics`;
     text
   );
 }
+
+// ══════════════════════════════════════════════
+//  6. New User Sign-Up — Admin Notification
+// ══════════════════════════════════════════════
+/**
+ * Notify one or more administrator email addresses when a new user registers.
+ *
+ * Recipients are resolved in priority order:
+ *   1. ADMIN_EMAIL env var (comma-separated list supported)
+ *   2. Passed-in `adminEmails` array (queried from DB by the caller)
+ *
+ * This function is fire-and-forget — it should be called with `.catch()` to
+ * avoid crashing the registration flow if email delivery fails.
+ */
+export async function sendNewUserNotificationEmail(opts: {
+  newUserName: string;
+  newUserEmail: string;
+  signupMethod: "google" | "local";
+  jobTitle?: string | null;
+  departmentName?: string | null;
+  adminEmails: string[];
+}): Promise<void> {
+  const { newUserName, newUserEmail, signupMethod, jobTitle, departmentName, adminEmails } = opts;
+
+  // Resolve recipients: env-level override wins, then DB-sourced admins
+  const envEmails = (process.env.ADMIN_EMAIL || "")
+    .split(",")
+    .map((e) => e.trim())
+    .filter(Boolean);
+
+  const recipients = envEmails.length ? envEmails : adminEmails;
+
+  if (!recipients.length) {
+    console.warn("[Email:NewUserNotify] No admin recipients configured — skipping notification.");
+    return;
+  }
+
+  const appUrl = getAppUrl();
+  const approvalsLink = `${appUrl}/admin/user-approvals`;
+  const methodLabel = signupMethod === "google" ? "Google OAuth" : "Email & Password";
+  const methodColor = signupMethod === "google" ? "#4285F4" : "#0b7a6b";
+  const methodBg   = signupMethod === "google" ? "#e8f0fe" : "#d1fae5";
+  const methodIcon = signupMethod === "google" ? "🔵" : "✉️";
+
+  const subject = `Action Required: New User Registration Awaiting Approval — ${newUserName}`;
+
+  const body = `
+    <p style="font-size:15px;color:#1e293b;margin:0 0 16px;">
+      A new user has registered and is currently <strong>pending approval and role assignment</strong>.
+      As an authorized administrator, please review the registration and assign their corporate role.
+    </p>
+
+    <!-- New User Card -->
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid ${methodColor};border-radius:8px;padding:20px 24px;margin:0 0 24px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:${methodColor};margin-bottom:8px;">
+        ${methodIcon} Registration Pending Role Assignment
+      </div>
+      <h2 style="margin:0 0 16px;font-size:18px;font-weight:700;color:#0f172a;">
+        ${newUserName}
+      </h2>
+
+      <table cellpadding="0" cellspacing="0" border="0" style="width:100%;">
+        <tr>
+          <td style="padding:6px 0;width:140px;font-size:13px;color:#64748b;font-weight:500;">Email</td>
+          <td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600;">
+            <a href="mailto:${newUserEmail}" style="color:#0b7a6b;">${newUserEmail}</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Status</td>
+          <td style="padding:6px 0;font-size:13px;">
+            <span style="display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:#b45309;background:#fef3c7;text-transform:uppercase;">
+              Pending Approval
+            </span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Current Role</td>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-style:italic;">
+            UNASSIGNED
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Sign-up Method</td>
+          <td style="padding:6px 0;font-size:13px;">
+            <span style="display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:${methodColor};background:${methodBg};text-transform:uppercase;">
+              ${methodLabel}
+            </span>
+          </td>
+        </tr>
+        ${jobTitle ? `
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Requested Title</td>
+          <td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600;">${jobTitle}</td>
+        </tr>` : ""}
+        ${departmentName ? `
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Department</td>
+          <td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600;">${departmentName}</td>
+        </tr>` : ""}
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Registered At</td>
+          <td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600;">
+            ${new Date().toLocaleString("en-GB", { dateStyle: "full", timeStyle: "short" })}
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- CTA -->
+    <div style="text-align:center;margin:24px 0;">
+      <a href="${approvalsLink}"
+        style="display:inline-block;background:#0b7a6b;color:#ffffff;text-decoration:none;
+               font-size:13px;font-weight:700;padding:12px 32px;border-radius:8px;
+               box-shadow:0 2px 6px rgba(11,122,107,0.25);">
+        Review & Assign Role →
+      </a>
+    </div>
+  `;
+
+  const text = `NEW USER REGISTRATION AWAITING APPROVAL
+
+Name:        ${newUserName}
+Email:       ${newUserEmail}
+Sign-up:     ${methodLabel}
+Status:      PENDING APPROVAL
+Role:        UNASSIGNED
+${jobTitle ? `Job Title:   ${jobTitle}\n` : ""}${departmentName ? `Department:  ${departmentName}\n` : ""}Registered:  ${new Date().toLocaleString()}
+
+Please review and assign a role: ${approvalsLink}
+
+Ahununu Logistics Meeting Portal`;
+
+  const promises = recipients.map((adminEmail) =>
+    sendEmailDetailed(
+      adminEmail,
+      subject,
+      htmlWrap(`User Awaiting Approval: ${newUserName}`, body),
+      text
+    ).catch((err) =>
+      console.error(`[Email:NewUserNotify] Failed to notify ${adminEmail}:`, err?.message || err)
+    )
+  );
+
+  await Promise.allSettled(promises);
+}
+
+/**
+ * Send an email notification to the user whose account was just approved and assigned a role.
+ */
+export async function sendAccountApprovedEmail(opts: {
+  userName: string;
+  userEmail: string;
+  roleName: string;
+  departmentName?: string | null;
+  approvedByName: string;
+}): Promise<void> {
+  const { userName, userEmail, roleName, departmentName, approvedByName } = opts;
+  const appUrl = getAppUrl();
+  const loginLink = `${appUrl}/login`;
+
+  const subject = `Your Account is Approved! Welcome to Ahununu Logistics Portal`;
+
+  const body = `
+    <p style="font-size:15px;color:#1e293b;margin:0 0 16px;">
+      Dear <strong>${userName}</strong>,
+    </p>
+    <p style="font-size:14px;color:#334155;margin:0 0 16px;line-height:1.6;">
+      Great news! Your account on the <strong>Ahununu Logistics Meeting Management Portal</strong> has been approved and activated by <strong>${approvedByName}</strong>.
+    </p>
+
+    <!-- Approved Details Card -->
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-left:4px solid #16a34a;border-radius:8px;padding:20px 24px;margin:0 0 24px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:#16a34a;margin-bottom:8px;">
+        Account Approved & Active
+      </div>
+      <table cellpadding="0" cellspacing="0" border="0" style="width:100%;">
+        <tr>
+          <td style="padding:6px 0;width:140px;font-size:13px;color:#64748b;font-weight:500;">Assigned Role</td>
+          <td style="padding:6px 0;font-size:14px;color:#0f172a;font-weight:700;">${roleName}</td>
+        </tr>
+        ${departmentName ? `
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Department</td>
+          <td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600;">${departmentName}</td>
+        </tr>` : ""}
+        <tr>
+          <td style="padding:6px 0;font-size:13px;color:#64748b;font-weight:500;">Account Status</td>
+          <td style="padding:6px 0;font-size:13px;">
+            <span style="display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;color:#166534;background:#dcfce7;text-transform:uppercase;">
+              Active
+            </span>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <p style="font-size:14px;color:#334155;line-height:1.6;margin:0 0 24px;">
+      You can now sign in to access scheduled meetings, agendas, corporate minutes, and your action items.
+    </p>
+
+    <!-- Sign In CTA -->
+    <div style="text-align:center;margin:24px 0;">
+      <a href="${loginLink}"
+        style="display:inline-block;background:#0b7a6b;color:#ffffff;text-decoration:none;
+               font-size:14px;font-weight:700;padding:12px 36px;border-radius:8px;
+               box-shadow:0 2px 6px rgba(11,122,107,0.25);">
+        Sign In to Portal →
+      </a>
+    </div>
+  `;
+
+  const text = `ACCOUNT APPROVED — AHUNUNU LOGISTICS PORTAL
+
+Hello ${userName},
+
+Your account has been approved and activated by ${approvedByName}.
+
+Assigned Role: ${roleName}
+${departmentName ? `Department:    ${departmentName}\n` : ""}Status:        ACTIVE
+
+Sign in here: ${loginLink}
+
+Welcome aboard!
+Ahununu Logistics`;
+
+  try {
+    await sendEmailDetailed(
+      userEmail,
+      subject,
+      htmlWrap(`Account Approved: Welcome to Ahununu Logistics`, body),
+      text
+    );
+  } catch (err: any) {
+    console.error(`[Email:AccountApproved] Failed to notify ${userEmail}:`, err?.message || err);
+  }
+}
+

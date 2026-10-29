@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma";
-import { requireAuth, AuthedRequest } from "../middleware/auth";
+import { requireAuth, requirePermission, AuthedRequest } from "../middleware/auth";
+import {
+  getAdminNotifications,
+  deleteAdminNotification,
+  clearProcessedAdminNotifications,
+} from "../lib/adminNotifications";
 import {
   getEmailProviderStatus,
   sendDiagnosticTestEmail,
@@ -8,6 +13,36 @@ import {
 
 const router = Router();
 router.use(requireAuth);
+
+// ---------- GET /notifications/admin-notifications — audit trail from admin_notifications table ----------
+router.get("/admin-notifications", requirePermission("users:approve"), async (_req: AuthedRequest, res) => {
+  try {
+    const list = await getAdminNotifications(50);
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to fetch admin notifications." });
+  }
+});
+
+// ---------- DELETE /notifications/admin-notifications/clear-processed ----------
+router.delete("/admin-notifications/clear-processed", requirePermission("users:approve"), async (_req: AuthedRequest, res) => {
+  try {
+    await clearProcessedAdminNotifications();
+    res.json({ ok: true, message: "Cleared all processed admin notifications." });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to clear processed admin notifications." });
+  }
+});
+
+// ---------- DELETE /notifications/admin-notifications/:id ----------
+router.delete("/admin-notifications/:id", requirePermission("users:approve"), async (req: AuthedRequest, res) => {
+  try {
+    await deleteAdminNotification(req.params.id);
+    res.json({ ok: true, message: "Notification deleted." });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to delete notification." });
+  }
+});
 
 // ---------- GET /notifications/email-status — diagnostic info on active email provider ----------
 router.get("/email-status", async (_req: AuthedRequest, res) => {

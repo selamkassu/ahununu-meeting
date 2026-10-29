@@ -80,12 +80,47 @@ const detailInclude = {
   },
   documents: { include: { uploadedBy: { select: { id: true, name: true } } } },
   participantSignatures: {
-    include: {
+    select: {
+      id: true,
+      userId: true,
+      meetingId: true,
+      signerName: true,
+      signerRole: true,
+      signedAt: true,
+      bypassReason: true,
+      userAgent: true,
+      // signatureDataUrl intentionally excluded from the main meeting response
+      // (it can be up to 200KB of base64 per signer). Fetch via GET /:id/signatures when needed.
       user: { select: { id: true, name: true, avatarColor: true, jobTitle: true, role: { select: { name: true } } } },
     },
     orderBy: { signedAt: "asc" as const },
   },
 };
+
+/**
+ * Lightweight include for workflow state changes (approve, unlock, complete, signatures)
+ * Avoids executing 14 sequential subqueries over cloud database.
+ */
+const workflowInclude = {
+  organizer: { select: { id: true, name: true, email: true, avatarColor: true } },
+  approvedBy: { select: { id: true, name: true, email: true, avatarColor: true } },
+  department: true,
+  participantSignatures: {
+    select: {
+      id: true,
+      userId: true,
+      meetingId: true,
+      signerName: true,
+      signerRole: true,
+      signedAt: true,
+      bypassReason: true,
+      userAgent: true,
+      user: { select: { id: true, name: true, avatarColor: true, jobTitle: true, role: { select: { name: true } } } },
+    },
+    orderBy: { signedAt: "asc" as const },
+  },
+};
+
 /**
  * Check if a meeting is locked for editing.
  * APPROVED meetings are strictly read-only for all users unless unlocked with ADMIN_OVERRIDE.
@@ -1288,235 +1323,254 @@ async function createSignatureRequestNotifications(
 
 // POST /:id/request-signatures  — move meeting to PENDING_SIGNATURES phase (idempotent)
 router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
-  const meeting = await prisma.meeting.findUnique({
-    where: { id: req.params.id },
-    select: {
-      id: true,
-      status: true,
-      organizerId: true,
-      departmentId: true,
-      title: true,
-      participants: { select: { userId: true } },
-      participantSignatures: { select: { userId: true } },
-    },
-  });
-  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
-
-  await ensureUserPermissions(req);
-  const isOrganizer = meeting.organizerId === req.user!.userId;
-  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-  const canApprove =
-    req.userPermissions?.includes("meetings:approve") ||
-    req.userPermissions?.includes("meetings:certify_lock");
-  const canEdit = checkOwnershipAccess(req, "meetings", "edit", {
-    departmentId: meeting.departmentId,
-    ownerId: meeting.organizerId,
-    participantIds: meeting.participants.map((p) => p.userId),
-  });
-
-  if (!isOrganizer && !hasAdminOverride && !canApprove && !canEdit) {
-    return res.status(403).json({ error: "Only organizers, department managers, or administrators can initiate the signing phase." });
-  }
-
-  if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
-  if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot request signatures for a cancelled meeting." });
-
-  // If already ready for approval, return current meeting state cleanly
-  if (meeting.status === "READY_FOR_APPROVAL") {
-    const fullMeeting = await prisma.meeting.findUnique({
+  try {
+    const meeting = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      include: detailInclude,
+      select: {
+        id: true,
+        status: true,
+        organizerId: true,
+        departmentId: true,
+        title: true,
+        participants: { select: { userId: true } },
+        participantSignatures: { select: { userId: true } },
+      },
     });
-    return res.json(fullMeeting);
+    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+
+    await ensureUserPermissions(req);
+    const isOrganizer = meeting.organizerId === req.user!.userId;
+    const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+    const canApprove =
+      req.userPermissions?.includes("meetings:approve") ||
+      req.userPermissions?.includes("meetings:certify_lock");
+    const canEdit = checkOwnershipAccess(req, "meetings", "edit", {
+      departmentId: meeting.departmentId,
+      ownerId: meeting.organizerId,
+      participantIds: meeting.participants.map((p) => p.userId),
+    });
+
+    if (!isOrganizer && !hasAdminOverride && !canApprove && !canEdit) {
+      return res.status(403).json({ error: "Only organizers, department managers, or administrators can initiate the signing phase." });
+    }
+
+    if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
+    if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot request signatures for a cancelled meeting." });
+
+    // If already ready for approval, return current meeting state cleanly
+    if (meeting.status === "READY_FOR_APPROVAL") {
+      const current = await (prisma.meeting as any).findUnique({
+        where: { id: req.params.id },
+        include: workflowInclude,
+      });
+      return res.json(current);
+    }
+
+    const updated = await (prisma.meeting as any).update({
+      where: { id: req.params.id },
+      data: { status: "PENDING_SIGNATURES", signaturesRequestedAt: new Date() },
+      include: workflowInclude,
+    });
+
+    // Notify all unsigned signers asynchronously (background)
+    const signedUserIds = new Set<string>((updated.participantSignatures || []).map((s: any) => s.userId as string));
+    const participantUserIds = (meeting.participants || []).map((p: any) => p.userId);
+
+    createSignatureRequestNotifications(
+      meeting.id,
+      meeting.title,
+      meeting.organizerId,
+      participantUserIds,
+      signedUserIds
+    ).catch((notifErr) => {
+      console.warn("[request-signatures] Notification error:", notifErr);
+    });
+
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("[POST /meetings/:id/request-signatures] Error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to initiate signature requests." });
   }
-
-  const updated = await (prisma.meeting as any).update({
-    where: { id: req.params.id },
-    data: { status: "PENDING_SIGNATURES", signaturesRequestedAt: new Date() },
-    include: detailInclude,
-  });
-
-  // Notify all unsigned signers (participants + organizer) via in-app notification
-  const signedUserIds = new Set<string>((updated.participantSignatures || []).map((s: any) => s.userId as string));
-  const participantUserIds = (updated.participants || []).map((p: any) => p.userId);
-
-  await createSignatureRequestNotifications(
-    meeting.id,
-    meeting.title,
-    meeting.organizerId,
-    participantUserIds,
-    signedUserIds
-  );
-
-  res.json(updated);
 });
 
 // POST /:id/participant-sign  — participant submits their digital signature
 router.post("/:id/participant-sign", async (req: AuthedRequest, res) => {
-  const meeting = await (prisma.meeting as any).findUnique({
-    where: { id: req.params.id },
-    include: {
-      participants: { select: { userId: true } },
-      participantSignatures: { select: { userId: true } },
-    },
-  });
-  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
-  if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
-  if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot sign a cancelled meeting." });
+  try {
+    const meeting = await (prisma.meeting as any).findUnique({
+      where: { id: req.params.id },
+      include: {
+        participants: { select: { userId: true } },
+        participantSignatures: { select: { userId: true } },
+      },
+    });
+    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+    if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
+    if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot sign a cancelled meeting." });
 
-  if (meeting.status !== "PENDING_SIGNATURES") {
-    if (["SCHEDULED", "IN_PROGRESS", "COMPLETED", "DRAFT"].includes(meeting.status)) {
-      await (prisma.meeting as any).update({
-        where: { id: req.params.id },
-        data: { status: "PENDING_SIGNATURES", signaturesRequestedAt: new Date() },
-      });
-    } else {
-      return res.status(400).json({ error: "Signatures are not being collected for this meeting right now." });
+    if (meeting.status !== "PENDING_SIGNATURES") {
+      if (["SCHEDULED", "IN_PROGRESS", "COMPLETED", "DRAFT"].includes(meeting.status)) {
+        await (prisma.meeting as any).update({
+          where: { id: req.params.id },
+          data: { status: "PENDING_SIGNATURES", signaturesRequestedAt: new Date() },
+        });
+      } else {
+        return res.status(400).json({ error: "Signatures are not being collected for this meeting right now." });
+      }
     }
+
+    // Nobody can sign for anybody else: strictly use authenticated userId
+    const targetUserId = req.user!.userId;
+
+    const isParticipant = meeting.participants.some((p: any) => p.userId === targetUserId);
+    await ensureUserPermissions(req);
+    const canSignByPermission =
+      req.userPermissions?.includes("ADMIN_OVERRIDE") ||
+      req.userPermissions?.includes("minutes:sign") ||
+      req.userPermissions?.includes("meetings:approve");
+    const isOrganizer = meeting.organizerId === targetUserId;
+
+    if (!isParticipant && !isOrganizer && !canSignByPermission) {
+      return res.status(403).json({ error: "Only confirmed attendees or authorized organizers can sign the minutes." });
+    }
+
+    const alreadySigned = meeting.participantSignatures.some((s: any) => s.userId === targetUserId);
+    if (alreadySigned) return res.status(400).json({ error: "You have already signed this meeting." });
+
+    const { signature } = req.body || {};
+    if (!signature || typeof signature !== "string" || !signature.trim()) {
+      return res.status(400).json({ error: "A valid digital signature is required." });
+    }
+
+    const userRecord = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { name: true, jobTitle: true, role: { select: { name: true } } },
+    });
+    const signerName = userRecord?.name || "Participant";
+    const signerRole = userRecord?.jobTitle || userRecord?.role?.name || undefined;
+
+    await (prisma.participantSignature as any).create({
+      data: {
+        meetingId: req.params.id,
+        userId: targetUserId,
+        signerName,
+        signerRole,
+        signatureDataUrl: signature.trim(),
+        userAgent: req.headers["user-agent"] || null,
+      },
+    });
+
+    // Check if all signers (participants + organizer/admin) have now signed
+    const requiredSignerIds = new Set(meeting.participants.map((p: any) => p.userId));
+    if (meeting.organizerId) requiredSignerIds.add(meeting.organizerId);
+    const totalRequired = requiredSignerIds.size;
+    const signedCount = meeting.participantSignatures.length + 1; // +1 for the one just added
+
+    let newStatus = "PENDING_SIGNATURES";
+    if (signedCount >= totalRequired && totalRequired > 0) {
+      newStatus = "READY_FOR_APPROVAL";
+    }
+
+    const updated = await (prisma.meeting as any).update({
+      where: { id: req.params.id },
+      data: { status: newStatus },
+      include: workflowInclude,
+    });
+
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("[POST /meetings/:id/participant-sign] Error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to submit participant signature." });
   }
-
-  // Nobody can sign for anybody else: strictly use authenticated userId
-  const targetUserId = req.user!.userId;
-
-  const isParticipant = meeting.participants.some((p: any) => p.userId === targetUserId);
-  await ensureUserPermissions(req);
-  const canSignByPermission =
-    req.userPermissions?.includes("ADMIN_OVERRIDE") ||
-    req.userPermissions?.includes("minutes:sign") ||
-    req.userPermissions?.includes("meetings:approve");
-  const isOrganizer = meeting.organizerId === targetUserId;
-
-  if (!isParticipant && !isOrganizer && !canSignByPermission) {
-    return res.status(403).json({ error: "Only confirmed attendees or authorized organizers can sign the minutes." });
-  }
-
-  const alreadySigned = meeting.participantSignatures.some((s: any) => s.userId === targetUserId);
-  if (alreadySigned) return res.status(400).json({ error: "You have already signed this meeting." });
-
-  const { signature } = req.body || {};
-  if (!signature || typeof signature !== "string" || !signature.trim()) {
-    return res.status(400).json({ error: "A valid digital signature is required." });
-  }
-
-  const userRecord = await prisma.user.findUnique({
-    where: { id: targetUserId },
-    select: { name: true, jobTitle: true, role: { select: { name: true } } },
-  });
-  const signerName = userRecord?.name || "Participant";
-  const signerRole = userRecord?.jobTitle || userRecord?.role?.name || undefined;
-
-  await (prisma.participantSignature as any).create({
-    data: {
-      meetingId: req.params.id,
-      userId: targetUserId,
-      signerName,
-      signerRole,
-      signatureDataUrl: signature.trim(),
-      userAgent: req.headers["user-agent"] || null,
-    },
-  });
-
-  // Check if all signers (participants + organizer/admin) have now signed
-  const requiredSignerIds = new Set(meeting.participants.map((p: any) => p.userId));
-  if (meeting.organizerId) requiredSignerIds.add(meeting.organizerId);
-  const totalRequired = requiredSignerIds.size;
-  const signedCount = meeting.participantSignatures.length + 1; // +1 for the one just added
-
-  let newStatus = "PENDING_SIGNATURES";
-  if (signedCount >= totalRequired && totalRequired > 0) {
-    newStatus = "READY_FOR_APPROVAL";
-  }
-
-  const updated = await (prisma.meeting as any).update({
-    where: { id: req.params.id },
-    data: { status: newStatus },
-    include: detailInclude,
-  });
-
-  res.json(updated);
 });
 
 // GET /:id/signatures  — get all participant signatures
 router.get("/:id/signatures", async (req: AuthedRequest, res) => {
-  const signatures = await (prisma.participantSignature as any).findMany({
-    where: { meetingId: req.params.id },
-    include: {
-      user: { select: { id: true, name: true, avatarColor: true, jobTitle: true } },
-    },
-    orderBy: { signedAt: "asc" },
-  });
-  res.json(signatures);
+  try {
+    const signatures = await (prisma.participantSignature as any).findMany({
+      where: { meetingId: req.params.id },
+      include: {
+        user: { select: { id: true, name: true, avatarColor: true, jobTitle: true } },
+      },
+      orderBy: { signedAt: "asc" },
+    });
+    return res.json(signatures);
+  } catch (err: any) {
+    console.error("[GET /meetings/:id/signatures] Error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to load signatures." });
+  }
 });
 
 // ---------- Approve Meeting Workflow ----------
 router.post("/:id/approve", async (req: AuthedRequest, res) => {
-  const meeting = await (prisma.meeting as any).findUnique({
-    where: { id: req.params.id },
-    include: {
-      participants: { select: { userId: true } },
-      participantSignatures: { select: { userId: true } },
-    },
-  });
-  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+  try {
+    const [meeting, userRecord] = await Promise.all([
+      (prisma.meeting as any).findUnique({
+        where: { id: req.params.id },
+        include: {
+          participants: { select: { userId: true } },
+          participantSignatures: { select: { userId: true } },
+        },
+      }),
+      prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { name: true, jobTitle: true, email: true, role: { select: { name: true } } },
+      }),
+    ]);
 
-  const authorized = await canApproveMeeting(meeting.organizerId, req);
-  if (!authorized) {
-    return res.status(403).json({
-      error: "Only the meeting organizer or an authorized administrator can approve this meeting.",
-    });
-  }
+    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-  if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
-  if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot approve a cancelled meeting." });
+    const authorized = await canApproveMeeting(meeting.organizerId, req);
+    if (!authorized) {
+      return res.status(403).json({
+        error: "Only the meeting organizer or an authorized administrator can approve this meeting.",
+      });
+    }
 
-  const { signature, forceApprove, forceReason } = req.body || {};
-  if (!signature || typeof signature !== "string" || !signature.trim()) {
-    return res.status(400).json({
-      error: "A valid digital signature is required to approve this meeting and formalize its minutes.",
-    });
-  }
+    if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
+    if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot approve a cancelled meeting." });
 
-  // Calculate if all required signers have completed their signatures
-  const requiredSignerIds = new Set(meeting.participants.map((p: any) => p.userId));
-  if (meeting.organizerId) requiredSignerIds.add(meeting.organizerId);
-  const signedUserIds = new Set(meeting.participantSignatures.map((s: any) => s.userId));
+    const { signature, forceApprove, forceReason } = req.body || {};
+    if (!signature || typeof signature !== "string" || !signature.trim()) {
+      return res.status(400).json({
+        error: "A valid digital signature is required to approve this meeting and formalize its minutes.",
+      });
+    }
 
-  // Remaining signers who have not signed yet (excluding the approving user who signs now)
-  const pendingSignerIds = Array.from(requiredSignerIds).filter(
-    (uid) => !signedUserIds.has(uid) && uid !== req.user!.userId
-  );
-  const allSigned = pendingSignerIds.length === 0;
+    // Calculate if all required signers have completed their signatures
+    const requiredSignerIds = new Set(meeting.participants.map((p: any) => p.userId));
+    if (meeting.organizerId) requiredSignerIds.add(meeting.organizerId);
+    const signedUserIds = new Set(meeting.participantSignatures.map((s: any) => s.userId));
 
-  // When some participants have not yet signed, admin must toggle force submit checkbox
-  if (!allSigned && !forceApprove) {
-    return res.status(400).json({
-      error: `Some participants have not yet submitted their digital signatures (${pendingSignerIds.length} pending). Please toggle the Force Submit checkbox to confirm admin override.`,
-      requiresForceApprove: true,
-      pendingCount: pendingSignerIds.length,
-    });
-  }
+    // Remaining signers who have not signed yet (excluding the approving user who signs now)
+    const pendingSignerIds = Array.from(requiredSignerIds).filter(
+      (uid) => !signedUserIds.has(uid) && uid !== req.user!.userId
+    );
+    const allSigned = pendingSignerIds.length === 0;
 
-  const isForceApproved = !allSigned && !!forceApprove;
-  if (isForceApproved && (!forceReason || typeof forceReason !== "string" || forceReason.trim().length < 5)) {
-    return res.status(400).json({
-      error: "A mandatory, descriptive reason (minimum 5 characters) is strictly required for administrative force approval.",
-      requiresForceApprove: true,
-      pendingCount: pendingSignerIds.length,
-    });
-  }
+    // When some participants have not yet signed, admin must toggle force submit checkbox
+    if (!allSigned && !forceApprove) {
+      return res.status(400).json({
+        error: `Some participants have not yet submitted their digital signatures (${pendingSignerIds.length} pending). Please toggle the Force Submit checkbox to confirm admin override.`,
+        requiresForceApprove: true,
+        pendingCount: pendingSignerIds.length,
+      });
+    }
 
-  const recordedBypassReason = isForceApproved ? forceReason.trim() : null;
+    const isForceApproved = !allSigned && !!forceApprove;
+    if (isForceApproved && (!forceReason || typeof forceReason !== "string" || forceReason.trim().length < 5)) {
+      return res.status(400).json({
+        error: "A mandatory, descriptive reason (minimum 5 characters) is strictly required for administrative force approval.",
+        requiresForceApprove: true,
+        pendingCount: pendingSignerIds.length,
+      });
+    }
 
-  const userRecord = await prisma.user.findUnique({
-    where: { id: req.user!.userId },
-    select: { name: true, jobTitle: true, email: true, role: { select: { name: true } } },
-  });
+    const recordedBypassReason = isForceApproved ? forceReason.trim() : null;
 
-  const updated = await prisma.$transaction(async (tx) => {
-    // Record or update approver's signature in participantSignatures
+    // Record or update approver's signature in participantSignatures directly
     const alreadySignedParticipant = meeting.participantSignatures.some((s: any) => s.userId === req.user!.userId);
     if (!alreadySignedParticipant) {
-      await (tx.participantSignature as any).create({
+      await (prisma.participantSignature as any).create({
         data: {
           meetingId: req.params.id,
           userId: req.user!.userId,
@@ -1527,15 +1581,18 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
           bypassReason: recordedBypassReason,
         },
       });
-    } else if (isForceApproved) {
-      await (tx.participantSignature as any).updateMany({
+    } else {
+      await (prisma.participantSignature as any).updateMany({
         where: { meetingId: req.params.id, userId: req.user!.userId },
-        data: { bypassReason: recordedBypassReason },
+        data: {
+          signatureDataUrl: signature.trim(),
+          bypassReason: recordedBypassReason,
+        },
       });
     }
 
     // Update meeting status to APPROVED with approver metadata
-    return (tx.meeting as any).update({
+    const updated = await (prisma.meeting as any).update({
       where: { id: req.params.id },
       data: {
         status: "APPROVED",
@@ -1545,131 +1602,155 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
         forceApproved: isForceApproved,
         bypassReason: recordedBypassReason,
       },
-      include: detailInclude,
+      include: workflowInclude,
     });
-  });
 
-  logAuditEvent({
-    level: isForceApproved ? "SECURITY" : "INFO",
-    action: isForceApproved ? "MEETING_FORCE_APPROVED" : "MEETING_APPROVED",
-    actorId: req.user!.userId,
-    actorEmail: userRecord?.email,
-    resource: "Meeting",
-    resourceId: meeting.id,
-    details: {
-      forceApproved: isForceApproved,
-      bypassReason: recordedBypassReason,
-      pendingCount: pendingSignerIds.length,
-      approverName: userRecord?.name,
-    },
-  });
+    try {
+      logAuditEvent({
+        level: isForceApproved ? "SECURITY" : "INFO",
+        action: isForceApproved ? "MEETING_FORCE_APPROVED" : "MEETING_APPROVED",
+        actorId: req.user!.userId,
+        actorEmail: userRecord?.email,
+        resource: "Meeting",
+        resourceId: meeting.id,
+        details: {
+          forceApproved: isForceApproved,
+          bypassReason: recordedBypassReason,
+          pendingCount: pendingSignerIds.length,
+          approverName: userRecord?.name,
+        },
+      });
+    } catch (auditErr) {
+      console.warn("[POST /meetings/:id/approve] Non-fatal audit log error:", auditErr);
+    }
 
-  res.json(updated);
+    return res.json(updated);
+  } catch (error: any) {
+    console.error("[POST /meetings/:id/approve] Error:", error);
+    return res.status(500).json({
+      error: error?.message || "Failed to approve meeting. Please try again.",
+    });
+  }
 });
 
 // ---------- Unlock / Override Meeting Lock (Exclusive to ADMIN_OVERRIDE) ----------
 router.post("/:id/unlock", async (req: AuthedRequest, res) => {
-  await ensureUserPermissions(req);
-  const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-  if (!hasAdminOverride) {
-    return res.status(403).json({
-      error: "Access Denied: Only users with the ADMIN_OVERRIDE permission possess the authority to unlock an approved or locked meeting.",
-    });
-  }
-
-  const meeting = await prisma.meeting.findUnique({
-    where: { id: req.params.id },
-    select: { id: true, status: true, title: true, code: true },
-  });
-  if (!meeting) return res.status(404).json({ error: "Meeting not found." });
-
-  if (!isLockedMeetingStatus(meeting.status)) {
-    return res.status(400).json({
-      error: `Meeting is not currently locked (current status is ${meeting.status}).`,
-    });
-  }
-
-  const { targetStatus = "IN_PROGRESS", reason } = req.body || {};
-  if (!reason || typeof reason !== "string" || !reason.trim()) {
-    return res.status(400).json({
-      error: "A valid reason is strictly required to unlock this meeting.",
-    });
-  }
-  const validTargetStatus = [
-    "IN_PROGRESS",
-    "COMPLETED",
-    "DRAFT",
-    "SCHEDULED",
-    "PENDING_SIGNATURES",
-  ].includes(targetStatus)
-    ? targetStatus
-    : "IN_PROGRESS";
-
-  if (validTargetStatus === "COMPLETED") {
-    const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
-      (prisma as any).meetingMinutes.findMany({
-        where: { meetingId: req.params.id },
-        select: { content: true },
-      }),
-      prisma.decision.count({ where: { meetingId: req.params.id } }),
-      prisma.actionItem.count({ where: { meetingId: req.params.id } }),
-    ]);
-
-    const stripHtml = (html: string) =>
-      (html || "")
-        .replace(/<[^>]*>/g, "")
-        .replace(/&nbsp;/g, " ")
-        .trim();
-
-    const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
-    const hasDecisions = decisionsCount > 0;
-    const hasActionItems = actionItemsCount > 0;
-
-    if (!hasSummary && !hasDecisions && !hasActionItems) {
-      return res.status(400).json({
-        error:
-          "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+  try {
+    await ensureUserPermissions(req);
+    const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+    if (!hasAdminOverride) {
+      return res.status(403).json({
+        error: "Access Denied: Only users with the ADMIN_OVERRIDE permission possess the authority to unlock an approved or locked meeting.",
       });
     }
-  }
 
-  const recordedReason =
-    typeof reason === "string" && reason.trim()
-      ? reason.trim()
-      : "Administrative override: meeting unlocked for modification";
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, status: true, title: true, code: true, organizerId: true, participants: { select: { userId: true } } },
+    });
+    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-  const updateData: any = {
-    status: validTargetStatus,
-    bypassReason: `Unlocked by Administrator: ${recordedReason}`,
-  };
-  if (validTargetStatus === "PENDING_SIGNATURES") {
-    updateData.signaturesRequestedAt = new Date();
-  }
+    if (!isLockedMeetingStatus(meeting.status)) {
+      return res.status(400).json({
+        error: `Meeting is not currently locked (current status is ${meeting.status}).`,
+      });
+    }
 
-  const updated = await (prisma.meeting as any).update({
-    where: { id: req.params.id },
-    data: updateData,
-    include: detailInclude,
-  });
+    const { targetStatus = "IN_PROGRESS", reason } = req.body || {};
+    if (!reason || typeof reason !== "string" || !reason.trim()) {
+      return res.status(400).json({
+        error: "A valid reason is strictly required to unlock this meeting.",
+      });
+    }
+    const validTargetStatus = [
+      "IN_PROGRESS",
+      "COMPLETED",
+      "DRAFT",
+      "SCHEDULED",
+      "PENDING_SIGNATURES",
+    ].includes(targetStatus)
+      ? targetStatus
+      : "IN_PROGRESS";
 
-  if (validTargetStatus === "PENDING_SIGNATURES") {
-    try {
+    if (validTargetStatus === "COMPLETED") {
+      const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+        (prisma as any).meetingMinutes.findMany({
+          where: { meetingId: req.params.id },
+          select: { content: true },
+        }),
+        prisma.decision.count({ where: { meetingId: req.params.id } }),
+        prisma.actionItem.count({ where: { meetingId: req.params.id } }),
+      ]);
+
+      const stripHtml = (html: string) =>
+        (html || "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .trim();
+
+      const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+      const hasDecisions = decisionsCount > 0;
+      const hasActionItems = actionItemsCount > 0;
+
+      if (!hasSummary && !hasDecisions && !hasActionItems) {
+        return res.status(400).json({
+          error:
+            "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+        });
+      }
+    }
+
+    const recordedReason =
+      typeof reason === "string" && reason.trim()
+        ? reason.trim()
+        : "Administrative override: meeting unlocked for modification";
+
+    const updateData: any = {
+      status: validTargetStatus,
+      bypassReason: `Unlocked by Administrator: ${recordedReason}`,
+    };
+    if (validTargetStatus === "PENDING_SIGNATURES") {
+      updateData.signaturesRequestedAt = new Date();
+    }
+
+    const updated = await (prisma.meeting as any).update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: workflowInclude,
+    });
+
+    if (validTargetStatus === "PENDING_SIGNATURES") {
       const signedUserIds = new Set<string>((updated.participantSignatures || []).map((s: any) => s.userId as string));
-      const participantUserIds = (updated.participants || []).map((p: any) => p.userId);
+      const participantUserIds = (meeting.participants || []).map((p: any) => p.userId);
 
-      await createSignatureRequestNotifications(
+      createSignatureRequestNotifications(
         updated.id,
         updated.title,
         updated.organizerId,
         participantUserIds,
         signedUserIds
-      );
-    } catch (notifErr) {
-      console.error("Failed to generate signature request notifications on unlock:", notifErr);
+      ).catch((notifErr) => {
+        console.warn("[unlock] Notification error:", notifErr);
+      });
     }
-  }
 
-  res.json(updated);
+    logAuditEvent({
+      level: "SECURITY",
+      action: "MEETING_UNLOCKED",
+      actorId: req.user!.userId,
+      resource: "Meeting",
+      resourceId: meeting.id,
+      details: {
+        targetStatus: validTargetStatus,
+        reason: recordedReason,
+      },
+    });
+
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("[POST /meetings/:id/unlock] Error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to unlock meeting." });
+  }
 });
 
 // ---------- Complete Meeting (POST /:id/complete) ----------
@@ -1677,68 +1758,73 @@ router.post(
   "/:id/complete",
   requirePermission("meetings:edit:all", "meetings:edit:dept", "meetings:edit:own"),
   async (req: AuthedRequest, res) => {
-    const existing = await prisma.meeting.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, status: true, organizerId: true, departmentId: true },
-    });
-    if (!existing) return res.status(404).json({ error: "Meeting not found." });
-
-    if (!checkOwnershipAccess(req, "meetings", "edit", {
-      departmentId: existing.departmentId,
-      ownerId: existing.organizerId,
-    })) {
-      return res.status(403).json({ error: "You do not have permission to complete this meeting." });
-    }
-
-    await ensureUserPermissions(req);
-    const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
-
-    if (existing.status === "APPROVED" && !hasAdminOverride) {
-      return res.status(403).json({
-        error: "Meeting is approved and strictly read-only. Modifications require ADMIN_OVERRIDE permission.",
+    try {
+      const existing = await prisma.meeting.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, status: true, organizerId: true, departmentId: true },
       });
-    }
+      if (!existing) return res.status(404).json({ error: "Meeting not found." });
 
-    const wasLocked = isLockedMeetingStatus(existing.status);
-    if (wasLocked && existing.status !== "APPROVED" && !hasAdminOverride) {
-      return res.status(403).json({
-        error: `Meeting is locked (${existing.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE permission.`,
+      if (!checkOwnershipAccess(req, "meetings", "edit", {
+        departmentId: existing.departmentId,
+        ownerId: existing.organizerId,
+      })) {
+        return res.status(403).json({ error: "You do not have permission to complete this meeting." });
+      }
+
+      await ensureUserPermissions(req);
+      const hasAdminOverride = req.userPermissions?.includes("ADMIN_OVERRIDE");
+
+      if (existing.status === "APPROVED" && !hasAdminOverride) {
+        return res.status(403).json({
+          error: "Meeting is approved and strictly read-only. Modifications require ADMIN_OVERRIDE permission.",
+        });
+      }
+
+      const wasLocked = isLockedMeetingStatus(existing.status);
+      if (wasLocked && existing.status !== "APPROVED" && !hasAdminOverride) {
+        return res.status(403).json({
+          error: `Meeting is locked (${existing.status.replace("_", " ")}). Modifications require ADMIN_OVERRIDE permission.`,
+        });
+      }
+
+      const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+        (prisma as any).meetingMinutes.findMany({
+          where: { meetingId: req.params.id },
+          select: { content: true },
+        }),
+        prisma.decision.count({ where: { meetingId: req.params.id } }),
+        prisma.actionItem.count({ where: { meetingId: req.params.id } }),
+      ]);
+
+      const stripHtml = (html: string) =>
+        (html || "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .trim();
+
+      const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+      const hasDecisions = decisionsCount > 0;
+      const hasActionItems = actionItemsCount > 0;
+
+      if (!hasSummary && !hasDecisions && !hasActionItems) {
+        return res.status(400).json({
+          error:
+            "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+        });
+      }
+
+      const updated = await (prisma.meeting as any).update({
+        where: { id: req.params.id },
+        data: { status: "COMPLETED" },
+        include: workflowInclude,
       });
+
+      return res.json(updated);
+    } catch (err: any) {
+      console.error("[POST /meetings/:id/complete] Error:", err);
+      return res.status(500).json({ error: err?.message || "Failed to complete meeting." });
     }
-
-    const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
-      (prisma as any).meetingMinutes.findMany({
-        where: { meetingId: req.params.id },
-        select: { content: true },
-      }),
-      prisma.decision.count({ where: { meetingId: req.params.id } }),
-      prisma.actionItem.count({ where: { meetingId: req.params.id } }),
-    ]);
-
-    const stripHtml = (html: string) =>
-      (html || "")
-        .replace(/<[^>]*>/g, "")
-        .replace(/&nbsp;/g, " ")
-        .trim();
-
-    const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
-    const hasDecisions = decisionsCount > 0;
-    const hasActionItems = actionItemsCount > 0;
-
-    if (!hasSummary && !hasDecisions && !hasActionItems) {
-      return res.status(400).json({
-        error:
-          "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
-      });
-    }
-
-    const updated = await prisma.meeting.update({
-      where: { id: req.params.id },
-      data: { status: "COMPLETED" },
-      include: detailInclude,
-    });
-
-    res.json(updated);
   }
 );
 
@@ -2242,7 +2328,7 @@ router.post(
       }
 
       // Update participant records in database
-      await prisma.$transaction(
+      await Promise.all(
         parsed.data.records.map((r) => {
           const isAttended = r.status === "ATTENDED";
           return prisma.meetingParticipant.updateMany({
@@ -2259,17 +2345,30 @@ router.post(
     }
 
     // Mark meeting attendance as finalized
-    await (prisma.meeting as any).update({
+    const updated = await (prisma.meeting as any).update({
       where: { id: req.params.id },
       data: {
         attendanceFinalized: true,
         attendanceFinalizedAt: new Date(),
       },
-    });
-
-    const updated = await prisma.meeting.findUnique({
-      where: { id: req.params.id },
-      include: detailInclude,
+      include: {
+        ...workflowInclude,
+        participants: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                avatarColor: true,
+                role: true,
+                jobTitle: true,
+                department: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
     });
 
     res.json(updated);
@@ -2279,41 +2378,63 @@ router.post(
 router.post(
   "/:id/attendance/reopen",
   async (req: AuthedRequest, res) => {
-    if (!req.user) return res.status(401).json({ error: "Not authenticated" });
-    const meeting = await prisma.meeting.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, status: true, organizerId: true, departmentId: true, attendanceFinalized: true },
-    });
-    if (!meeting) return res.status(404).json({ error: "Meeting not found." });
+    try {
+      if (!req.user) return res.status(401).json({ error: "Not authenticated" });
+      const meeting = await prisma.meeting.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, status: true, organizerId: true, departmentId: true, attendanceFinalized: true },
+      });
+      if (!meeting) return res.status(404).json({ error: "Meeting not found." });
 
-    const lockError = checkMeetingLock(meeting, req);
-    if (lockError) return res.status(403).json({ error: lockError });
+      const lockError = checkMeetingLock(meeting, req);
+      if (lockError) return res.status(403).json({ error: lockError });
 
-    const authorized = await canUserManageAttendance(meeting, req);
-    if (!authorized) {
-      return res.status(403).json({ error: "You are not authorized to reopen attendance for this meeting." });
+      const authorized = await canUserManageAttendance(meeting, req);
+      if (!authorized) {
+        return res.status(403).json({ error: "You are not authorized to reopen attendance for this meeting." });
+      }
+
+      const updated = await (prisma.meeting as any).update({
+        where: { id: req.params.id },
+        data: {
+          attendanceFinalized: false,
+          attendanceFinalizedAt: null,
+        },
+        include: {
+          ...workflowInclude,
+          participants: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  avatarColor: true,
+                  role: true,
+                  jobTitle: true,
+                  department: { select: { id: true, name: true } },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      logAuditEvent({
+        level: "INFO",
+        action: "REOPEN_ATTENDANCE",
+        actorId: req.user.userId,
+        resource: "Meeting",
+        resourceId: meeting.id,
+        details: { meetingId: meeting.id },
+      });
+
+      return res.json(updated);
+    } catch (err: any) {
+      console.error("[POST /meetings/:id/attendance/reopen] Error:", err);
+      return res.status(500).json({ error: err?.message || "Failed to reopen attendance." });
     }
-
-    const updated = await prisma.meeting.update({
-      where: { id: req.params.id },
-      data: {
-        attendanceFinalized: false,
-        attendanceFinalizedAt: null,
-      },
-      include: detailInclude,
-    });
-
-    logAuditEvent({
-      level: "INFO",
-      action: "REOPEN_ATTENDANCE",
-      actorId: req.user.userId,
-      resource: "Meeting",
-      resourceId: meeting.id,
-      details: { meetingId: meeting.id },
-    });
-
-    res.json(updated);
-  },
+  }
 );
 
 // ---------- Agenda ----------

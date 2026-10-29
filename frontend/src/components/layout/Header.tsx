@@ -297,7 +297,13 @@ export function Header({
             onClick={() => setMenuOpen((v) => !v)}
             className="focus-ring flex items-center gap-2.5 rounded-full py-1 pl-1 pr-2 hover:bg-slate2-100"
           >
-            {user && <Avatar name={user.name} color={user.avatarColor || "#AED580"} />}
+            {user && (
+              <Avatar
+                name={user.name}
+                color={user.avatarColor || "#AED580"}
+                url={user.avatarUrl}
+              />
+            )}
             <div className="hidden text-left sm:block">
               <p className="text-xs font-bold text-slate2-800">
                 {user?.name}

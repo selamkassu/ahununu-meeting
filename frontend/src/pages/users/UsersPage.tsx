@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Plus,
   Search,
@@ -33,6 +34,9 @@ import { useAuth } from "../../context/AuthContext";
 import { useAlert } from "../../components/ui/AlertDialog";
 
 function resolveUserStatus(user: User): UserStatus {
+  if (user.role?.code === "UNASSIGNED" || user.status === "PENDING") {
+    return "PENDING";
+  }
   if (user.status) return user.status;
   return user.isActive ? "ACTIVE" : "SUSPENDED";
 }
@@ -54,6 +58,14 @@ function getStatusConfig(status: UserStatus) {
         bgBadge: "bg-amber-50 text-amber-700 border border-amber-200/60",
         dot: "bg-amber-500",
         description: "User is temporarily blocked from accessing the system.",
+      };
+    case "PENDING":
+      return {
+        tone: "warning" as const,
+        label: "Pending Approval",
+        bgBadge: "bg-amber-50 text-amber-800 border border-amber-300 font-bold",
+        dot: "bg-amber-500",
+        description: "User registration is awaiting administrator role assignment.",
       };
     case "DEACTIVATED":
       return {
@@ -114,15 +126,17 @@ export default function UsersPage() {
   // Compute metrics
   const stats = useMemo(() => {
     let active = 0;
+    let pending = 0;
     let suspended = 0;
     let deactivated = 0;
     users.forEach((u) => {
       const st = resolveUserStatus(u);
       if (st === "ACTIVE") active++;
+      else if (st === "PENDING") pending++;
       else if (st === "SUSPENDED") suspended++;
       else if (st === "DEACTIVATED") deactivated++;
     });
-    return { total: users.length, active, suspended, deactivated };
+    return { total: users.length, active, pending, suspended, deactivated };
   }, [users]);
 
   // Filtered users
@@ -193,11 +207,27 @@ export default function UsersPage() {
             Enterprise user structure, department affiliations, role-based permissions, and complete account lifecycle.
           </p>
         </div>
-        {canCreate && (
-          <Button onClick={() => setCreateOpen(true)} className="shadow-sm">
-            <Plus size={16} /> Add User
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {hasPermission("users:approve") && (
+            <Link
+              to="/admin/user-approvals"
+              className="focus-ring inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-bold text-amber-900 shadow-sm hover:bg-amber-100 transition-colors"
+            >
+              <UserCheck size={16} className="text-amber-700" />
+              <span>User Approvals</span>
+              {stats.pending > 0 && (
+                <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-white shadow-sm">
+                  {stats.pending}
+                </span>
+              )}
+            </Link>
+          )}
+          {canCreate && (
+            <Button onClick={() => setCreateOpen(true)} className="shadow-sm">
+              <Plus size={16} /> Add User
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Operational Stats Cards */}
@@ -417,10 +447,27 @@ export default function UsersPage() {
                       {/* Role Column */}
                       <td className="px-5 py-3.5">
                         <div className="flex flex-col items-start gap-1">
-                          <Badge tone="brand">{u.role?.name || "Unknown"}</Badge>
-                          <span className="text-[11px] text-slate2-400">
-                            {u.role?.permissions?.length || 0} permissions
-                          </span>
+                          {u.role?.code === "UNASSIGNED" ? (
+                            <>
+                              <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-300 px-2 py-0.5 text-xs font-bold text-amber-800">
+                                <AlertTriangle size={12} className="text-amber-600 shrink-0" />
+                                Unassigned
+                              </span>
+                              <Link
+                                to="/admin/user-approvals"
+                                className="text-[11px] font-semibold text-brand hover:underline inline-flex items-center gap-0.5"
+                              >
+                                Assign Role <ChevronRight size={12} />
+                              </Link>
+                            </>
+                          ) : (
+                            <>
+                              <Badge tone="brand">{u.role?.name || "Unknown"}</Badge>
+                              <span className="text-[11px] text-slate2-400">
+                                {u.role?.permissions?.length || 0} permissions
+                              </span>
+                            </>
+                          )}
                         </div>
                       </td>
 
@@ -1289,6 +1336,7 @@ function UserEditModal({
   onClose: () => void;
   onUpdated: () => void;
 }) {
+  const isCurrentlyUnassigned = user.role?.code === "UNASSIGNED" || !initialRoles.some((r) => r.id === user.roleId);
   const [departments, setDepartments] = useState<Department[]>(initialDepartments);
   const [roles, setRoles] = useState<RoleListItem[]>(initialRoles);
 
@@ -1297,7 +1345,7 @@ function UserEditModal({
   const [phone, setPhone] = useState(user.phone || "");
   const [jobTitle, setJobTitle] = useState(user.jobTitle || "");
   const [departmentId, setDepartmentId] = useState(user.departmentId || initialDepartments[0]?.id || "");
-  const [roleId, setRoleId] = useState(user.roleId || initialRoles[0]?.id || "");
+  const [roleId, setRoleId] = useState(isCurrentlyUnassigned ? "" : (user.roleId || ""));
   const [status, setStatus] = useState<UserStatus>(resolveUserStatus(user));
   const [responsibilities, setResponsibilities] = useState(user.responsibilities || "");
   const [password, setPassword] = useState("");
@@ -1323,25 +1371,40 @@ function UserEditModal({
   useEffect(() => {
     if (initialRoles.length > 0) {
       setRoles(initialRoles);
-      setRoleId((prev) => prev || user.roleId || initialRoles[0]?.id || "");
+      if (user.role?.code === "UNASSIGNED") {
+        setRoleId("");
+      } else {
+        setRoleId((prev) => prev || (initialRoles.some((r) => r.id === user.roleId) ? user.roleId : "") || "");
+      }
     } else {
       api
         .get<RoleListItem[]>("/roles")
         .then((res) => {
           setRoles(res);
-          setRoleId((prev) => prev || user.roleId || res[0]?.id || "");
+          if (user.role?.code === "UNASSIGNED") {
+            setRoleId("");
+          } else {
+            setRoleId((prev) => prev || (res.some((r) => r.id === user.roleId) ? user.roleId : "") || "");
+          }
         })
         .catch((err) => console.error("Failed to load roles in edit modal", err));
     }
-  }, [initialRoles, user.roleId]);
+  }, [initialRoles, user.roleId, user.role?.code]);
 
   const selectedRole = roles.find((r) => r.id === roleId);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (!roleId) {
+      setError("Please select an operational role from the role dropdown menu.");
+      return;
+    }
+
     setSubmitting(true);
     try {
+      const finalStatus = user.role?.code === "UNASSIGNED" && status === "PENDING" ? "ACTIVE" : status;
       await api.put(`/users/${user.id}`, {
         name,
         email,
@@ -1349,7 +1412,7 @@ function UserEditModal({
         jobTitle: jobTitle.trim() || null,
         departmentId,
         roleId,
-        status,
+        status: finalStatus,
         responsibilities: responsibilities.trim() || null,
         password: password.trim() ? password.trim() : undefined,
       });
@@ -1365,6 +1428,18 @@ function UserEditModal({
     <Modal open onClose={onClose} title={`Edit User: ${user.name}`} wide>
       <form onSubmit={submit} className="space-y-4">
         {error && <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-danger">{error}</p>}
+
+        {user.role?.code === "UNASSIGNED" && (
+          <div className="flex items-center gap-2.5 rounded-xl border border-amber-200 bg-amber-50/90 p-3 text-xs text-amber-900">
+            <AlertTriangle size={16} className="text-amber-600 shrink-0" />
+            <div>
+              <p className="font-bold">Role Assignment Required</p>
+              <p className="text-amber-800 mt-0.5">
+                This account currently has an <em>Unassigned</em> role with 0 permissions. Select an operational role below (e.g. Participant, Admin) to grant system access.
+              </p>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Full Name" required>
@@ -1394,8 +1469,16 @@ function UserEditModal({
               ))}
             </select>
           </Field>
-          <Field label="Role" required>
-            <select value={roleId} onChange={(e) => setRoleId(e.target.value)} className={inputClass}>
+          <Field label="Role" required hint={!roleId ? "Select an operational role" : undefined}>
+            <select
+              value={roleId}
+              onChange={(e) => {
+                setRoleId(e.target.value);
+                setError(null);
+              }}
+              className={`${inputClass} ${!roleId ? "border-amber-400 bg-amber-50/30" : ""}`}
+            >
+              <option value="">-- Choose / Assign Role --</option>
               {roles.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.name}

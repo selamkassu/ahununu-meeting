@@ -7,6 +7,18 @@ interface AuthContextValue {
   loading: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
+  register: (data: {
+    name: string;
+    email: string;
+    password: string;
+    departmentId?: string;
+    jobTitle?: string;
+  }) => Promise<{ isPending?: boolean; message?: string }>;
+  loginWithGoogle: (
+    credential: string,
+    mode?: "signin" | "signup" | "auto",
+    meta?: { departmentId?: string; jobTitle?: string }
+  ) => Promise<{ isNewUser: boolean; isPending?: boolean; message?: string }>;
   logout: () => void;
   updateUser: (user: User) => void;
   refreshUser: () => Promise<void>;
@@ -14,6 +26,8 @@ interface AuthContextValue {
   hasPermission: (permission: string) => boolean;
   /** Check if the current user's role includes ANY of the given permissions */
   hasAnyPermission: (...permissions: string[]) => boolean;
+  googleClientId: string;
+  isGoogleConfigured: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -22,6 +36,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [googleClientId, setGoogleClientId] = useState<string>(
+    (import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim()
+  );
+  const [isGoogleConfigured, setIsGoogleConfigured] = useState<boolean>(
+    Boolean((import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim())
+  );
 
   const loadMe = useCallback(async () => {
     if (!getToken()) {
@@ -41,6 +61,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     loadMe();
+    // Also fetch server-side Google config if not supplied via frontend env
+    api.get<{ clientId: string; isConfigured: boolean }>("/auth/google/config")
+      .then((cfg) => {
+        if (cfg?.clientId) {
+          setGoogleClientId(cfg.clientId);
+          setIsGoogleConfigured(cfg.isConfigured);
+        }
+      })
+      .catch(() => {});
   }, [loadMe]);
 
   const login = useCallback(async (email: string, password: string) => {
@@ -54,6 +83,64 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw e;
     }
   }, []);
+
+  const register = useCallback(
+    async (data: {
+      name: string;
+      email: string;
+      password: string;
+      departmentId?: string;
+      jobTitle?: string;
+    }) => {
+      setError(null);
+      try {
+        const res = await api.post<{ token?: string; user?: User; isPending?: boolean; message?: string }>("/auth/register", data);
+        if (res.token && res.user) {
+          setToken(res.token);
+          setUser(res.user);
+        }
+        return res;
+      } catch (e: any) {
+        setError(e.message || "Registration failed. Please check your details.");
+        throw e;
+      }
+    },
+    []
+  );
+
+  const loginWithGoogle = useCallback(
+    async (
+      credential: string,
+      mode: "signin" | "signup" | "auto" = "auto",
+      meta?: { departmentId?: string; jobTitle?: string }
+    ) => {
+      setError(null);
+      try {
+        const res = await api.post<{
+          token?: string;
+          user?: User;
+          isNewUser: boolean;
+          isPending?: boolean;
+          message?: string;
+        }>("/auth/google", {
+          credential,
+          mode,
+          departmentId: meta?.departmentId,
+          jobTitle: meta?.jobTitle,
+        });
+        if (res.token && res.user) {
+          setToken(res.token);
+          setUser(res.user);
+        }
+        return { isNewUser: res.isNewUser, isPending: res.isPending, message: res.message };
+      } catch (e: any) {
+        const msg = e.message || "Google authentication failed. Please try again.";
+        setError(msg);
+        throw e;
+      }
+    },
+    []
+  );
 
   const logout = useCallback(() => {
     setToken(null);
@@ -103,11 +190,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         error,
         login,
+        register,
+        loginWithGoogle,
         logout,
         updateUser,
         refreshUser,
         hasPermission,
         hasAnyPermission,
+        googleClientId,
+        isGoogleConfigured,
       }}
     >
       {children}

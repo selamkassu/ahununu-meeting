@@ -361,9 +361,14 @@ export default function MeetingDetail() {
         targetStatus: unlockTargetStatus,
         reason: unlockReason.trim(),
       });
-      setMeeting(updated);
+      setMeeting((prev) => (prev ? { ...prev, ...updated } : updated));
       setIsUnlockModalOpen(false);
       setUnlockReason("");
+      setPageToast({
+        message: `Meeting unlocked and set to ${unlockTargetStatus.replace("_", " ")}.`,
+        type: "success",
+      });
+      load();
     } catch (err: any) {
       setUnlockError(err.message || "Failed to unlock meeting.");
     } finally {
@@ -517,11 +522,12 @@ export default function MeetingDetail() {
         `/meetings/${id}/request-signatures`,
         {}
       );
-      setMeeting(updated);
+      setMeeting((prev) => (prev ? { ...prev, ...updated } : updated));
       setPageToast({
         message: "Digital signature collection initiated.",
         type: "success",
       });
+      load();
       try {
         await refreshNotifications();
       } catch { }
@@ -1199,15 +1205,20 @@ export default function MeetingDetail() {
           onClose={() => setIsApprovalModalOpen(false)}
           meeting={meeting}
           onApproveSuccess={(updated) => {
-            setMeeting(updated);
+            setMeeting((prev) => (prev ? { ...prev, ...updated, status: "APPROVED" } : updated));
             setIsApprovalModalOpen(false);
+            setPageToast({
+              message: "Meeting approved and formal minutes locked successfully.",
+              type: "success",
+            });
+            load();
           }}
           onApproveApi={async (signature, forceApprove, forceReason) => {
             return await api.post<MeetingDetailType>(`/meetings/${id}/approve`, {
               signature,
               forceApprove,
               forceReason,
-            });
+            }, { timeoutMs: 120000 });
           }}
         />
       )}
@@ -1316,7 +1327,7 @@ export default function MeetingDetail() {
       {isUnlockModalOpen && meeting && (
         <Modal
           open={isUnlockModalOpen}
-          onClose={unlocking ? () => { } : () => setIsUnlockModalOpen(false)}
+          onClose={() => setIsUnlockModalOpen(false)}
           title="Administrator Override: Unlock Meeting"
         >
           <div className="space-y-4 text-xs text-slate2-700">
@@ -1377,7 +1388,6 @@ export default function MeetingDetail() {
                 type="button"
                 variant="secondary"
                 onClick={() => setIsUnlockModalOpen(false)}
-                disabled={unlocking}
                 className="text-xs"
               >
                 Cancel

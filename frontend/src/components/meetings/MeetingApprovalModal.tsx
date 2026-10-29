@@ -19,6 +19,7 @@ import { Modal } from "../ui/Modal";
 import { Button, CodeChip } from "../ui/Primitives";
 import type { MeetingDetail } from "../../types";
 import { useAuth } from "../../context/AuthContext";
+import { api } from "../../api/client";
 
 interface MeetingApprovalModalProps {
   open: boolean;
@@ -51,6 +52,8 @@ export function MeetingApprovalModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sigCheckExpanded, setSigCheckExpanded] = useState(true);
+  // Separately-fetched signature images (signatureDataUrl excluded from main meeting payload)
+  const [sigImages, setSigImages] = useState<Record<string, string>>({});
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
@@ -94,8 +97,16 @@ export function MeetingApprovalModal({
       setSubmitting(false);
       if (user?.name) setTypedName(user.name);
       setTimeout(initCanvas, 50);
+      // Fetch full signature images separately (not included in main meeting payload)
+      api.get<any[]>(`/meetings/${meeting.id}/signatures`)
+        .then((sigs) => {
+          const map: Record<string, string> = {};
+          sigs.forEach((s) => { if (s.userId && s.signatureDataUrl) map[s.userId] = s.signatureDataUrl; });
+          setSigImages(map);
+        })
+        .catch(() => { /* non-critical — roster still shows signed/unsigned status */ });
     }
-  }, [open, user?.name]);
+  }, [open, user?.name, meeting.id]);
 
   const initCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -249,7 +260,7 @@ export function MeetingApprovalModal({
   });
 
   return (
-    <Modal open={open} onClose={submitting ? () => {} : onClose} title="Approve Meeting & Formalize Minutes" wide>
+    <Modal open={open} onClose={onClose} title="Approve Meeting & Formalize Minutes" wide>
       <div className="space-y-5 text-sm text-slate2-700">
 
         {/* Header Summary Banner */}
@@ -334,6 +345,7 @@ export function MeetingApprovalModal({
               <div className="grid gap-1.5 mt-1">
                 {requiredSigners.map((p) => {
                   const sig = meeting.participantSignatures?.find((s) => s.userId === p.user.id);
+                  const sigImageUrl = sigImages[p.user.id];
                   const isMe = p.user.id === user?.id;
                   return (
                     <div key={p.user.id} className="flex items-center gap-2.5 rounded-lg bg-white border border-slate2-200 px-3 py-2">
@@ -353,12 +365,14 @@ export function MeetingApprovalModal({
                       </div>
                       {sig ? (
                         <div className="flex items-center gap-2 shrink-0">
-                          <img
-                            src={sig.signatureDataUrl}
-                            alt="signature"
-                            className="h-8 object-contain opacity-90 rounded border border-slate2-100 bg-white px-1"
-                            style={{ maxWidth: 80 }}
-                          />
+                          {sigImageUrl && (
+                            <img
+                              src={sigImageUrl}
+                              alt="signature"
+                              className="h-8 object-contain opacity-90 rounded border border-slate2-100 bg-white px-1"
+                              style={{ maxWidth: 80 }}
+                            />
+                          )}
                           <span
                             className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-600 shrink-0"
                             title={`Signed on ${new Date(sig.signedAt).toLocaleDateString()}`}
@@ -594,7 +608,7 @@ export function MeetingApprovalModal({
 
         {/* Actions */}
         <div className="flex items-center justify-end gap-2 border-t border-slate2-100 pt-4">
-          <Button type="button" variant="secondary" onClick={onClose} disabled={submitting} className="text-xs">
+          <Button type="button" variant="secondary" onClick={onClose} className="text-xs">
             Cancel
           </Button>
           <Button

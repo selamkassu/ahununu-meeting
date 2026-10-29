@@ -6,6 +6,9 @@ import { requireAuth, requirePermission, AuthedRequest } from "../middleware/aut
 import { USER_STATUSES } from "../utils/enums";
 import { logAuditEvent } from "../utils/audit";
 
+import { markAdminNotificationsForUserRead } from "../lib/adminNotifications";
+import { sendAccountApprovedEmail } from "../utils/email";
+
 const router = Router();
 router.use(requireAuth);
 
@@ -34,6 +37,213 @@ function safeUser(user: any) {
     },
   };
 }
+
+// ---------- GET /users/approvals/count — count pending users awaiting approval ----------
+router.get("/approvals/count", requirePermission("users:approve"), async (_req, res) => {
+  try {
+    const count = await prisma.user.count({
+      where: {
+        OR: [
+          { status: "PENDING" },
+          { role: { code: "UNASSIGNED" } },
+        ],
+      },
+    });
+    res.json({ count });
+  } catch {
+    res.status(500).json({ error: "Failed to fetch pending approvals count." });
+  }
+});
+
+// ---------- GET /users/approvals — list all pending user registrations ----------
+router.get("/approvals", requirePermission("users:approve"), async (_req, res) => {
+  try {
+    const pendingUsers = await prisma.user.findMany({
+      where: {
+        OR: [
+          { status: "PENDING" },
+          { role: { code: "UNASSIGNED" } },
+        ],
+      },
+      include: userInclude,
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(pendingUsers.map(safeUser));
+  } catch {
+    res.status(500).json({ error: "Failed to fetch pending user approvals." });
+  }
+});
+
+// ---------- POST /users/:id/approve — assign role and activate user account ----------
+const approveSchema = z.object({
+  roleId: z.string().min(1, "Please select an assigned role."),
+  departmentId: z.string().optional().nullable(),
+  jobTitle: z.string().optional().nullable(),
+});
+
+router.post("/:id/approve", requirePermission("users:approve"), async (req: AuthedRequest, res) => {
+  const parsed = approveSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Please select an operational role from the dropdown menu.",
+      details: parsed.error.format(),
+    });
+  }
+
+  const { roleId, departmentId, jobTitle } = parsed.data;
+
+  const targetUser = await prisma.user.findUnique({
+    where: { id: req.params.id },
+    include: userInclude,
+  });
+
+  if (!targetUser) {
+    return res.status(404).json({ error: "User not found." });
+  }
+
+  const isAwaitingApproval = targetUser.status === "PENDING" || targetUser.role?.code === "UNASSIGNED";
+  if (!isAwaitingApproval) {
+    return res.status(400).json({ error: "This user account is already approved and assigned an operational role." });
+  }
+
+  // Validate role
+  const selectedRole = await prisma.role.findUnique({
+    where: { id: roleId },
+  });
+
+  if (!selectedRole || !selectedRole.isActive) {
+    return res.status(400).json({ error: "Selected role is invalid or inactive." });
+  }
+
+  if (selectedRole.code === "UNASSIGNED") {
+    return res.status(400).json({ error: "Cannot assign UNASSIGNED role upon approval. Please select a valid role." });
+  }
+
+  let validatedDeptId: string | null = targetUser.departmentId;
+  if (departmentId !== undefined) {
+    if (departmentId === null || departmentId === "") {
+      validatedDeptId = null;
+    } else {
+      const dept = await prisma.department.findUnique({ where: { id: departmentId } });
+      if (dept) validatedDeptId = dept.id;
+    }
+  }
+
+  try {
+    // 1. Immediately activate user and assign role
+    const updatedUser = await prisma.user.update({
+      where: { id: targetUser.id },
+      data: {
+        status: "ACTIVE",
+        isActive: true,
+        roleId: selectedRole.id,
+        departmentId: validatedDeptId,
+        jobTitle: jobTitle !== undefined ? (jobTitle?.trim() || null) : targetUser.jobTitle,
+      },
+      include: userInclude,
+    });
+
+    // 2. Mark any admin_notifications and in-app admin notifications as read
+    await markAdminNotificationsForUserRead(targetUser.id).catch(() => {});
+    await prisma.notification.updateMany({
+      where: {
+        type: "USER_PENDING_APPROVAL",
+        message: { contains: targetUser.email },
+        isRead: false,
+      },
+      data: { isRead: true },
+    }).catch(() => {});
+
+    // 3. User in-app notification
+    await prisma.notification.create({
+      data: {
+        userId: targetUser.id,
+        type: "ACCOUNT_APPROVED",
+        title: "Account Approved & Role Assigned",
+        message: `Your account has been approved and assigned the role "${selectedRole.name}". You now have full access to Ahununu Logistics Portal.`,
+        link: "/",
+      },
+    }).catch(() => {});
+
+    // 4. Send approval email
+    const approverName = req.user?.roleCode === "SYSTEM_ADMIN" ? "System Administrator" : "Administrator";
+    sendAccountApprovedEmail({
+      userName: updatedUser.name,
+      userEmail: updatedUser.email,
+      roleName: selectedRole.name,
+      departmentName: (updatedUser as any).department?.name ?? null,
+      approvedByName: approverName,
+    }).catch((e) => console.error("[UserApprove] Failed to send email:", e?.message || e));
+
+    // 5. Audit event
+    logAuditEvent({
+      level: "INFO",
+      action: "USER_APPROVED_AND_ROLE_ASSIGNED",
+      actorId: req.user?.userId,
+      actorEmail: (req as any).user?.email,
+      resource: "User",
+      resourceId: targetUser.id,
+      details: {
+        assignedRoleId: selectedRole.id,
+        assignedRoleName: selectedRole.name,
+        assignedRoleCode: selectedRole.code,
+        departmentId: validatedDeptId,
+      },
+    });
+
+    return res.json({
+      message: `User ${updatedUser.name} has been approved with role ${selectedRole.name}. Account is now Active!`,
+      user: safeUser(updatedUser),
+    });
+  } catch (err: any) {
+    console.error("Failed to approve user:", err);
+    return res.status(500).json({ error: "Failed to approve user account and assign role." });
+  }
+});
+
+// ---------- POST /users/:id/reject — decline pending user registration ----------
+const rejectSchema = z.object({
+  reason: z.string().optional(),
+});
+
+router.post("/:id/reject", requirePermission("users:approve"), async (req: AuthedRequest, res) => {
+  const parsed = rejectSchema.safeParse(req.body || {});
+  const reason = parsed.success ? parsed.data.reason : undefined;
+
+  const targetUser = await prisma.user.findUnique({
+    where: { id: req.params.id },
+  });
+
+  if (!targetUser) {
+    return res.status(404).json({ error: "User not found." });
+  }
+
+  try {
+    await prisma.user.update({
+      where: { id: targetUser.id },
+      data: {
+        status: "DEACTIVATED",
+        isActive: false,
+      },
+    });
+
+    await markAdminNotificationsForUserRead(targetUser.id).catch(() => {});
+
+    logAuditEvent({
+      level: "WARN",
+      action: "USER_APPROVAL_REJECTED",
+      actorId: req.user?.userId,
+      resource: "User",
+      resourceId: targetUser.id,
+      details: { reason: reason || "Declined by administrator" },
+    });
+
+    return res.json({ message: `Registration for ${targetUser.name} has been declined.` });
+  } catch (err: any) {
+    console.error("Failed to reject user:", err);
+    return res.status(500).json({ error: "Failed to decline user registration." });
+  }
+});
 
 router.get("/", async (req, res) => {
   const { departmentId, roleId, status, q } = req.query;
@@ -122,6 +332,12 @@ router.put("/:id", requirePermission("users:edit"), async (req, res) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid user update data.", details: parsed.error.format() });
 
+  const existingUser = await prisma.user.findUnique({
+    where: { id: req.params.id },
+    include: { role: true },
+  });
+  if (!existingUser) return res.status(404).json({ error: "User not found." });
+
   const { password, status, isActive, ...rest } = parsed.data;
   const dataToUpdate: any = { ...rest };
 
@@ -129,12 +345,22 @@ router.put("/:id", requirePermission("users:edit"), async (req, res) => {
     dataToUpdate.passwordHash = await bcrypt.hash(password, 10);
   }
 
+  let assigningNewOperationalRole = false;
+
   // Validate roleId if provided
   if (rest.roleId) {
     const roleExists = await prisma.role.findUnique({ where: { id: rest.roleId } });
     if (!roleExists) {
       return res.status(400).json({ error: "Selected role does not exist." });
     }
+    if (roleExists.code === "UNASSIGNED") {
+      return res.status(400).json({ error: "Cannot assign UNASSIGNED role. Please select an operational role (e.g. Participant, Admin)." });
+    }
+    if (existingUser.role?.code === "UNASSIGNED") {
+      assigningNewOperationalRole = true;
+    }
+  } else if (existingUser.role?.code === "UNASSIGNED" && (status === "ACTIVE" || isActive === true)) {
+    return res.status(400).json({ error: "Please select an operational role before activating this user account." });
   }
 
   if (status !== undefined) {
@@ -143,6 +369,22 @@ router.put("/:id", requirePermission("users:edit"), async (req, res) => {
   } else if (isActive !== undefined) {
     dataToUpdate.isActive = isActive;
     dataToUpdate.status = isActive ? "ACTIVE" : "SUSPENDED";
+  }
+
+  if (assigningNewOperationalRole) {
+    if (dataToUpdate.status === undefined && existingUser.status === "PENDING") {
+      dataToUpdate.status = "ACTIVE";
+      dataToUpdate.isActive = true;
+    }
+    await markAdminNotificationsForUserRead(existingUser.id).catch(() => {});
+    await prisma.notification.updateMany({
+      where: {
+        type: "USER_PENDING_APPROVAL",
+        message: { contains: existingUser.email },
+        isRead: false,
+      },
+      data: { isRead: true },
+    }).catch(() => {});
   }
 
   try {
@@ -229,22 +471,19 @@ router.delete("/:id", requirePermission("users:delete"), async (req: AuthedReque
   }
 
   try {
-    // Delete non-blocking relations in a transaction before removing user
-    await prisma.$transaction(async (tx) => {
-      // Clean up action assignments
-      await tx.actionItemAssignee.deleteMany({ where: { userId: targetId } });
-      // Clear assignedToId on pending action items
-      await tx.actionItem.updateMany({
-        where: { assignedToId: targetId },
-        data: { assignedToId: null },
-      });
-      // Delete user's notifications
-      await tx.notification.deleteMany({ where: { userId: targetId } });
-      // Delete participations
-      await tx.meetingParticipant.deleteMany({ where: { userId: targetId } });
-      // Finally delete user record
-      await tx.user.delete({ where: { id: targetId } });
+    // Clean up action assignments
+    await prisma.actionItemAssignee.deleteMany({ where: { userId: targetId } });
+    // Clear assignedToId on pending action items
+    await prisma.actionItem.updateMany({
+      where: { assignedToId: targetId },
+      data: { assignedToId: null },
     });
+    // Delete user's notifications
+    await prisma.notification.deleteMany({ where: { userId: targetId } });
+    // Delete participations
+    await prisma.meetingParticipant.deleteMany({ where: { userId: targetId } });
+    // Finally delete user record
+    await prisma.user.delete({ where: { id: targetId } });
 
     logAuditEvent({
       level: "INFO",

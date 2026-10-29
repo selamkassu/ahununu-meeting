@@ -3,7 +3,7 @@
 // ------------------------------------------------------------
 
 export const PERMISSIONS = [
-  "users:view", "users:create", "users:edit", "users:delete", "users:manage_status",
+  "users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve",
   "roles:view", "roles:create", "roles:edit", "roles:delete",
   "departments:view", "departments:create", "departments:edit", "departments:delete",
   "meetings:view:all", "meetings:view:dept", "meetings:view:own", "meetings:create",
@@ -36,6 +36,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   "users:edit": "Edit Users",
   "users:delete": "Delete Users",
   "users:manage_status": "Manage User Status",
+  "users:approve": "Approve Users & Assign Roles",
   "roles:view": "View Roles",
   "roles:create": "Create Roles",
   "roles:edit": "Edit Roles",
@@ -106,7 +107,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
 };
 
 export const PERMISSION_GROUPS: { label: string; permissions: string[] }[] = [
-  { label: "User Management", permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status"] },
+  { label: "User Management", permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve"] },
   { label: "Role Management", permissions: ["roles:view", "roles:create", "roles:edit", "roles:delete"] },
   { label: "Department Management", permissions: ["departments:view", "departments:create", "departments:edit", "departments:delete"] },
   {
@@ -215,10 +216,11 @@ export interface RoleListItem extends RoleDetail {
 // OTHER TYPES
 // ------------------------------------------------------------
 
-export type UserStatus = "ACTIVE" | "SUSPENDED" | "DEACTIVATED";
+export type UserStatus = "ACTIVE" | "PENDING" | "SUSPENDED" | "DEACTIVATED";
 
 export const USER_STATUS_LABELS: Record<UserStatus, string> = {
   ACTIVE: "Active",
+  PENDING: "Pending Approval",
   SUSPENDED: "Suspended",
   DEACTIVATED: "Deactivated",
 };
@@ -271,6 +273,8 @@ export interface UserLite {
   name: string;
   email?: string;
   avatarColor: string;
+  avatarUrl?: string | null;
+  googleId?: string | null;
   role?: RoleDetail;
   jobTitle?: string | null;
   department?: { id: string; name: string } | null;
@@ -286,6 +290,8 @@ export interface User extends UserLite {
   responsibilities?: string | null;
   departmentId: string | null;
   department?: Department | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface AgendaItem {

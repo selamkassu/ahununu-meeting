@@ -14,6 +14,7 @@ export const PERMISSIONS = [
   "users:edit",
   "users:delete",
   "users:manage_status",
+  "users:approve",
 
   // Role management
   "roles:view",
@@ -117,7 +118,7 @@ export type Permission = (typeof PERMISSIONS)[number];
 export const PERMISSION_GROUPS: { label: string; permissions: Permission[] }[] = [
   {
     label: "User Management",
-    permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status"],
+    permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve"],
   },
   {
     label: "Role Management",
@@ -236,6 +237,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   "users:edit": "Edit Users",
   "users:delete": "Delete Users",
   "users:manage_status": "Manage User Status",
+  "users:approve": "Approve Users & Assign Roles",
   "roles:view": "View Roles",
   "roles:create": "Create Roles",
   "roles:edit": "Edit Roles",
@@ -367,7 +369,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<string, Permission[]> = {
 // ENUM-LIKE VALUE LISTS (statuses, priorities, etc.)
 // ──────────────────────────────────────────────────────────────
 
-export const USER_STATUSES = ["ACTIVE", "SUSPENDED", "DEACTIVATED"] as const;
+export const USER_STATUSES = ["ACTIVE", "PENDING", "SUSPENDED", "DEACTIVATED"] as const;
 export type UserStatus = (typeof USER_STATUSES)[number];
 
 export const MEETING_STATUSES = ["SCHEDULED", "IN_PROGRESS", "PENDING_SIGNATURES", "READY_FOR_APPROVAL", "APPROVED", "COMPLETED", "CANCELLED"] as const;

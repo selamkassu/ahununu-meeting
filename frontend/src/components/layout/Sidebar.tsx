@@ -15,10 +15,12 @@ import {
   Paperclip,
   ShieldCheck,
   User,
+  UserCheck,
   ChevronsUpDown,
   LogOut,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import { api } from "../../api/client";
 import { Logo } from "../ui/Logo";
 
 const nav = [
@@ -31,6 +33,7 @@ const nav = [
   { to: "/action-items", label: "Action Items", icon: ListChecks, permission: "action_items:view" },
   { to: "/departments", label: "Departments", icon: Building2, permission: "departments:view" },
   { to: "/users", label: "Users", icon: Users2, permission: "users:view" },
+  { to: "/admin/user-approvals", label: "User Approvals", icon: UserCheck, permission: "users:approve", badgeKey: "approvals" },
   { to: "/roles", label: "Roles", icon: ShieldCheck, permission: "roles:view" },
   { to: "/documents", label: "Documents", icon: Paperclip, permission: "documents:view" },
   { to: "/notifications", label: "Notifications", icon: Bell, permission: "notifications:view" },
@@ -42,7 +45,28 @@ export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "deskto
   const { user, logout, hasPermission } = useAuth();
   const navigate = useNavigate();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hasPermission("users:approve")) return;
+    let mounted = true;
+    const fetchCount = () => {
+      api.get<{ count: number }>("/users/approvals/count")
+        .then((res) => {
+          if (mounted && typeof res?.count === "number") {
+            setPendingApprovalsCount(res.count);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchCount();
+    const interval = setInterval(fetchCount, 25000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [hasPermission]);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -91,7 +115,18 @@ export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "deskto
                     strokeWidth={isActive ? 2.2 : 1.8}
                     className={isActive ? "text-white" : "text-slate2-400 group-hover:text-slate2-600"}
                   />
-                  <span>{item.label}</span>
+                  <span className="truncate">{item.label}</span>
+                  {item.badgeKey === "approvals" && pendingApprovalsCount > 0 && (
+                    <span
+                      className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-black tracking-tight ${
+                        isActive
+                          ? "bg-white text-brand"
+                          : "bg-amber-500 text-white shadow-sm"
+                      }`}
+                    >
+                      {pendingApprovalsCount}
+                    </span>
+                  )}
                 </>
               )}
             </NavLink>

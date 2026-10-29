@@ -10,6 +10,7 @@ const envSchema = z.object({
   BREVO_SENDER_EMAIL: z.string().email().optional(),
   GMAIL_USER: z.string().optional(),
   GMAIL_APP_PASSWORD: z.string().optional(),
+  GOOGLE_CLIENT_ID: z.string().optional(),
 });
 
 export function validateEnv() {

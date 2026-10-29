@@ -17,8 +17,10 @@ router.get("/permissions", async (_req, res) => {
 });
 
 // ---------- List all roles ----------
-router.get("/", async (_req, res) => {
+router.get("/", async (req, res) => {
+  const includeUnassigned = req.query.includeUnassigned === "true";
   const roles = await prisma.role.findMany({
+    where: includeUnassigned ? undefined : { code: { not: "UNASSIGNED" } },
     include: {
       permissions: { select: { permission: true } },
       _count: { select: { users: true } },

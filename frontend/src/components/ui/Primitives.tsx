@@ -80,23 +80,56 @@ export function ProgressBar({ percent, tone = "brand" }: { percent: number; tone
   );
 }
 
-export function Avatar({ name, color }: { name: string; color: string }) {
-  const initials = name
-    .split(" ")
+export function Avatar({
+  name,
+  color,
+  url,
+  size = "md",
+}: {
+  name: string;
+  color?: string;
+  url?: string | null;
+  size?: "sm" | "md" | "lg";
+}) {
+  const [imgError, setImgError] = React.useState(false);
+  const sizeClasses = {
+    sm: "h-7 w-7 text-[10px]",
+    md: "h-8 w-8 text-xs",
+    lg: "h-10 w-10 text-sm",
+  };
+
+  if (url && !imgError) {
+    return (
+      <img
+        src={url}
+        alt={name}
+        onError={() => setImgError(true)}
+        className={`${sizeClasses[size]} shrink-0 rounded-full object-cover border border-slate2-200 shadow-sm`}
+        title={name}
+      />
+    );
+  }
+
+  const initials = (name || "")
+    .trim()
+    .split(/\s+/)
     .map((n) => n[0])
+    .filter(Boolean)
     .slice(0, 2)
     .join("")
-    .toUpperCase();
+    .toUpperCase() || "U";
+
   const isLight =
     color?.toLowerCase() === "#aed580" ||
     color?.toLowerCase() === "#c5e8a0" ||
     color?.toLowerCase() === "#ffffff";
+
   return (
     <div
-      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+      className={`flex shrink-0 items-center justify-center rounded-full font-bold shadow-sm ${sizeClasses[size]} ${
         isLight ? "text-brand-dark" : "text-white"
       }`}
-      style={{ backgroundColor: color }}
+      style={{ backgroundColor: color || "#0B7A6B" }}
       title={name}
     >
       {initials}

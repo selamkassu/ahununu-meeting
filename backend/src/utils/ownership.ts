@@ -3,18 +3,52 @@ import { prisma } from "../lib/prisma";
 
 export type OwnershipScope = "all" | "dept" | "own" | null;
 
+// In-memory cache for role permissions to avoid querying DB on every single request
+const rolePermissionsCache = new Map<string, { permissions: string[]; expiresAt: number }>();
+
+export function clearRolePermissionsCache(roleId?: string) {
+  if (roleId) {
+    rolePermissionsCache.delete(roleId);
+  } else {
+    rolePermissionsCache.clear();
+  }
+}
+
 /**
  * Ensure userPermissions are loaded on the request.
  */
 export async function ensureUserPermissions(req: AuthedRequest): Promise<string[]> {
   if (req.userPermissions) return req.userPermissions;
   if (!req.user?.roleId) return [];
-  const rolePerms = await prisma.rolePermission.findMany({
-    where: { roleId: req.user.roleId },
-    select: { permission: true },
-  });
-  req.userPermissions = rolePerms.map((rp) => rp.permission);
-  return req.userPermissions;
+
+  const now = Date.now();
+  const cached = rolePermissionsCache.get(req.user.roleId);
+  if (cached && cached.expiresAt > now) {
+    req.userPermissions = cached.permissions;
+    return req.userPermissions;
+  }
+
+  try {
+    const rolePerms = await prisma.rolePermission.findMany({
+      where: { roleId: req.user.roleId },
+      select: { permission: true },
+    });
+    const permissions = rolePerms.map((rp) => rp.permission);
+    rolePermissionsCache.set(req.user.roleId, {
+      permissions,
+      expiresAt: now + 5 * 60 * 1000, // 5 minutes TTL
+    });
+    req.userPermissions = permissions;
+    return req.userPermissions;
+  } catch (err: any) {
+    // If database connection drops intermittently, use stale cache if available
+    if (cached) {
+      req.userPermissions = cached.permissions;
+      return req.userPermissions;
+    }
+    console.warn("[ensureUserPermissions] Database connection warning:", err?.message || err);
+    return [];
+  }
 }
 
 /**

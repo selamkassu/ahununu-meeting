@@ -42,6 +42,8 @@ export function ParticipantSigningModal({ open, onClose, meeting, onSignSuccess 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showReviewContent, setShowReviewContent] = useState(true);
+  // Fetched separately — not included in the main meeting payload to keep responses lean
+  const [mySignatureDataUrl, setMySignatureDataUrl] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
@@ -76,8 +78,17 @@ export function ParticipantSigningModal({ open, onClose, meeting, onSignSuccess 
       setSubmitting(false);
       if (user?.name) setTypedName(user.name);
       setTimeout(initCanvas, 50);
+      // Load the current user's signature image if they've already signed
+      if (user?.id) {
+        api.get<any[]>(`/meetings/${meeting.id}/signatures`)
+          .then((sigs) => {
+            const mine = sigs.find((s) => s.userId === user.id);
+            setMySignatureDataUrl(mine?.signatureDataUrl ?? null);
+          })
+          .catch(() => { /* non-critical */ });
+      }
     }
-  }, [open, user?.name]);
+  }, [open, user?.name, user?.id, meeting.id]);
 
   const initCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -428,7 +439,7 @@ export function ParticipantSigningModal({ open, onClose, meeting, onSignSuccess 
               </span>
               <div className="flex items-center justify-center min-h-[50px]">
                 <img
-                  src={mySignature.signatureDataUrl}
+                  src={mySignatureDataUrl || ""}
                   alt="Your signature"
                   className="max-h-14 max-w-[200px] object-contain"
                 />
