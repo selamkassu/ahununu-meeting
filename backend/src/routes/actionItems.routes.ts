@@ -107,7 +107,7 @@ const createSchema = z.object({
   meetingId: z.string().min(1),
   decisionId: z.string().optional(),
   title: z.string().min(2),
-  description: z.string().optional(),
+  description: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   assignedToId: z.string().optional(),
   assigneeIds: z.array(z.string()).optional(),
   departmentId: z.string().optional(),
@@ -310,7 +310,7 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
 // ---------- Batch Create (Multiple action items to one user or multiple users) ----------
 const batchItemSchema = z.object({
   title: z.string().min(2),
-  description: z.string().optional(),
+  description: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   assigneeIds: z.array(z.string()).min(1),
   deadline: z.string(),
   priority: z.enum(PRIORITIES).default("MEDIUM").optional(),
@@ -539,7 +539,7 @@ const updateSchema = z.object({
   priority: z.enum(PRIORITIES).optional(),
   deadline: z.string().optional(),
   title: z.string().min(3).optional(),
-  description: z.string().optional(),
+  description: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   assignedToId: z.string().optional(),
   assigneeIds: z.array(z.string()).optional(),
 });

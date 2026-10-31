@@ -41,6 +41,7 @@ import {
   PenTool,
   Signature,
   Bell,
+  Play,
 } from "lucide-react";
 import { api, ApiError, getToken, buildUrl } from "../../api/client";
 import { RichTextEditor } from "../../components/editor/RichTextEditor";
@@ -254,6 +255,19 @@ export default function MeetingDetail() {
     if (hasPermission("meetings:edit:own") && isOrganizer) return true;
     return false;
   }, [hasAdminOverride, meeting, user, isOrganizer, hasPermission]);
+
+  const hasStarted = useMemo(() => {
+    if (!meeting) return false;
+    if (meeting.status !== "SCHEDULED") return true;
+    const dateStr =
+      typeof meeting.date === "string"
+        ? meeting.date.split("T")[0]
+        : new Date(meeting.date).toISOString().split("T")[0];
+    const [startH, startM] = (meeting.startTime || "00:00").split(":").map(Number);
+    const [year, month, day] = dateStr.split("-").map(Number);
+    const startDateTime = new Date(year, month - 1, day, startH || 0, startM || 0, 0);
+    return Date.now() >= startDateTime.getTime();
+  }, [meeting]);
 
   const canApprove = !!(
     meeting &&
@@ -744,7 +758,7 @@ export default function MeetingDetail() {
                   <span>Print Minutes</span>
                 </Button>
 
-                {canManage && (
+                {canManage && (!hasStarted || hasAdminOverride) && (
                   <Button
                     variant="secondary"
                     type="button"
@@ -754,6 +768,19 @@ export default function MeetingDetail() {
                   >
                     <Pencil size={13} className="text-brand" />
                     <span>Edit Info</span>
+                  </Button>
+                )}
+
+                {canManage && meeting.status === "SCHEDULED" && (
+                  <Button
+                    variant="primary"
+                    type="button"
+                    onClick={() => updateStatus("IN_PROGRESS")}
+                    className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-brand text-white hover:bg-brand-dark font-semibold cursor-pointer shadow-xs"
+                    title="Start this meeting session (sets status to IN PROGRESS and opens attendance)"
+                  >
+                    <Play size={13} className="fill-white" />
+                    <span>Start Meeting</span>
                   </Button>
                 )}
 
@@ -5646,6 +5673,12 @@ function ParticipantsTab({
   const isLocked = isLockedMeeting(meeting.status);
   const isApproved = meeting.status === "APPROVED";
   const isCancelled = meeting.status === "CANCELLED";
+  const isCompleted = meeting.status === "COMPLETED";
+  const isMeetingScheduled = meeting.status === "SCHEDULED";
+  const isMeetingInProgressOrActive =
+    meeting.status === "IN_PROGRESS" ||
+    meeting.status === "PENDING_SIGNATURES" ||
+    meeting.status === "READY_FOR_APPROVAL";
 
   // Modifications to participants roster and attendance are strictly locked when meeting is locked,
   // until unlocked via the Unlock button with an administrator reason.
@@ -5666,12 +5699,34 @@ function ParticipantsTab({
 
   const meetingEnded = hasMeetingEnded(meeting);
   const isAttendanceFinalized = !!meeting.attendanceFinalized;
-  // If the meeting is not locked and user has management permission, they can edit and toggle attendance
-  const canEditAttendance = !isLocked && canManage;
+
+  // Attendance should be taken after the meeting is in progress until approved / completed.
+  // Otherwise attendance should NOT be taken before the meeting even started.
+  const canEditAttendance =
+    isMeetingInProgressOrActive &&
+    !isLocked &&
+    canManage;
+
   const [reopeningAttendance, setReopeningAttendance] = useState(false);
 
+  const handleStartMeeting = async () => {
+    try {
+      await api.put(`/meetings/${meeting.id}`, { status: "IN_PROGRESS" });
+      onChange();
+      setToast({
+        message: "Meeting session is now IN PROGRESS. Attendance tracking is open.",
+        type: "success",
+      });
+    } catch (err: any) {
+      setToast({
+        message: err.message || "Failed to start meeting.",
+        type: "error",
+      });
+    }
+  };
+
   const reopenAttendance = async () => {
-    if (!canManage || reopeningAttendance) return;
+    if (!canEditAttendance || reopeningAttendance) return;
     setReopeningAttendance(true);
     try {
       await api.post(`/meetings/${meeting.id}/attendance/reopen`, {});
@@ -5778,6 +5833,7 @@ function ParticipantsTab({
 
   // Open finalize attendance modal
   const openFinalizeModal = () => {
+    if (!canEditAttendance) return;
     // Populate initial staged attendance from current participants
     const initialMap: Record<string, "ATTENDED" | "NOT ATTENDED"> = {};
     for (const p of (meeting.participants || [])) {
@@ -5790,7 +5846,7 @@ function ParticipantsTab({
 
   // Confirm finalize attendance
   const handleConfirmFinalize = async () => {
-    if (isFinalizing) return;
+    if (isFinalizing || !canEditAttendance) return;
     setIsFinalizing(true);
     try {
       const records = (meeting.participants || []).map((p) => ({
@@ -5920,7 +5976,27 @@ function ParticipantsTab({
             </div>
           </div>
 
-          {isAttendanceFinalized ? (
+          {isMeetingScheduled ? (
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-flex items-center gap-1.5 bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-1 text-xs font-semibold rounded-sm"
+                title="Attendance cannot be taken before the meeting starts."
+              >
+                <Clock size={12} className="text-amber-600" /> Attendance Not Started
+              </span>
+              {canManage && (
+                <button
+                  type="button"
+                  onClick={handleStartMeeting}
+                  className="inline-flex items-center gap-1.5 bg-brand text-white border border-brand px-3 py-1 text-xs font-semibold hover:bg-brand-dark transition-colors cursor-pointer rounded-sm shadow-2xs"
+                  title="Start meeting session to begin taking attendance"
+                >
+                  <Play size={11} className="fill-white" />
+                  <span>Start Meeting</span>
+                </button>
+              )}
+            </div>
+          ) : isAttendanceFinalized ? (
             <div className="flex items-center gap-2 flex-wrap">
               <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-1 text-xs font-semibold">
                 <CheckCircle2 size={13} className="text-emerald-600" /> Finalized
@@ -5949,7 +6025,7 @@ function ParticipantsTab({
                 </>
               )}
             </div>
-          ) : !isCancelled && (canManage || hasAdminOverride) ? (
+          ) : !isCancelled && canEditAttendance ? (
             <button
               type="button"
               onClick={openFinalizeModal}
@@ -5960,7 +6036,7 @@ function ParticipantsTab({
             </button>
           ) : (
             <span className="inline-flex items-center gap-1 bg-slate2-50 text-slate2-600 border border-slate2-200 px-2.5 py-1 text-xs font-medium">
-              <Clock size={12} /> {isCancelled ? "Cancelled" : "In Session"}
+              <Clock size={12} /> {isCancelled ? "Cancelled" : isLocked ? "Locked" : "In Session"}
             </span>
           )}
 
@@ -6083,6 +6159,31 @@ function ParticipantsTab({
           </button>
         )}
       </div>
+
+      {isMeetingScheduled && (
+        <div className="mx-6 my-3 p-3 bg-amber-50/80 border border-amber-200/80 rounded-md flex items-center justify-between text-xs text-amber-900 gap-3">
+          <div className="flex items-center gap-2.5">
+            <Clock size={16} className="text-amber-700 shrink-0" />
+            <div>
+              <p className="font-semibold text-amber-950">Attendance is not yet open</p>
+              <p className="text-amber-800/90 text-[11px] leading-relaxed">
+                Attendance should be taken after the meeting is in progress until the meeting is approved/completed. Attendance cannot be taken before the meeting starts.
+              </p>
+            </div>
+          </div>
+          {canManage && (
+            <button
+              type="button"
+              onClick={handleStartMeeting}
+              className="inline-flex items-center gap-1.5 bg-brand text-white border border-brand px-3 py-1 text-xs font-semibold hover:bg-brand-dark transition-colors cursor-pointer rounded-sm shrink-0 shadow-2xs"
+              title="Start meeting session to begin taking attendance"
+            >
+              <Play size={11} className="fill-white" />
+              <span>Start Meeting</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Participants List */}
       <div className="divide-y divide-slate2-100">
@@ -6217,14 +6318,16 @@ function ParticipantsTab({
                       title={
                         canEditAttendance
                           ? "Mark as Attended"
-                          : isLockedMeeting(meeting.status)
-                            ? "Meeting is locked (Read-Only)"
-                            : "Attendance editing locked"
+                          : isMeetingScheduled
+                            ? "Attendance cannot be taken before the meeting starts"
+                            : isLockedMeeting(meeting.status)
+                              ? "Meeting is locked (Read-Only)"
+                              : "Attendance editing locked"
                       }
                       className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1 text-xs font-semibold transition-all ${isAttended
                         ? "bg-brand text-white shadow-sm"
                         : "text-slate2-600 hover:text-slate2-900 cursor-pointer"
-                        } ${!canEditAttendance ? "opacity-70 cursor-not-allowed" : "cursor-pointer"}`}
+                        } ${!canEditAttendance ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
                     >
                       <CheckCircle2
                         size={13}
@@ -6239,14 +6342,16 @@ function ParticipantsTab({
                       title={
                         canEditAttendance
                           ? "Mark as Absent"
-                          : isLockedMeeting(meeting.status)
-                            ? "Meeting is locked (Read-Only)"
-                            : "Attendance editing locked"
+                          : isMeetingScheduled
+                            ? "Attendance cannot be taken before the meeting starts"
+                            : isLockedMeeting(meeting.status)
+                              ? "Meeting is locked (Read-Only)"
+                              : "Attendance editing locked"
                       }
                       className={`inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs font-semibold transition-all ${!isAttended
                         ? "bg-slate2-700 text-white shadow-sm"
                         : "text-slate2-500 hover:text-slate2-800 cursor-pointer"
-                        } ${!canEditAttendance ? "opacity-70 cursor-not-allowed" : "cursor-pointer"}`}
+                        } ${!canEditAttendance ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
                     >
                       <XCircle
                         size={13}

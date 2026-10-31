@@ -36,9 +36,11 @@ export function setToken(token: string | null) {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  details?: any;
+  constructor(message: string, status: number, details?: any) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -89,9 +91,20 @@ async function request<T>(path: string, options: RequestInit & { timeoutMs?: num
   }
 
   if (!res.ok) {
+    let errorMsg = body?.error || `Request failed (${res.status})`;
+    if (body?.details?.fieldErrors) {
+      const fieldIssues = Object.entries(body.details.fieldErrors)
+        .filter(([_, errs]) => Array.isArray(errs) && (errs as string[]).length > 0)
+        .map(([field, errs]) => `${field}: ${(errs as string[]).join(", ")}`)
+        .join("; ");
+      if (fieldIssues && !errorMsg.includes(fieldIssues)) {
+        errorMsg = `${errorMsg} (${fieldIssues})`;
+      }
+    }
     throw new ApiError(
-      body?.error || `Request failed (${res.status})`,
+      errorMsg,
       res.status,
+      body?.details,
     );
   }
   return body as T;

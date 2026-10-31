@@ -18,7 +18,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { api } from "../../api/client";
-import type { MeetingListItem, Department } from "../../types";
+import type { MeetingListItem, Department, MeetingStatus } from "../../types";
 import { isLockedMeeting } from "../../types";
 import { Card, EmptyState, Button, inputClass, Avatar } from "../../components/ui/Primitives";
 import { CodeChip } from "../../components/ui/Primitives";
@@ -26,6 +26,18 @@ import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { useAuth } from "../../context/AuthContext";
 import MeetingCreateModal from "./MeetingCreateModal";
 import MeetingEditModal from "./MeetingEditModal";
+
+function hasMeetingStarted(meeting: { date: string | Date; startTime: string; status?: MeetingStatus }): boolean {
+  if (meeting.status && meeting.status !== "SCHEDULED") return true;
+  const dateStr =
+    typeof meeting.date === "string"
+      ? meeting.date.split("T")[0]
+      : new Date(meeting.date).toISOString().split("T")[0];
+  const [startH, startM] = (meeting.startTime || "00:00").split(":").map(Number);
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const startDateTime = new Date(year, month - 1, day, startH || 0, startM || 0, 0, 0);
+  return Date.now() >= startDateTime.getTime();
+}
 
 const STATUS_FILTERS = [
   { value: "", label: "All Sessions" },
@@ -54,6 +66,9 @@ export default function MeetingList() {
   const canCreate = hasPermission("meetings:create");
 
   const canEditMeeting = (m: MeetingListItem) => {
+    // Editing is strictly only allowed before the meeting starts (unless ADMIN_OVERRIDE)
+    if (hasMeetingStarted(m) && !hasPermission("ADMIN_OVERRIDE")) return false;
+
     if (hasPermission("meetings:edit:all") || hasPermission("ADMIN_OVERRIDE")) return true;
     if (hasPermission("meetings:edit:dept") && user?.department?.id === m.department?.id) return true;
     if (hasPermission("meetings:edit:own") && user?.id === m.organizer?.id) return true;

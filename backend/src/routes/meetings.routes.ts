@@ -146,12 +146,42 @@ async function canApproveMeeting(req: AuthedRequest): Promise<boolean> {
 }
 
 /**
- * Check if a meeting has reached its conclusion (status is COMPLETED or current server time >= meeting end datetime)
+ * Check attendance eligibility based on meeting lifecycle:
+ * Attendance should be taken after the meeting is in progress until the meeting is approved (completed).
+ * Attendance should NOT be taken before the meeting even started.
+ */
+function checkAttendanceEligibility(meeting: { status: string }): { allowed: boolean; error?: string } {
+  if (meeting.status === "SCHEDULED" || meeting.status === "DRAFT") {
+    return {
+      allowed: false,
+      error: "Attendance cannot be taken before the meeting has started. The meeting must be in progress.",
+    };
+  }
+
+  if (meeting.status === "APPROVED" || meeting.status === "COMPLETED") {
+    return {
+      allowed: false,
+      error: "Attendance cannot be modified once the meeting is approved or completed.",
+    };
+  }
+
+  if (meeting.status === "CANCELLED") {
+    return {
+      allowed: false,
+      error: "Attendance cannot be taken for a cancelled meeting.",
+    };
+  }
+
+  // Allowed progression statuses: IN_PROGRESS, PENDING_SIGNATURES, READY_FOR_APPROVAL
+  return { allowed: true };
+}
+
+/**
+ * Check if a meeting has reached its conclusion
  */
 function hasMeetingEnded(meeting: { date: Date | string; endTime: string; status: string }): boolean {
   if (meeting.status === "CANCELLED") return false;
 
-  // If the meeting has progressed beyond SCHEDULED, attendance can be finalized
   if (
     [
       "IN_PROGRESS",
@@ -164,20 +194,11 @@ function hasMeetingEnded(meeting: { date: Date | string; endTime: string; status
     return true;
   }
 
-  // Meetings on today's calendar date or in the past can finalize attendance
-  // (real-world sessions frequently conclude early or record roster during proceedings)
   const dateObj = typeof meeting.date === "string" ? new Date(meeting.date) : meeting.date;
   const meetingDateStr = dateObj.toISOString().split("T")[0];
-  const nowDateStr = new Date().toISOString().split("T")[0];
-
-  if (meetingDateStr <= nowDateStr) {
-    return true;
-  }
-
   const [endHours, endMinutes] = (meeting.endTime || "00:00").split(":").map(Number);
   const [year, month, day] = meetingDateStr.split("-").map(Number);
 
-  // Accounts for East Africa Time (UTC+3, which is 3 hours ahead of UTC server time on Render)
   const utcEnd = Date.UTC(year, month - 1, day, endHours || 0, endMinutes || 0, 0);
   const eatEnd = utcEnd - 3 * 60 * 60 * 1000;
 
@@ -355,12 +376,12 @@ function parseTimeString(timeStr: string): { hours: number; minutes: number; tot
 // ---------- Create ----------
 const createSchema = z.object({
   title: z.string().min(3),
-  description: z.string().optional(),
+  description: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   date: z.string(),
   startTime: z.string(),
   endTime: z.string(),
-  location: z.string().optional(),
-  onlineLink: z.string().optional(),
+  location: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
+  onlineLink: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   priority: z.enum(PRIORITIES).default("MEDIUM"),
   departmentId: z.string().min(1),
   participantIds: z.array(z.string()).min(1, "Please select at least one participant to schedule the meeting."),
@@ -368,8 +389,8 @@ const createSchema = z.object({
     .array(
       z.object({
         title: z.string().min(2),
-        description: z.string().nullable().optional(),
-        presenter: z.string().nullable().optional(),
+        description: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
+        presenter: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
         durationMin: z.number().optional(),
       }),
     )
@@ -989,15 +1010,16 @@ router.get("/:id", async (req: AuthedRequest, res) => {
 // ---------- Update ----------
 const updateSchema = z.object({
   title: z.string().min(3).optional(),
-  description: z.string().optional(),
+  description: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   date: z.string().optional(),
   startTime: z.string().optional(),
   endTime: z.string().optional(),
-  location: z.string().optional(),
-  onlineLink: z.string().optional(),
+  location: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
+  onlineLink: z.preprocess((val) => (val === "" ? null : val), z.string().nullable().optional()),
   priority: z.enum(PRIORITIES).optional(),
   status: z.enum(MEETING_STATUSES).optional(),
   departmentId: z.string().optional(),
+  participantIds: z.array(z.string()).min(1, "Please select at least one participant.").optional(),
 });
 
 router.put(
@@ -1005,12 +1027,32 @@ router.put(
   requirePermission("meetings:edit:all", "meetings:edit:dept", "meetings:edit:own"),
   async (req: AuthedRequest, res) => {
     const parsed = updateSchema.safeParse(req.body);
-    if (!parsed.success)
-      return res.status(400).json({ error: "Invalid meeting update.", details: parsed.error.flatten() });
+    if (!parsed.success) {
+      const fieldErrors = parsed.error.flatten().fieldErrors;
+      const issues = Object.entries(fieldErrors)
+        .map(([k, v]) => `${k}: ${v?.join(", ")}`)
+        .join("; ");
+      return res.status(400).json({
+        error: issues ? `Invalid meeting update: ${issues}` : "Invalid meeting update.",
+        details: parsed.error.flatten(),
+      });
+    }
 
     const existing = await prisma.meeting.findUnique({
       where: { id: req.params.id },
-      select: { id: true, status: true, organizerId: true, approvedById: true, departmentId: true, startTime: true, endTime: true, signaturesRequestedAt: true },
+      select: {
+        id: true,
+        status: true,
+        organizerId: true,
+        approvedById: true,
+        departmentId: true,
+        date: true,
+        startTime: true,
+        endTime: true,
+        signaturesRequestedAt: true,
+        title: true,
+        code: true,
+      },
     });
     if (!existing) return res.status(404).json({ error: "Meeting not found." });
 
@@ -1031,6 +1073,32 @@ router.put(
       });
     }
 
+    // Editing meeting details should strictly only be allowed before the meeting starts (unless ADMIN_OVERRIDE)
+    const existingDateStr = (existing.date instanceof Date ? existing.date.toISOString() : String(existing.date)).slice(0, 10);
+    const isEditingMeetingDetails =
+      parsed.data.title !== undefined ||
+      parsed.data.date !== undefined ||
+      parsed.data.startTime !== undefined ||
+      parsed.data.endTime !== undefined ||
+      parsed.data.description !== undefined ||
+      parsed.data.location !== undefined ||
+      parsed.data.onlineLink !== undefined ||
+      parsed.data.priority !== undefined ||
+      parsed.data.participantIds !== undefined;
+
+    if (isEditingMeetingDetails) {
+      const [origYear, origMonth, origDay] = existingDateStr.split("-").map(Number);
+      const [origStartH, origStartM] = (existing.startTime || "00:00").split(":").map(Number);
+      const scheduledStart = new Date(origYear, origMonth - 1, origDay, origStartH || 0, origStartM || 0, 0, 0);
+
+      const hasStarted = existing.status !== "SCHEDULED" || Date.now() >= scheduledStart.getTime();
+      if (hasStarted && !hasAdminOverride) {
+        return res.status(400).json({
+          error: "Editing meeting details (title, date/time, participants) is only permitted before the meeting starts. This meeting is in progress or its scheduled start time has passed.",
+        });
+      }
+    }
+
     // Validate updated time constraints if startTime or endTime is modified
     if (parsed.data.startTime || parsed.data.endTime) {
       const checkStartTime = parsed.data.startTime || existing.startTime;
@@ -1048,9 +1116,32 @@ router.put(
       }
     }
 
-    const { date, status, ...rest } = parsed.data;
+    // Validate that new meeting date & start time are in the future
+    if (parsed.data.date || parsed.data.startTime) {
+      const checkDateStr = parsed.data.date ? parsed.data.date.slice(0, 10) : existingDateStr;
+      const checkStartTime = parsed.data.startTime || existing.startTime;
+      const [newYear, newMonth, newDay] = checkDateStr.split("-").map(Number);
+      const sParsed = parseTimeString(checkStartTime);
+      if (sParsed) {
+        const newScheduledStart = new Date(newYear, newMonth - 1, newDay, sParsed.hours, sParsed.minutes, 0, 0);
+        const nowWithGrace = new Date(Date.now() - 5 * 60 * 1000);
+        if (newScheduledStart.getTime() < nowWithGrace.getTime()) {
+          return res.status(400).json({
+            error: "Cannot reschedule a meeting to the past. Please select a future date and time.",
+          });
+        }
+      }
+    }
+
+    const { date, status, participantIds, ...rest } = parsed.data;
     const dataToUpdate: any = { ...rest };
-    if (date) dataToUpdate.date = new Date(date);
+    if (date) {
+      const parsedDate = new Date(date);
+      if (isNaN(parsedDate.getTime())) {
+        return res.status(400).json({ error: "Invalid date format." });
+      }
+      dataToUpdate.date = parsedDate;
+    }
 
     // Status transitions: APPROVED cannot be set via standard update dropdown
     if (status !== undefined) {
@@ -1092,6 +1183,86 @@ router.put(
         dataToUpdate.signaturesRequestedAt = new Date();
       }
       dataToUpdate.status = status;
+    }
+
+    // Synchronize participants if participantIds is provided
+    if (participantIds !== undefined) {
+      const currentParticipants = await prisma.meetingParticipant.findMany({
+        where: { meetingId: req.params.id },
+        select: { id: true, userId: true },
+      });
+      const currentParticipantUserIds = new Set(currentParticipants.map((p) => p.userId));
+      const newParticipantUserIds = new Set(participantIds);
+
+      const userIdsToRemove = currentParticipants
+        .filter((p) => !newParticipantUserIds.has(p.userId))
+        .map((p) => p.userId);
+      const userIdsToAdd = participantIds.filter((uid) => !currentParticipantUserIds.has(uid));
+
+      if (userIdsToRemove.length > 0) {
+        await prisma.meetingParticipant.deleteMany({
+          where: {
+            meetingId: req.params.id,
+            userId: { in: userIdsToRemove },
+          },
+        });
+      }
+
+      if (userIdsToAdd.length > 0) {
+        await prisma.meetingParticipant.createMany({
+          data: userIdsToAdd.map((userId) => ({
+            meetingId: req.params.id,
+            userId,
+          })),
+        });
+
+        // Send in-app invitation notification to newly added participants
+        await prisma.notification.createMany({
+          data: userIdsToAdd.map((userId) => ({
+            userId,
+            type: "MEETING_INVITE",
+            title: "New meeting invitation",
+            message: `You've been invited to "${dataToUpdate.title || existing.title}" (${existing.code}) on ${new Date(dataToUpdate.date || existing.date).toDateString()}.`,
+            link: `/meetings/${existing.id}`,
+          })),
+        }).catch(() => {});
+
+        // Background email dispatch for new participants
+        prisma.user.findMany({
+          where: { id: { in: userIdsToAdd } },
+          select: { id: true, name: true, email: true },
+        }).then(async (addedUsers) => {
+          const meetingDateStrForEmail = new Date(dataToUpdate.date || existing.date).toLocaleDateString("en-US", {
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          });
+
+          const organizer = await prisma.user.findUnique({
+            where: { id: existing.organizerId },
+            select: { name: true },
+          });
+
+          for (const u of addedUsers) {
+            if (u.email && u.email.includes("@")) {
+              sendMeetingInvitationEmail({
+                toEmail: u.email,
+                toName: u.name || "Participant",
+                organizerName: organizer?.name || "Organizer",
+                meetingTitle: dataToUpdate.title || existing.title,
+                meetingDate: meetingDateStrForEmail,
+                startTime: dataToUpdate.startTime || existing.startTime,
+                endTime: dataToUpdate.endTime || existing.endTime,
+                location: dataToUpdate.location !== undefined ? dataToUpdate.location : undefined,
+                onlineLink: dataToUpdate.onlineLink !== undefined ? dataToUpdate.onlineLink : undefined,
+                description: dataToUpdate.description !== undefined ? dataToUpdate.description : undefined,
+                meetingId: existing.id,
+              }).catch((err) => console.error("[Meeting Update] Email error:", err));
+            }
+          }
+        }).catch(() => {});
+      }
     }
 
     try {
@@ -2213,6 +2384,13 @@ router.patch(
       return res.status(403).json({ error: "You are not authorized to update participant attendance." });
     }
 
+    // Attendance should be taken after the meeting is in progress until approved / completed.
+    // Otherwise attendance should NOT be taken before the meeting even started.
+    const eligibility = checkAttendanceEligibility(meeting);
+    if (!eligibility.allowed) {
+      return res.status(400).json({ error: eligibility.error });
+    }
+
     // If attendance is already finalized, only users with edit permission can modify
     const canEditFinal = await canEditFinalizedAttendance(meeting, req);
     if (meeting.attendanceFinalized && !canEditFinal) {
@@ -2287,11 +2465,11 @@ router.post(
       });
     }
 
-    // 1. Validate that the meeting has reached its conclusion
-    if (!hasMeetingEnded(meeting)) {
-      return res.status(400).json({
-        error: `Attendance can only be finalized after the meeting has ended (Scheduled end time: ${meeting.endTime}).`,
-      });
+    // Attendance should be taken after the meeting is in progress until approved / completed.
+    // Otherwise attendance should NOT be taken before the meeting even started.
+    const eligibility = checkAttendanceEligibility(meeting);
+    if (!eligibility.allowed) {
+      return res.status(400).json({ error: eligibility.error });
     }
 
     // 2. Validate if already finalized
@@ -2348,14 +2526,11 @@ router.post(
       );
     }
 
-    // Mark meeting attendance as finalized (and move SCHEDULED meetings to IN_PROGRESS)
+    // Mark meeting attendance as finalized
     const updateData: any = {
       attendanceFinalized: true,
       attendanceFinalizedAt: new Date(),
     };
-    if (meeting.status === "SCHEDULED") {
-      updateData.status = "IN_PROGRESS";
-    }
 
     const updated = await (prisma.meeting as any).update({
       where: { id: req.params.id },
@@ -2401,6 +2576,12 @@ router.post(
       const authorized = await canUserManageAttendance(meeting, req);
       if (!authorized) {
         return res.status(403).json({ error: "You are not authorized to reopen attendance for this meeting." });
+      }
+
+      // Attendance should be taken after the meeting is in progress until approved / completed.
+      const eligibility = checkAttendanceEligibility(meeting);
+      if (!eligibility.allowed) {
+        return res.status(400).json({ error: eligibility.error });
       }
 
       const updated = await (prisma.meeting as any).update({

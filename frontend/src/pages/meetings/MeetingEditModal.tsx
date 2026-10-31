@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Clock,
   Calendar,
@@ -11,13 +11,15 @@ import {
   Tag,
   FileText,
   CheckCircle2,
+  Users,
 } from "lucide-react";
 import { Modal } from "../../components/ui/Modal";
 import { Field, inputClass, Button, CodeChip } from "../../components/ui/Primitives";
 import { StatusBadge, PriorityBadge } from "../../components/ui/Badge";
 import { api, ApiError } from "../../api/client";
-import type { Department, Priority, MeetingStatus, MeetingListItem, MeetingDetail } from "../../types";
+import type { Department, Priority, MeetingStatus, MeetingListItem, MeetingDetail, User } from "../../types";
 import { isLockedMeeting } from "../../types";
+import { SearchableMultiUserSelect } from "../../components/ui/SearchableMultiUserSelect";
 
 const PRIORITIES: { value: Priority; label: string; desc: string; color: string }[] = [
   { value: "LOW", label: "Low", desc: "Routine, informational", color: "border-slate2-200 text-slate2-700 hover:border-slate2-300" },
@@ -86,6 +88,17 @@ export default function MeetingEditModal({
 }: MeetingEditModalProps) {
   const locked = isLockedMeeting(meeting.status);
 
+  // Check if meeting has already started or passed its scheduled start time
+  const hasStarted = useMemo(() => {
+    if (meeting.status && meeting.status !== "SCHEDULED") return true;
+    const origDate = toInputDateString(meeting.date);
+    if (!origDate) return false;
+    const [year, month, day] = origDate.split("-").map(Number);
+    const [startH, startM] = (meeting.startTime || "00:00").split(":").map(Number);
+    const scheduledStart = new Date(year, month - 1, day, startH || 0, startM || 0, 0, 0);
+    return Date.now() >= scheduledStart.getTime();
+  }, [meeting]);
+
   // Form State
   const [title, setTitle] = useState(meeting.title || "");
   const [description, setDescription] = useState(meeting.description || "");
@@ -99,6 +112,37 @@ export default function MeetingEditModal({
   const [departmentId, setDepartmentId] = useState(
     (meeting as any).departmentId || meeting.department?.id || departments[0]?.id || ""
   );
+
+  // Participants State
+  const [users, setUsers] = useState<User[]>([]);
+  const [participantIds, setParticipantIds] = useState<string[]>(() => {
+    const list = (meeting as any).participants;
+    if (Array.isArray(list)) {
+      return list.map((p: any) => p.userId || p.user?.id).filter(Boolean);
+    }
+    return [];
+  });
+  const [initialParticipantIds, setInitialParticipantIds] = useState<string[]>(() => {
+    const list = (meeting as any).participants;
+    if (Array.isArray(list)) {
+      return list.map((p: any) => p.userId || p.user?.id).filter(Boolean);
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    api.get<User[]>("/users").then((data) => setUsers(data || [])).catch(() => {});
+
+    if (meeting.id) {
+      api.get<any>(`/meetings/${meeting.id}`).then((res) => {
+        if (res?.participants && Array.isArray(res.participants)) {
+          const ids = res.participants.map((p: any) => p.userId || p.user?.id).filter(Boolean);
+          setInitialParticipantIds(ids);
+          setParticipantIds((curr) => (curr.length === 0 ? ids : curr));
+        }
+      }).catch(() => {});
+    }
+  }, [meeting.id]);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,8 +175,18 @@ export default function MeetingEditModal({
     if (isDurationTooShort) {
       return "Meeting duration must be at least 5 minutes.";
     }
+    // Prevent scheduling date & start time in the past
+    const [year, month, day] = date.split("-").map(Number);
+    const [startH, startM] = startTime.split(":").map(Number);
+    if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+      const scheduledStart = new Date(year, month - 1, day, startH || 0, startM || 0, 0, 0);
+      const nowWithGrace = new Date(Date.now() - 5 * 60 * 1000);
+      if (scheduledStart.getTime() < nowWithGrace.getTime()) {
+        return "Meeting start time cannot be in the past. Please select a future time.";
+      }
+    }
     return null;
-  }, [date, isEndTimeBeforeOrEqualStart, isDurationTooShort]);
+  }, [date, startTime, isEndTimeBeforeOrEqualStart, isDurationTooShort]);
 
   // Quick Duration Setter helper
   const setQuickDuration = (minutes: number) => {
@@ -155,7 +209,15 @@ export default function MeetingEditModal({
   const isPristine = useMemo(() => {
     const origDate = toInputDateString(meeting.date);
     const origDeptId = (meeting as any).departmentId || meeting.department?.id || "";
+
+    const origIds = [...initialParticipantIds].sort();
+    const currIds = [...participantIds].sort();
+    const participantsChanged =
+      origIds.length !== currIds.length ||
+      origIds.some((id, idx) => id !== currIds[idx]);
+
     return (
+      !participantsChanged &&
       title.trim() === (meeting.title || "").trim() &&
       description.trim() === (meeting.description || "").trim() &&
       date === origDate &&
@@ -178,6 +240,8 @@ export default function MeetingEditModal({
     priority,
     status,
     departmentId,
+    participantIds,
+    initialParticipantIds,
     meeting,
   ]);
 
@@ -192,6 +256,13 @@ export default function MeetingEditModal({
       return;
     }
 
+    if (hasStarted) {
+      setError(
+        "Editing is only permitted before the meeting starts. This session is already in progress or its scheduled start time has passed."
+      );
+      return;
+    }
+
     if (!title.trim() || title.trim().length < 3) {
       setError("Meeting title must be at least 3 characters long.");
       return;
@@ -199,6 +270,11 @@ export default function MeetingEditModal({
 
     if (!departmentId) {
       setError("Please assign a responsible department.");
+      return;
+    }
+
+    if (participantIds.length === 0) {
+      setError("Please select at least one participant.");
       return;
     }
 
@@ -219,6 +295,7 @@ export default function MeetingEditModal({
         onlineLink: onlineLink.trim() || null,
         priority,
         departmentId,
+        participantIds,
       };
 
       // Only include status if it changed, and cannot be APPROVED directly
@@ -275,6 +352,18 @@ export default function MeetingEditModal({
               </div>
             </div>
           )}
+
+          {hasStarted && !locked && (
+            <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/90 p-2.5 text-xs text-amber-900">
+              <AlertTriangle size={15} className="shrink-0 text-amber-700 mt-0.5" />
+              <div>
+                <p className="font-semibold">Meeting In Progress or Already Started</p>
+                <p className="text-amber-800 mt-0.5 leading-relaxed">
+                  Editing is only permitted before the meeting starts. This session has already started or passed its scheduled start time.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Global Error Banner */}
@@ -291,7 +380,7 @@ export default function MeetingEditModal({
             <input
               type="text"
               value={title}
-              disabled={locked || submitting}
+              disabled={locked || hasStarted || submitting}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Q4 Logistics Fleet Review & Port Clearance Committee"
               className={`${inputClass} text-xs sm:text-sm`}
@@ -306,7 +395,7 @@ export default function MeetingEditModal({
                 <Building size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate2-400" />
                 <select
                   value={departmentId}
-                  disabled={locked || submitting}
+                  disabled={locked || hasStarted || submitting}
                   onChange={(e) => setDepartmentId(e.target.value)}
                   className={`${inputClass} pl-8.5 text-xs sm:text-sm bg-white cursor-pointer`}
                   required
@@ -322,11 +411,11 @@ export default function MeetingEditModal({
 
             <Field
               label="Session Lifecycle Status"
-              hint={locked ? "Record locked" : "Approved status requires formal certification"}
+              hint={locked ? "Record locked" : hasStarted ? "Meeting already started" : "Approved status requires formal certification"}
             >
               <select
                 value={status}
-                disabled={locked || submitting}
+                disabled={locked || hasStarted || submitting}
                 onChange={(e) => setStatus(e.target.value as MeetingStatus)}
                 className={`${inputClass} text-xs sm:text-sm bg-white cursor-pointer`}
               >
@@ -364,7 +453,7 @@ export default function MeetingEditModal({
                   <input
                     type="date"
                     value={date}
-                    disabled={locked || submitting}
+                    disabled={locked || hasStarted || submitting}
                     onChange={(e) => setDate(e.target.value)}
                     className={`${inputClass} pl-8.5 text-xs sm:text-sm font-mono`}
                     required
@@ -376,7 +465,7 @@ export default function MeetingEditModal({
                 <input
                   type="time"
                   value={startTime}
-                  disabled={locked || submitting}
+                  disabled={locked || hasStarted || submitting}
                   onChange={(e) => handleStartTimeChange(e.target.value)}
                   className={`${inputClass} text-xs sm:text-sm font-mono`}
                   required
@@ -387,7 +476,7 @@ export default function MeetingEditModal({
                 <input
                   type="time"
                   value={endTime}
-                  disabled={locked || submitting}
+                  disabled={locked || hasStarted || submitting}
                   onChange={(e) => setEndTime(e.target.value)}
                   className={`${inputClass} text-xs sm:text-sm font-mono`}
                   required
@@ -396,7 +485,7 @@ export default function MeetingEditModal({
             </div>
 
             {/* Quick duration presets */}
-            {!locked && (
+            {!locked && !hasStarted && (
               <div className="flex items-center gap-1.5 pt-1">
                 <span className="text-[11px] font-medium text-slate2-400 mr-1">Preset Duration:</span>
                 {[30, 45, 60, 90, 120].map((mins) => (
@@ -436,13 +525,13 @@ export default function MeetingEditModal({
                   <button
                     key={p.value}
                     type="button"
-                    disabled={locked || submitting}
+                    disabled={locked || hasStarted || submitting}
                     onClick={() => setPriority(p.value)}
                     className={`flex flex-col items-start p-2.5 rounded-lg border text-left transition-all ${
                       isSelected
                         ? "border-brand bg-brand/[0.04] ring-1 ring-brand/30 shadow-2xs"
                         : "border-slate2-200 bg-white hover:bg-slate2-50"
-                    } ${locked ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
+                    } ${locked || hasStarted ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
                   >
                     <div className="flex items-center justify-between w-full">
                       <span className="text-xs font-bold text-slate2-800">{p.label}</span>
@@ -457,6 +546,29 @@ export default function MeetingEditModal({
             </div>
           </div>
 
+          {/* Participants - Add or remove attendees */}
+          <Field
+            label="Meeting Participants"
+            required
+            hint="Add or remove attendees for this session"
+            error={participantIds.length === 0 ? "Please select at least one participant." : null}
+          >
+            <div className={participantIds.length === 0 ? "rounded-lg ring-2 ring-danger/40 transition-all" : ""}>
+              <SearchableMultiUserSelect
+                users={users}
+                selectedUserIds={participantIds}
+                disabled={locked || hasStarted || submitting}
+                onChange={(ids) => {
+                  setParticipantIds(ids);
+                  if (ids.length > 0 && error?.includes("participant")) {
+                    setError(null);
+                  }
+                }}
+                placeholder="Search attendees by name, department, role, or email..."
+              />
+            </div>
+          </Field>
+
           {/* Location & Virtual Room */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Physical Location / Boardroom" hint="Optional in-person venue">
@@ -465,7 +577,7 @@ export default function MeetingEditModal({
                 <input
                   type="text"
                   value={location}
-                  disabled={locked || submitting}
+                  disabled={locked || hasStarted || submitting}
                   onChange={(e) => setLocation(e.target.value)}
                   placeholder="e.g. Executive Boardroom 3B, Modjo Hub"
                   className={`${inputClass} pl-8.5 text-xs sm:text-sm`}
@@ -479,7 +591,7 @@ export default function MeetingEditModal({
                 <input
                   type="url"
                   value={onlineLink}
-                  disabled={locked || submitting}
+                  disabled={locked || hasStarted || submitting}
                   onChange={(e) => setOnlineLink(e.target.value)}
                   placeholder="https://meet.google.com/xyz-abc or Teams"
                   className={`${inputClass} pl-8.5 text-xs sm:text-sm font-mono`}
@@ -494,7 +606,7 @@ export default function MeetingEditModal({
               <textarea
                 rows={3}
                 value={description}
-                disabled={locked || submitting}
+                disabled={locked || hasStarted || submitting}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Key directives, background context, and target decisions for this session..."
                 className={`${inputClass} text-xs sm:text-sm resize-none`}
@@ -516,7 +628,7 @@ export default function MeetingEditModal({
 
             <Button
               type="submit"
-              disabled={locked || submitting || isPristine || Boolean(timeError) || title.trim().length < 3}
+              disabled={locked || hasStarted || submitting || isPristine || Boolean(timeError) || title.trim().length < 3 || participantIds.length === 0}
               className="text-xs sm:text-sm shadow-sm inline-flex items-center gap-1.5"
             >
               {submitting ? "Saving Changes..." : isPristine ? "No Changes" : "Save Changes"}
