@@ -20,10 +20,17 @@ type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 
 export function Button({
   children,
-  variant = "primary",
+  variant,
   className = "",
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+  // Infer variant if not explicitly provided: if className specifies white/slate background or border, use secondary
+  const resolvedVariant: ButtonVariant =
+    variant ||
+    (className.includes("bg-white") || className.includes("bg-slate") || className.includes("border-slate")
+      ? "secondary"
+      : "primary");
+
   const variants: Record<ButtonVariant, string> = {
     primary: "bg-brand text-white hover:bg-brand-light disabled:bg-slate2-300",
     secondary: "bg-white text-slate2-700 border border-slate2-200 hover:bg-slate2-50",
@@ -32,7 +39,7 @@ export function Button({
   };
   return (
     <button
-      className={`focus-ring inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed ${variants[variant]} ${className}`}
+      className={`focus-ring inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed ${variants[resolvedVariant]} ${className}`}
       {...props}
     >
       {children}
