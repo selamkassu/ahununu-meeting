@@ -127,6 +127,39 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]["key"];
 
+function normalizeTab(rawTab?: string | null): TabKey {
+  if (!rawTab) return "overview";
+  const lower = rawTab.toLowerCase().trim();
+  if (
+    lower === "actions" ||
+    lower === "action-items" ||
+    lower === "action_items" ||
+    lower === "actionitems" ||
+    lower === "action-item"
+  ) {
+    return "actions";
+  }
+  if (lower === "decisions" || lower === "decision") {
+    return "decisions";
+  }
+  if (lower === "minutes" || lower === "minute") {
+    return "minutes";
+  }
+  if (lower === "participants" || lower === "participant" || lower === "attendance") {
+    return "participants";
+  }
+  if (lower === "documents" || lower === "document" || lower === "files") {
+    return "documents";
+  }
+  if (lower === "agenda") {
+    return "agenda";
+  }
+  if (lower === "overview") {
+    return "overview";
+  }
+  return "overview";
+}
+
 const MEETING_STATUSES: MeetingStatus[] = [
   "SCHEDULED",
   "IN_PROGRESS",
@@ -192,12 +225,13 @@ const STATUS_CONFIG: Record<
 export default function MeetingDetail() {
   const { id } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tabParam = searchParams.get("tab") as TabKey | null;
+  const rawTabParam = searchParams.get("tab");
+  const tabParam = useMemo(() => normalizeTab(rawTabParam), [rawTabParam]);
   const { user, hasPermission, hasAnyPermission } = useAuth();
   const { refresh: refreshNotifications } = useNotifications();
   const { alert, confirm } = useAlert();
   const [meeting, setMeeting] = useState<MeetingDetailType | null>(null);
-  const [tab, setTab] = useState<TabKey>(tabParam || "overview");
+  const [tab, setTab] = useState<TabKey>(() => tabParam);
 
   const visibleTabs = useMemo(() => {
     return TABS.filter((t) => {
@@ -211,12 +245,42 @@ export default function MeetingDetail() {
     });
   }, [hasPermission]);
 
+  // Normalize URL query parameter if an alias (e.g. action-items) is in the URL
+  useEffect(() => {
+    if (rawTabParam && rawTabParam !== tabParam) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("tab", tabParam);
+          return next;
+        },
+        { replace: true }
+      );
+    }
+  }, [rawTabParam, tabParam, setSearchParams]);
+
+  // Synchronize state when tabParam in URL updates
+  useEffect(() => {
+    if (visibleTabs.some((t) => t.key === tabParam)) {
+      setTab((prev) => (prev !== tabParam ? tabParam : prev));
+    }
+  }, [tabParam, visibleTabs]);
+
   // If active tab is not visible/allowed, fallback to "overview"
   useEffect(() => {
     if (visibleTabs.length > 0 && !visibleTabs.some((t) => t.key === tab)) {
-      setTab(visibleTabs[0].key);
+      const fallback = visibleTabs.some((t) => t.key === "overview") ? "overview" : visibleTabs[0].key;
+      setTab(fallback);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("tab", fallback);
+          return next;
+        },
+        { replace: true }
+      );
     }
-  }, [visibleTabs, tab]);
+  }, [visibleTabs, tab, setSearchParams]);
 
   const handleTabChange = (newTab: TabKey) => {
     setTab(newTab);
@@ -229,12 +293,6 @@ export default function MeetingDetail() {
       { replace: true }
     );
   };
-
-  useEffect(() => {
-    if (tabParam && tabParam !== tab) {
-      setTab(tabParam);
-    }
-  }, [tabParam, tab]);
   const [loading, setLoading] = useState(true);
 
   const isLocked = isLockedMeeting(meeting?.status);
