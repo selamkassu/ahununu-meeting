@@ -2038,14 +2038,14 @@ function AgendaTab({
           </span>
 
           {canCreateAgenda && (
-            <Button
+            <button
               type="button"
-              variant="secondary"
               onClick={() => setIsAddModalOpen(true)}
-              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs"
+              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs transition-colors"
             >
-              <Plus size={14} className="text-brand" /> Add Agenda Topic
-            </Button>
+              <Plus size={14} className="text-brand shrink-0" />
+              <span className="text-slate2-800 font-semibold text-xs">Add Agenda Topic</span>
+            </button>
           )}
         </div>
       </div>
@@ -3377,14 +3377,14 @@ function DecisionsTab({
           </span>
 
           {canCreateDecision && (
-            <Button
+            <button
               type="button"
-              variant="secondary"
               onClick={() => setIsAddModalOpen(true)}
-              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs"
+              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs transition-colors"
             >
-              <Plus size={14} className="text-brand" /> Record Decision
-            </Button>
+              <Plus size={14} className="text-brand shrink-0" />
+              <span className="text-slate2-800 font-semibold text-xs">Record Decision</span>
+            </button>
           )}
         </div>
       </div>
@@ -4034,14 +4034,14 @@ function ActionsTab({
         </div>
         <div className="flex items-center gap-3">
           {canCreateAction && (
-            <Button
+            <button
               type="button"
-              variant="secondary"
               onClick={() => setIsAddModalOpen(true)}
-              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs"
+              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs transition-colors"
             >
-              <Plus size={14} className="text-brand" /> Add Action Item
-            </Button>
+              <Plus size={14} className="text-brand shrink-0" />
+              <span className="text-slate2-800 font-semibold text-xs">Add Action Item</span>
+            </button>
           )}
         </div>
       </div>
@@ -6102,18 +6102,18 @@ function ParticipantsTab({
           )}
 
           {canManageParticipants && !isParticipantsLocked && (
-            <Button
+            <button
               type="button"
-              variant="secondary"
               onClick={() => {
                 setSelected("");
                 setSelectedUserIds([]);
                 setIsInviteModalOpen(true);
               }}
-              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs"
+              className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs transition-colors"
             >
-              <Plus size={14} className="text-brand" /> <span>Invite Participant</span>
-            </Button>
+              <Plus size={14} className="text-brand shrink-0" />
+              <span className="text-slate2-800 font-semibold text-xs">Invite Participant</span>
+            </button>
           )}
         </div>
       </div>
