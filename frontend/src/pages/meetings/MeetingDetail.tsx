@@ -5363,17 +5363,18 @@ function DocumentsTab({
           </div>
           <div className="flex items-center gap-3">
             {canUploadDoc && (
-              <Button
+              <button
                 type="button"
                 onClick={() => {
                   setError("");
                   setFile(null);
                   setIsUploadModalOpen(true);
                 }}
-                className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 font-semibold cursor-pointer"
+                className="text-xs py-1.5 px-3 rounded-sm inline-flex items-center gap-1.5 bg-white border border-slate2-300 text-slate2-800 hover:bg-slate2-50 hover:text-brand hover:border-brand/40 font-semibold cursor-pointer shadow-2xs transition-colors"
               >
-                <Plus size={14} className="text-brand" /> Upload Document
-              </Button>
+                <Plus size={14} className="text-brand shrink-0" />
+                <span className="text-slate2-800 font-semibold text-xs">Upload Document</span>
+              </button>
             )}
           </div>
         </div>
