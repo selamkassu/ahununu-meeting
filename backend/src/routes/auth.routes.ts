@@ -312,7 +312,7 @@ router.post("/google", async (req, res) => {
       },
     });
 
-    // Query approvers: users whose role has 'users:approve' or 'ADMIN_OVERRIDE'
+    // Query approvers for in-app notifications: users whose role has 'users:approve' or 'ADMIN_OVERRIDE'
     const approverAdmins = await prisma.user.findMany({
       where: {
         isActive: true,
@@ -340,6 +340,24 @@ router.post("/google", async (req, res) => {
       });
     }
 
+    // Query email recipients: only users with 'users:receive_approval_emails' permission
+    const emailRecipients = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        status: "ACTIVE",
+        role: {
+          permissions: {
+            some: {
+              permission: "users:receive_approval_emails",
+            },
+          },
+        },
+      },
+      select: { id: true, email: true },
+    });
+
+    console.log(`[GoogleAuth] Found ${emailRecipients.length} recipient(s) with 'users:receive_approval_emails':`, emailRecipients.map((a) => a.email));
+
     const deptName = validatedDeptId
       ? (newUser as any).department?.name ?? null
       : null;
@@ -349,7 +367,7 @@ router.post("/google", async (req, res) => {
       signupMethod: "google",
       jobTitle: newUser.jobTitle,
       departmentName: deptName,
-      adminEmails: approverAdmins.map((a) => a.email),
+      adminEmails: emailRecipients.map((a) => a.email),
     }).catch((err) =>
       console.error("[GoogleAuth] Admin notification email failed:", err?.message || err)
     );
@@ -446,7 +464,7 @@ router.post("/register", async (req, res) => {
       },
     });
 
-    // Query approvers
+    // Query approvers for in-app notifications
     const approverAdmins = await prisma.user.findMany({
       where: {
         isActive: true,
@@ -474,6 +492,24 @@ router.post("/register", async (req, res) => {
       });
     }
 
+    // Query email recipients: only users with 'users:receive_approval_emails' permission
+    const emailRecipients = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        status: "ACTIVE",
+        role: {
+          permissions: {
+            some: {
+              permission: "users:receive_approval_emails",
+            },
+          },
+        },
+      },
+      select: { id: true, email: true },
+    });
+
+    console.log(`[Auth:Register] Found ${emailRecipients.length} recipient(s) with 'users:receive_approval_emails':`, emailRecipients.map((a) => a.email));
+
     const deptName = validatedDeptId
       ? (user as any).department?.name ?? null
       : null;
@@ -483,7 +519,7 @@ router.post("/register", async (req, res) => {
       signupMethod: "local",
       jobTitle: user.jobTitle,
       departmentName: deptName,
-      adminEmails: approverAdmins.map((a) => a.email),
+      adminEmails: emailRecipients.map((a) => a.email),
     }).catch((err) =>
       console.error("[Auth:Register] Admin notification failed:", err?.message || err)
     );

@@ -114,12 +114,14 @@ export function getEmailProviderStatus(): EmailStatusInfo {
 //  Nodemailer Transporter (for SMTP / Gmail)
 // ─────────────────────────────────────────────
 let _transporter: ReturnType<typeof nodemailer.createTransport> | null = null;
+let _gmailTransporter: ReturnType<typeof nodemailer.createTransport> | null = null;
 
-function createSmtpTransporter() {
+function createSmtpTransporter(type?: "gmail" | "smtp") {
   const { provider } = detectEmailProvider();
+  const effectiveType = type || (provider === "gmail" ? "gmail" : provider === "smtp" ? "smtp" : null);
 
-  if (provider === "smtp") {
-    const host = process.env.SMTP_HOST!.trim();
+  if (effectiveType === "smtp" && process.env.SMTP_HOST?.trim()) {
+    const host = process.env.SMTP_HOST.trim();
     const port = Number(process.env.SMTP_PORT) || 587;
     const secure = process.env.SMTP_SECURE === "true" || port === 465;
     const user = process.env.SMTP_USER?.trim();
@@ -136,7 +138,7 @@ function createSmtpTransporter() {
     });
   }
 
-  if (provider === "gmail") {
+  if (effectiveType === "gmail" || (process.env.GMAIL_USER?.trim() && process.env.GMAIL_APP_PASSWORD?.trim())) {
     const user = process.env.GMAIL_USER!.trim();
     const pass = process.env.GMAIL_APP_PASSWORD!.trim();
 
@@ -153,9 +155,15 @@ function createSmtpTransporter() {
   return null;
 }
 
-function getSmtpTransporter() {
+function getSmtpTransporter(type?: "gmail" | "smtp") {
+  if (type === "gmail") {
+    if (!_gmailTransporter) {
+      _gmailTransporter = createSmtpTransporter("gmail");
+    }
+    return _gmailTransporter;
+  }
   if (!_transporter) {
-    _transporter = createSmtpTransporter();
+    _transporter = createSmtpTransporter(type);
   }
   return _transporter;
 }
@@ -225,41 +233,55 @@ async function sendViaBrevo(
     process.env.GMAIL_USER?.trim() ||
     "portal@ahununulogistics.com";
 
-  try {
-    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-      method: "POST",
-      headers: {
-        "api-key": apiKey,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        sender: { name: "Ahununu Meeting Portal", email: senderEmail },
-        to: toList,
-        subject,
-        htmlContent: html,
-        textContent: text,
-      }),
-    });
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
-    const data: any = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      let errMsg = data?.message || `Brevo API HTTP ${res.status}`;
-      if (errMsg.includes("unrecognised IP address") || errMsg.includes("authorised_ips")) {
-        errMsg = `Brevo IP Whitelist Block: Brevo is blocking requests from this IP. Go to https://app.brevo.com/security/authorised_ips and select "No IP review" (or toggle IP blocking OFF) so Render can make API calls.`;
-        console.error(`[Email:Brevo] ${errMsg}`);
-      } else {
-        console.error(`[Email:Brevo] Failed to send to ${toList.map((t) => t.email).join(", ")}:`, errMsg);
+      const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        headers: {
+          "api-key": apiKey,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          sender: { name: "Ahununu Meeting Portal", email: senderEmail },
+          to: toList,
+          subject,
+          htmlContent: html,
+          textContent: text,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        let errMsg = data?.message || `Brevo API HTTP ${res.status}`;
+        if (errMsg.includes("unrecognised IP address") || errMsg.includes("authorised_ips")) {
+          errMsg = `Brevo IP Whitelist Block: Brevo is blocking requests from this IP. Go to https://app.brevo.com/security/authorised_ips and select "No IP review" (or toggle IP blocking OFF) so Render can make API calls.`;
+          console.error(`[Email:Brevo] ${errMsg}`);
+        } else {
+          console.error(`[Email:Brevo] Failed to send to ${toList.map((t) => t.email).join(", ")}:`, errMsg);
+        }
+        return { success: false, provider: "brevo", error: errMsg };
       }
-      return { success: false, provider: "brevo", error: errMsg };
-    }
 
-    console.log(`[Email:Brevo] Delivered "${subject}" (MessageId: ${data.messageId || "ok"})`);
-    return { success: true, provider: "brevo", messageId: data.messageId };
-  } catch (err: any) {
-    console.error(`[Email:Brevo] Network error:`, err?.message || err);
-    return { success: false, provider: "brevo", error: err?.message || "Brevo network error" };
+      console.log(`[Email:Brevo] Delivered "${subject}" to ${toList.map((t) => t.email).join(", ")} (MessageId: ${data.messageId || "ok"})`);
+      return { success: true, provider: "brevo", messageId: data.messageId };
+    } catch (err: any) {
+      lastError = err;
+      if (attempt === 1) {
+        console.warn(`[Email:Brevo] Attempt 1 failed (${err?.message || err}). Retrying in 1.5s...`);
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
   }
+
+  console.error(`[Email:Brevo] Network error after retry:`, lastError?.message || lastError);
+  return { success: false, provider: "brevo", error: lastError?.message || "Brevo network error" };
 }
 
 /**
@@ -320,7 +342,7 @@ async function sendViaNodemailer(
   text: string,
   provider: "gmail" | "smtp"
 ): Promise<EmailDeliveryResult> {
-  const transporter = getSmtpTransporter();
+  const transporter = getSmtpTransporter(provider);
   if (!transporter) {
     return { success: false, provider, error: "SMTP transporter could not be initialized." };
   }
@@ -397,20 +419,40 @@ export async function sendEmailDetailed(
     );
   }
 
+  let result: EmailDeliveryResult = { success: false, provider: "none" };
+
   switch (provider) {
     case "resend":
-      return await sendViaResend(to, subject, html, plainText);
+      result = await sendViaResend(to, subject, html, plainText);
+      break;
     case "brevo":
-      return await sendViaBrevo(to, subject, html, plainText);
+      result = await sendViaBrevo(to, subject, html, plainText);
+      break;
     case "sendgrid":
-      return await sendViaSendGrid(to, subject, html, plainText);
+      result = await sendViaSendGrid(to, subject, html, plainText);
+      break;
     case "smtp":
-      return await sendViaNodemailer(to, subject, html, plainText, "smtp");
+      result = await sendViaNodemailer(to, subject, html, plainText, "smtp");
+      break;
     case "gmail":
-      return await sendViaNodemailer(to, subject, html, plainText, "gmail");
+      result = await sendViaNodemailer(to, subject, html, plainText, "gmail");
+      break;
     default:
-      return { success: false, provider: "none", error: "Unsupported provider" };
+      result = { success: false, provider: "none", error: "Unsupported provider" };
+      break;
   }
+
+  // Automatic Failover: If primary provider failed and Gmail SMTP is configured, fall back to Gmail SMTP
+  if (!result.success && provider !== "gmail" && process.env.GMAIL_USER?.trim() && process.env.GMAIL_APP_PASSWORD?.trim()) {
+    console.warn(`[Email] Primary provider (${provider}) failed (${result.error}). Attempting automatic failover to Gmail SMTP...`);
+    const fallbackResult = await sendViaNodemailer(to, subject, html, plainText, "gmail");
+    if (fallbackResult.success) {
+      console.log(`[Email:Failover] Delivered "${subject}" via Gmail SMTP (MessageId: ${fallbackResult.messageId})`);
+      return fallbackResult;
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -517,6 +559,7 @@ export async function sendMeetingInvitationEmail(opts: {
   organizerName: string;
   meetingId: string;
 }): Promise<boolean> {
+  console.log(`[Email:MeetingInvite] Sending invitation for "${opts.meetingTitle}" to ${opts.toName} <${opts.toEmail}>`);
   const {
     toEmail,
     toName,
@@ -680,6 +723,7 @@ export async function sendActionItemAssignedEmail(opts: {
   taskCode?: string;
   description?: string;
 }): Promise<void> {
+  console.log(`[Email:ActionItem] Dispatching task assignment "${opts.taskTitle}" to ${opts.assignees.length} recipient(s): ${opts.assignees.map(a => a.email).join(", ")}`);
   const { assignees, taskTitle, deadline, priority, meetingTitle, assignedByName, meetingId, taskCode, description } = opts;
   const appUrl = getAppUrl();
   const link = `${appUrl}/meetings/${meetingId}?tab=action-items`;
@@ -781,6 +825,7 @@ export async function sendMeetingCancellationEmail(opts: {
   cancelledByName: string;
   meetingId: string;
 }): Promise<void> {
+  console.log(`[Email:MeetingCancel] Dispatching cancellation for "${opts.meetingTitle}" to ${opts.recipients.length} recipient(s): ${opts.recipients.map(r => r.email).join(", ")}`);
   const { recipients, meetingTitle, meetingDate, startTime, endTime, cancelledByName, meetingId } = opts;
   const appUrl = getAppUrl();
   const link = `${appUrl}/meetings/${meetingId}`;
@@ -1004,18 +1049,23 @@ export async function sendNewUserNotificationEmail(opts: {
 }): Promise<void> {
   const { newUserName, newUserEmail, signupMethod, jobTitle, departmentName, adminEmails } = opts;
 
-  // Resolve recipients: env-level override wins, then DB-sourced admins
+  // Resolve recipients:
+  // 1. Primary: Use adminEmails (users who have the 'users:receive_approval_emails' permission in RBAC)
+  // 2. Fallback: If no users in DB have this permission assigned yet, fall back to ADMIN_EMAIL from env
   const envEmails = (process.env.ADMIN_EMAIL || "")
     .split(",")
     .map((e) => e.trim())
     .filter(Boolean);
 
-  const recipients = envEmails.length ? envEmails : adminEmails;
+  const rawRecipients = adminEmails && adminEmails.length > 0 ? adminEmails : envEmails;
+  const recipients = Array.from(new Set(rawRecipients.map((e) => e.trim().toLowerCase()))).filter(Boolean);
 
   if (!recipients.length) {
-    console.warn("[Email:NewUserNotify] No admin recipients configured — skipping notification.");
+    console.warn("[Email:NewUserNotify] No recipients with 'users:receive_approval_emails' permission or ADMIN_EMAIL configured — skipping notification.");
     return;
   }
+
+  console.log(`[Email:NewUserNotify] Dispatching registration approval email for ${newUserEmail} to [${recipients.join(", ")}]`);
 
   const appUrl = getAppUrl();
   const approvalsLink = `${appUrl}/admin/user-approvals`;
@@ -1113,16 +1163,25 @@ Please review and assign a role: ${approvalsLink}
 
 Ahununu Logistics Meeting Portal`;
 
-  const promises = recipients.map((adminEmail) =>
-    sendEmailDetailed(
-      adminEmail,
-      subject,
-      htmlWrap(`User Awaiting Approval: ${newUserName}`, body),
-      text
-    ).catch((err) =>
-      console.error(`[Email:NewUserNotify] Failed to notify ${adminEmail}:`, err?.message || err)
-    )
-  );
+  const promises = recipients.map(async (adminEmail) => {
+    try {
+      const res = await sendEmailDetailed(
+        adminEmail,
+        subject,
+        htmlWrap(`User Awaiting Approval: ${newUserName}`, body),
+        text
+      );
+      if (!res.success) {
+        console.error(`[Email:NewUserNotify] Delivery failed to ${adminEmail}:`, res.error);
+      } else {
+        console.log(`[Email:NewUserNotify] Successfully delivered notification to ${adminEmail}`);
+      }
+      return res;
+    } catch (err: any) {
+      console.error(`[Email:NewUserNotify] Exception notifying ${adminEmail}:`, err?.message || err);
+      return { success: false, error: err?.message || err };
+    }
+  });
 
   await Promise.allSettled(promises);
 }

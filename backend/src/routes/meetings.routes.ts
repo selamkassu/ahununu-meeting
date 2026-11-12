@@ -1151,6 +1151,17 @@ router.put(
         });
       }
 
+      // Approval prerequisite validation for approval-bound status transitions
+      if (
+        (status === "READY_FOR_APPROVAL" || status === "PENDING_SIGNATURES") &&
+        existing.status !== status
+      ) {
+        const prereqCheck = await validateMeetingApprovalPrerequisites(req.params.id);
+        if (!prereqCheck.valid) {
+          return res.status(400).json({ error: prereqCheck.error });
+        }
+      }
+
       if (status === "COMPLETED" && existing.status !== "COMPLETED") {
         const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
           (prisma as any).meetingMinutes.findMany({
@@ -1362,17 +1373,17 @@ router.put(
         }
       }
 
-      // ── Email: Cancellation — sent to participants (excluding the user cancelling) ──
+      // ── Email: Cancellation — sent to all participants and organizer ──
       if (existing.status !== "CANCELLED" && status === "CANCELLED") {
         const cancelledByUser = await prisma.user.findUnique({
           where: { id: req.user!.userId },
           select: { name: true, email: true },
         });
         const allRecipientIds = new Set<string>();
-        if (meeting.organizerId && meeting.organizerId !== req.user!.userId) allRecipientIds.add(meeting.organizerId);
+        if (meeting.organizerId) allRecipientIds.add(meeting.organizerId);
         if (meeting.participants && Array.isArray(meeting.participants)) {
           for (const p of meeting.participants) {
-            if (p.userId && p.userId !== req.user!.userId) allRecipientIds.add(p.userId);
+            if (p.userId) allRecipientIds.add(p.userId);
           }
         }
         const cancelRecipients = await prisma.user.findMany({
@@ -1382,9 +1393,10 @@ router.put(
         const cancelDateStr = new Date(meeting.date).toLocaleDateString("en-US", {
           weekday: "long", year: "numeric", month: "long", day: "numeric",
         });
+        console.log(`[Meeting Cancel] Dispatching cancellation email for "${meeting.title}" to ${cancelRecipients.length} recipient(s):`, cancelRecipients.map(u => u.email));
         sendMeetingCancellationEmail({
           recipients: cancelRecipients
-            .filter(u => !!u.email && (!cancelledByUser?.email || u.email.trim().toLowerCase() !== cancelledByUser.email.trim().toLowerCase()))
+            .filter(u => !!u.email)
             .map(u => ({ email: u.email!, name: u.name || "" })),
           meetingTitle: meeting.title,
           meetingDate: cancelDateStr,
@@ -1392,7 +1404,7 @@ router.put(
           endTime: meeting.endTime,
           cancelledByName: cancelledByUser?.name || "Administrator",
           meetingId: meeting.id,
-        }).catch(console.error);
+        }).catch((err) => console.error("[Meeting Cancel] Email error:", err));
       }
 
       res.json(meeting);
@@ -1498,6 +1510,38 @@ async function createSignatureRequestNotifications(
   }
 }
 
+// ── Approval Prerequisite Validation Helper ──────────────────────────────────
+// Checks that at least one of Meeting Summary, Decisions, or Action Items has
+// content before allowing any approval-bound status transition.
+async function validateMeetingApprovalPrerequisites(meetingId: string): Promise<{
+  valid: boolean;
+  error?: string;
+}> {
+  const [minutes, decisionsCount, actionItemsCount] = await Promise.all([
+    (prisma as any).meetingMinutes.findMany({
+      where: { meetingId },
+      select: { content: true },
+    }),
+    prisma.decision.count({ where: { meetingId } }),
+    prisma.actionItem.count({ where: { meetingId } }),
+  ]);
+
+  const stripHtml = (html: string) =>
+    (html || "").replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim();
+
+  const hasSummary = minutes.some((m: any) => stripHtml(m.content).length > 0);
+  const hasDecisions = decisionsCount > 0;
+  const hasActionItems = actionItemsCount > 0;
+  const valid = hasSummary || hasDecisions || hasActionItems;
+
+  return {
+    valid,
+    error: valid
+      ? undefined
+      : "Please complete at least one of the following: Meeting Summary, Action Items, or Decisions before submitting for approval.",
+  };
+}
+
 // POST /:id/request-signatures  — move meeting to PENDING_SIGNATURES phase (idempotent)
 router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
   try {
@@ -1531,6 +1575,12 @@ router.post("/:id/request-signatures", async (req: AuthedRequest, res) => {
 
     if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
     if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot request signatures for a cancelled meeting." });
+
+    // Approval prerequisite validation — at least one of Summary / Action Items / Decisions required
+    const prereqCheck = await validateMeetingApprovalPrerequisites(req.params.id);
+    if (!prereqCheck.valid) {
+      return res.status(400).json({ error: prereqCheck.error });
+    }
 
     // If already ready for approval, return current meeting state cleanly
     if (meeting.status === "READY_FOR_APPROVAL") {
@@ -1704,6 +1754,12 @@ router.post("/:id/approve", async (req: AuthedRequest, res) => {
     if (meeting.status === "APPROVED") return res.status(400).json({ error: "Meeting is already approved." });
     if (meeting.status === "CANCELLED") return res.status(400).json({ error: "Cannot approve a cancelled meeting." });
 
+    // Approval prerequisite validation — at least one of Summary / Action Items / Decisions required
+    const prereqCheck = await validateMeetingApprovalPrerequisites(req.params.id);
+    if (!prereqCheck.valid) {
+      return res.status(400).json({ error: prereqCheck.error });
+    }
+
     const { signature, forceApprove, forceReason } = req.body || {};
     if (!signature || typeof signature !== "string" || !signature.trim()) {
       return res.status(400).json({
@@ -1872,6 +1928,14 @@ router.post("/:id/unlock", async (req: AuthedRequest, res) => {
           error:
             "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
         });
+      }
+    }
+
+    // Approval prerequisite validation for approval-bound unlock targets
+    if (validTargetStatus === "READY_FOR_APPROVAL" || validTargetStatus === "PENDING_SIGNATURES") {
+      const prereqCheck = await validateMeetingApprovalPrerequisites(req.params.id);
+      if (!prereqCheck.valid) {
+        return res.status(400).json({ error: prereqCheck.error });
       }
     }
 

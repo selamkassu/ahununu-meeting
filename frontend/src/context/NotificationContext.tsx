@@ -13,6 +13,9 @@ import type { Notification } from "../types";
 interface NotificationContextValue {
   notifications: Notification[];
   unreadCount: number;
+  pendingApprovalsCount: number;
+  setPendingApprovalsCount: React.Dispatch<React.SetStateAction<number>>;
+  refreshPendingApprovals: () => Promise<void>;
   loading: boolean;
   markRead: (id: string) => Promise<void>;
   markAllRead: () => Promise<void>;
@@ -30,10 +33,12 @@ export function NotificationProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const canApproveUsers = hasPermission("users:approve");
 
   const fetchNotifications = useCallback(async () => {
     if (!user) return;
@@ -45,30 +50,50 @@ export function NotificationProvider({
     }
   }, [user]);
 
+  const refreshPendingApprovals = useCallback(async () => {
+    if (!user || !canApproveUsers) {
+      setPendingApprovalsCount(0);
+      return;
+    }
+    try {
+      const res = await api.get<{ count: number }>("/users/approvals/count");
+      if (typeof res?.count === "number") {
+        setPendingApprovalsCount(res.count);
+      }
+    } catch {
+      // silently fail
+    }
+  }, [user, canApproveUsers]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      await fetchNotifications();
+      await Promise.all([fetchNotifications(), refreshPendingApprovals()]);
     } finally {
       setLoading(false);
     }
-  }, [fetchNotifications]);
+  }, [fetchNotifications, refreshPendingApprovals]);
 
   // Initial load + polling
   useEffect(() => {
     if (!user) {
       setNotifications([]);
+      setPendingApprovalsCount(0);
       return;
     }
 
     fetchNotifications();
+    refreshPendingApprovals();
 
-    timerRef.current = setInterval(fetchNotifications, POLL_INTERVAL_MS);
+    timerRef.current = setInterval(() => {
+      fetchNotifications();
+      refreshPendingApprovals();
+    }, POLL_INTERVAL_MS);
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [user, fetchNotifications]);
+  }, [user, fetchNotifications, refreshPendingApprovals]);
 
   const markRead = useCallback(async (id: string) => {
     try {
@@ -93,8 +118,27 @@ export function NotificationProvider({
   const unreadCount = notifications.filter((n) => !n.isRead).length;
 
   const value = React.useMemo(
-    () => ({ notifications, unreadCount, loading, markRead, markAllRead, refresh }),
-    [notifications, unreadCount, loading, markRead, markAllRead, refresh]
+    () => ({
+      notifications,
+      unreadCount,
+      pendingApprovalsCount,
+      setPendingApprovalsCount,
+      refreshPendingApprovals,
+      loading,
+      markRead,
+      markAllRead,
+      refresh,
+    }),
+    [
+      notifications,
+      unreadCount,
+      pendingApprovalsCount,
+      refreshPendingApprovals,
+      loading,
+      markRead,
+      markAllRead,
+      refresh,
+    ]
   );
 
   return (

@@ -3,7 +3,7 @@
 // ------------------------------------------------------------
 
 export const PERMISSIONS = [
-  "users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve",
+  "users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve", "users:receive_approval_emails",
   "roles:view", "roles:create", "roles:edit", "roles:delete",
   "departments:view", "departments:create", "departments:edit", "departments:delete",
   "meetings:view:all", "meetings:view:dept", "meetings:view:own", "meetings:create",
@@ -37,6 +37,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   "users:delete": "Delete Users",
   "users:manage_status": "Manage User Status",
   "users:approve": "Approve Users & Assign Roles",
+  "users:receive_approval_emails": "Receive Registration Approval Emails",
   "roles:view": "View Roles",
   "roles:create": "Create Roles",
   "roles:edit": "Edit Roles",
@@ -107,7 +108,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
 };
 
 export const PERMISSION_GROUPS: { label: string; permissions: string[] }[] = [
-  { label: "User Management", permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve"] },
+  { label: "User Management", permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve", "users:receive_approval_emails"] },
   { label: "Role Management", permissions: ["roles:view", "roles:create", "roles:edit", "roles:delete"] },
   { label: "Department Management", permissions: ["departments:view", "departments:create", "departments:edit", "departments:delete"] },
   {

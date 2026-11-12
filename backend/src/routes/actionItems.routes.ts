@@ -224,6 +224,7 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
 
         // Send email strictly to this assigned individual
         if (item.assignedTo?.email) {
+          console.log(`[ActionItem:Create] Dispatching assignment email to ${item.assignedTo.email} for "${item.title}"`);
           sendActionItemAssignedEmail({
             assignees: [{ email: item.assignedTo.email, name: item.assignedTo.name || "Assignee" }],
             taskTitle: item.title,
@@ -234,7 +235,7 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
             meetingId: parsed.data.meetingId,
             taskCode: item.code,
             description: item.description || undefined,
-          }).catch(console.error);
+          }).catch((err) => console.error("[ActionItem:Create] Email error:", err));
         }
 
         createdItems.push(shapeActionItem(item));
@@ -286,6 +287,7 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
     if (assigneesToSend.length === 0 && item.assignedTo?.email) {
       assigneesToSend.push(item.assignedTo);
     }
+    console.log(`[ActionItem:Create] Dispatching shared assignment email for "${item.title}" to ${assigneesToSend.length} assignee(s):`, assigneesToSend.map((u: any) => u.email));
     for (const u of assigneesToSend) {
       sendActionItemAssignedEmail({
         assignees: [{ email: u.email, name: u.name || "Assignee" }],
@@ -297,7 +299,7 @@ router.post("/", requirePermission("action_items:create"), async (req: AuthedReq
         meetingId: parsed.data.meetingId,
         taskCode: item.code,
         description: item.description || undefined,
-      }).catch(console.error);
+      }).catch((err) => console.error("[ActionItem:Create] Email error:", err));
     }
 
     return res.status(201).json(shapeActionItem(item));
@@ -630,6 +632,59 @@ router.put("/:id", async (req: AuthedRequest, res) => {
       data,
       include: withMeta,
     });
+
+    // Notify newly assigned users via email and in-app notification
+    if (assigneeIds !== undefined || rest.assignedToId !== undefined) {
+      try {
+        const oldAssigneeSet = new Set<string>([
+          ...(existing.assignedToId ? [existing.assignedToId] : []),
+          ...existing.assignees.map((a) => a.userId),
+        ]);
+        const currentAssignees = [
+          ...(item.assignedTo ? [item.assignedTo] : []),
+          ...(item.assignees || []).map((a: any) => a.user),
+        ].filter(Boolean);
+
+        const newlyAssigned = currentAssignees.filter(
+          (u: any) => u.id && !oldAssigneeSet.has(u.id) && u.email
+        );
+
+        if (newlyAssigned.length > 0) {
+          const deadlineFormatted = new Date(item.deadline).toLocaleDateString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          });
+          const assigner = await prisma.user.findUnique({
+            where: { id: req.user!.userId },
+            select: { name: true },
+          });
+          const assignerName = assigner?.name || "Meeting Lead";
+          const meeting = await prisma.meeting.findUnique({
+            where: { id: item.meetingId },
+            select: { title: true },
+          });
+
+          for (const u of newlyAssigned) {
+            sendActionItemAssignedEmail({
+              assignees: [{ email: u.email, name: u.name || "Assignee" }],
+              taskTitle: item.title,
+              deadline: deadlineFormatted,
+              priority: item.priority,
+              meetingTitle: meeting?.title || "Meeting",
+              assignedByName: assignerName,
+              meetingId: item.meetingId,
+              taskCode: item.code,
+              description: item.description || undefined,
+            }).catch((err) => console.error("[ActionItem:Update] Email error:", err));
+          }
+        }
+      } catch (notifyErr) {
+        console.error("[ActionItem:Update] Error sending assignee update emails:", notifyErr);
+      }
+    }
+
     res.json(shapeActionItem(item));
   } catch (err: any) {
     console.error("Action item update error:", err);

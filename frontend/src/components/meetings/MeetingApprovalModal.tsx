@@ -88,6 +88,16 @@ export function MeetingApprovalModal({
   const allSigned = pendingSigners.length === 0;
   const progressPct = totalSigners > 0 ? Math.round((signedCount / totalSigners) * 100) : 100;
 
+  // Approval prerequisite: at least one of Summary / Action Items / Decisions must have content
+  const hasApprovalPrerequisites = useMemo(() => {
+    const hasSummary = (meeting.minutes || []).some((m: any) =>
+      ((m.content || "") as string).replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim().length > 0
+    );
+    const hasDecisions = (meeting.decisions || []).length > 0;
+    const hasActionItems = (meeting.actionItems || []).length > 0;
+    return hasSummary || hasDecisions || hasActionItems;
+  }, [meeting.minutes, meeting.decisions, meeting.actionItems]);
+
   useEffect(() => {
     if (open) {
       setHasDrawn(false);
@@ -222,6 +232,18 @@ export function MeetingApprovalModal({
     setError(null);
     if (!isAuthorizedApprover) {
       setError("Access Denied: You do not have permission to approve meetings. This requires the 'Approve Meetings (or Approve Meeting & Minutes)' permission.");
+      return;
+    }
+    // Approval prerequisite check — at least one of Summary / Action Items / Decisions must have content
+    const hasSummary = (meeting.minutes || []).some((m: any) =>
+      ((m.content || "") as string).replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim().length > 0
+    );
+    const hasDecisions = (meeting.decisions || []).length > 0;
+    const hasActionItems = (meeting.actionItems || []).length > 0;
+    if (!hasSummary && !hasDecisions && !hasActionItems) {
+      setError(
+        "Please complete at least one of the following: Meeting Summary, Action Items, or Decisions before submitting for approval."
+      );
       return;
     }
     let signatureDataUrl = "";
@@ -636,6 +658,7 @@ export function MeetingApprovalModal({
             disabled={
               submitting
               || !isAuthorizedApprover
+              || !hasApprovalPrerequisites
               || !agreed
               || (tab === "draw" ? !hasDrawn : !typedName.trim())
               || (!allSigned && (!forceSubmit || forceReason.trim().length < 5))

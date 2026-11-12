@@ -15,6 +15,7 @@ export const PERMISSIONS = [
   "users:delete",
   "users:manage_status",
   "users:approve",
+  "users:receive_approval_emails",
 
   // Role management
   "roles:view",
@@ -118,7 +119,7 @@ export type Permission = (typeof PERMISSIONS)[number];
 export const PERMISSION_GROUPS: { label: string; permissions: Permission[] }[] = [
   {
     label: "User Management",
-    permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve"],
+    permissions: ["users:view", "users:create", "users:edit", "users:delete", "users:manage_status", "users:approve", "users:receive_approval_emails"],
   },
   {
     label: "Role Management",
@@ -238,6 +239,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   "users:delete": "Delete Users",
   "users:manage_status": "Manage User Status",
   "users:approve": "Approve Users & Assign Roles",
+  "users:receive_approval_emails": "Receive Registration Approval Emails",
   "roles:view": "View Roles",
   "roles:create": "Create Roles",
   "roles:edit": "Edit Roles",

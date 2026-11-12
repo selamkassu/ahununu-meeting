@@ -26,6 +26,8 @@ import {
 } from "lucide-react";
 import { api } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
+import { useNotifications } from "../../context/NotificationContext";
+import { useAlert } from "../../components/ui/AlertDialog";
 import { Toast } from "../../components/ui/Toast";
 import { Modal } from "../../components/ui/Modal";
 import { Button, Field, inputClass } from "../../components/ui/Primitives";
@@ -68,6 +70,8 @@ function getRoleDisplayLabel(role: RoleDetail): string {
 
 export default function UserApprovalsPage() {
   const { user: currentUser, hasPermission } = useAuth();
+  const { setPendingApprovalsCount, refreshPendingApprovals, refresh: refreshNotifications } = useNotifications();
+  const { confirm } = useAlert();
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
   const showToast = useCallback((message: string, type: "success" | "error" | "info" = "success") => {
     setToast({ message, type });
@@ -155,6 +159,7 @@ export default function UserApprovalsPage() {
 
       const validPending = Array.isArray(pendingRes) ? pendingRes : [];
       setPendingUsers(validPending);
+      setPendingApprovalsCount(validPending.length);
 
       // Filter out UNASSIGNED from selectable roles list
       const operationalRoles = (Array.isArray(rolesRes) ? rolesRes : []).filter(
@@ -186,7 +191,7 @@ export default function UserApprovalsPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [showToast]);
+  }, [showToast, setPendingApprovalsCount]);
 
   useEffect(() => {
     loadData();
@@ -243,8 +248,15 @@ export default function UserApprovalsPage() {
         "success"
       );
 
-      // Remove from pending list
-      setPendingUsers((prev) => prev.filter((p) => p.id !== user.id));
+      // Remove from pending list and sync shared badge count immediately
+      setPendingUsers((prev) => {
+        const next = prev.filter((p) => p.id !== user.id);
+        setPendingApprovalsCount(next.length);
+        return next;
+      });
+      refreshPendingApprovals();
+      refreshNotifications();
+
       // Refresh audit logs in background
       api.get<AdminNotificationItem[]>("/notifications/admin-notifications")
         .then((data) => setAdminNotifications(Array.isArray(data) ? data : []))
@@ -253,6 +265,39 @@ export default function UserApprovalsPage() {
       showToast(err?.message || "Approval failed. Please check permissions.", "error");
     } finally {
       setApprovingUserId(null);
+      setActionLoading(false);
+    }
+  };
+
+  // Open decline confirmation dialog
+  const handleRejectClick = async (user: User) => {
+    const confirmed = await confirm({
+      title: "Decline User Registration",
+      message: `Are you sure you want to decline registration for ${user.name} (${user.email})? Their account status will be set to Deactivated and they will not be allowed portal access.`,
+      tone: "danger",
+      confirmLabel: "Yes, Decline Registration",
+      cancelLabel: "Cancel",
+    });
+
+    if (!confirmed) return;
+
+    setActionLoading(true);
+    try {
+      await api.post(`/users/${user.id}/reject`, {});
+      showToast(`Registration for ${user.name} has been declined.`, "info");
+      setPendingUsers((prev) => {
+        const next = prev.filter((p) => p.id !== user.id);
+        setPendingApprovalsCount(next.length);
+        return next;
+      });
+      refreshPendingApprovals();
+      refreshNotifications();
+      api.get<AdminNotificationItem[]>("/notifications/admin-notifications")
+        .then((data) => setAdminNotifications(Array.isArray(data) ? data : []))
+        .catch(() => {});
+    } catch (err: any) {
+      showToast(err?.message || "Failed to decline registration.", "error");
+    } finally {
       setActionLoading(false);
     }
   };
@@ -273,7 +318,16 @@ export default function UserApprovalsPage() {
         reason: rejectReason.trim() || undefined,
       });
       showToast(`Registration for ${userToReject.name} has been declined.`, "info");
-      setPendingUsers((prev) => prev.filter((p) => p.id !== userToReject.id));
+      setPendingUsers((prev) => {
+        const next = prev.filter((p) => p.id !== userToReject.id);
+        setPendingApprovalsCount(next.length);
+        return next;
+      });
+      refreshPendingApprovals();
+      refreshNotifications();
+      api.get<AdminNotificationItem[]>("/notifications/admin-notifications")
+        .then((data) => setAdminNotifications(Array.isArray(data) ? data : []))
+        .catch(() => {});
       setRejectModalOpen(false);
       setUserToReject(null);
     } catch (err: any) {
@@ -736,7 +790,7 @@ export default function UserApprovalsPage() {
 
                             <button
                               type="button"
-                              onClick={() => openRejectDialog(pUser)}
+                              onClick={() => handleRejectClick(pUser)}
                               disabled={isApproving || actionLoading}
                               className="focus-ring inline-flex items-center justify-center rounded-xl border border-slate2-200 bg-white p-2.5 text-xs font-semibold text-rose-600 shadow-sm hover:bg-rose-50 hover:border-rose-200 cursor-pointer disabled:opacity-40 transition-colors"
                               title="Decline registration"

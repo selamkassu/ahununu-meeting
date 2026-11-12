@@ -34,7 +34,10 @@ import { useAuth } from "../../context/AuthContext";
 import { useAlert } from "../../components/ui/AlertDialog";
 
 function resolveUserStatus(user: User): UserStatus {
-  if (user.role?.code === "UNASSIGNED" || user.status === "PENDING") {
+  if (user.status === "DEACTIVATED" || user.status === "SUSPENDED") {
+    return user.status;
+  }
+  if (user.status === "PENDING") {
     return "PENDING";
   }
   if (user.status) return user.status;

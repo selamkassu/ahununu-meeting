@@ -20,7 +20,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
-import { api } from "../../api/client";
+import { useNotifications } from "../../context/NotificationContext";
 import { Logo } from "../ui/Logo";
 
 const nav = [
@@ -43,30 +43,10 @@ const nav = [
 
 export function Sidebar({ variant = "desktop", onNavigate }: { variant?: "desktop" | "mobile"; onNavigate?: () => void }) {
   const { user, logout, hasPermission } = useAuth();
+  const { pendingApprovalsCount } = useNotifications();
   const navigate = useNavigate();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const userMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!hasPermission("users:approve")) return;
-    let mounted = true;
-    const fetchCount = () => {
-      api.get<{ count: number }>("/users/approvals/count")
-        .then((res) => {
-          if (mounted && typeof res?.count === "number") {
-            setPendingApprovalsCount(res.count);
-          }
-        })
-        .catch(() => {});
-    };
-    fetchCount();
-    const interval = setInterval(fetchCount, 25000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, [hasPermission]);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {

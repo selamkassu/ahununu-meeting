@@ -43,10 +43,7 @@ router.get("/approvals/count", requirePermission("users:approve"), async (_req, 
   try {
     const count = await prisma.user.count({
       where: {
-        OR: [
-          { status: "PENDING" },
-          { role: { code: "UNASSIGNED" } },
-        ],
+        status: "PENDING",
       },
     });
     res.json({ count });
@@ -60,10 +57,7 @@ router.get("/approvals", requirePermission("users:approve"), async (_req, res) =
   try {
     const pendingUsers = await prisma.user.findMany({
       where: {
-        OR: [
-          { status: "PENDING" },
-          { role: { code: "UNASSIGNED" } },
-        ],
+        status: "PENDING",
       },
       include: userInclude,
       orderBy: { createdAt: "desc" },
@@ -101,9 +95,9 @@ router.post("/:id/approve", requirePermission("users:approve"), async (req: Auth
     return res.status(404).json({ error: "User not found." });
   }
 
-  const isAwaitingApproval = targetUser.status === "PENDING" || targetUser.role?.code === "UNASSIGNED";
+  const isAwaitingApproval = targetUser.status === "PENDING";
   if (!isAwaitingApproval) {
-    return res.status(400).json({ error: "This user account is already approved and assigned an operational role." });
+    return res.status(400).json({ error: "This user account is not pending approval." });
   }
 
   // Validate role
@@ -219,15 +213,24 @@ router.post("/:id/reject", requirePermission("users:approve"), async (req: Authe
   }
 
   try {
-    await prisma.user.update({
+    const updatedUser = await prisma.user.update({
       where: { id: targetUser.id },
       data: {
         status: "DEACTIVATED",
         isActive: false,
       },
+      include: userInclude,
     });
 
     await markAdminNotificationsForUserRead(targetUser.id).catch(() => {});
+    await prisma.notification.updateMany({
+      where: {
+        type: "USER_PENDING_APPROVAL",
+        message: { contains: targetUser.email },
+        isRead: false,
+      },
+      data: { isRead: true },
+    }).catch(() => {});
 
     logAuditEvent({
       level: "WARN",
@@ -238,7 +241,10 @@ router.post("/:id/reject", requirePermission("users:approve"), async (req: Authe
       details: { reason: reason || "Declined by administrator" },
     });
 
-    return res.json({ message: `Registration for ${targetUser.name} has been declined.` });
+    return res.json({
+      message: `Registration for ${targetUser.name} has been declined.`,
+      user: safeUser(updatedUser),
+    });
   } catch (err: any) {
     console.error("Failed to reject user:", err);
     return res.status(500).json({ error: "Failed to decline user registration." });

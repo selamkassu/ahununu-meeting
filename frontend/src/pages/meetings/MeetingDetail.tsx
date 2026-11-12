@@ -445,6 +445,16 @@ export default function MeetingDetail() {
       );
       return;
     }
+    // Approval prerequisite guard for approval-bound unlock targets
+    if (
+      (unlockTargetStatus === "READY_FOR_APPROVAL" || unlockTargetStatus === "PENDING_SIGNATURES") &&
+      !canCompleteMeeting
+    ) {
+      setUnlockError(
+        "Please complete at least one of the following: Meeting Summary, Action Items, or Decisions before submitting for approval."
+      );
+      return;
+    }
     setUnlocking(true);
     setUnlockError(null);
     try {
@@ -607,6 +617,17 @@ export default function MeetingDetail() {
 
   const handleRequestSignatures = async () => {
     if (!id || requestingSignatures) return;
+    // Approval prerequisite guard — at least one of Summary / Action Items / Decisions required
+    if (!canCompleteMeeting) {
+      await alert({
+        title: "Meeting Content Required",
+        message:
+          "Please complete at least one of the following: Meeting Summary, Action Items, or Decisions before submitting for approval.",
+        tone: "warning",
+        confirmLabel: "Understood",
+      });
+      return;
+    }
     setRequestingSignatures(true);
     try {
       const updated = await api.post<MeetingDetailType>(
@@ -636,6 +657,21 @@ export default function MeetingDetail() {
     } finally {
       setRequestingSignatures(false);
     }
+  };
+
+  // Approval prerequisite guard for opening the Approve Meeting modal
+  const handleOpenApprovalModal = async () => {
+    if (!canCompleteMeeting) {
+      await alert({
+        title: "Meeting Content Required",
+        message:
+          "Please complete at least one of the following: Meeting Summary, Action Items, or Decisions before submitting for approval.",
+        tone: "warning",
+        confirmLabel: "Understood",
+      });
+      return;
+    }
+    setIsApprovalModalOpen(true);
   };
 
   const updateStatus = async (status: MeetingStatus) => {
@@ -668,6 +704,19 @@ export default function MeetingDetail() {
           title: "Completion Blocked",
           message:
             "To complete the meeting, at least one of the three sections (Meeting Summary, Decision, or Action Item) must contain content. Completing the meeting is blocked only if all three are empty at the same time.",
+          tone: "warning",
+          confirmLabel: "Understood",
+        });
+        return;
+      }
+    }
+    // Approval prerequisite guard for approval-bound status transitions
+    if (status === "READY_FOR_APPROVAL" || status === "PENDING_SIGNATURES") {
+      if (!canCompleteMeeting) {
+        await alert({
+          title: "Meeting Content Required",
+          message:
+            "Please complete at least one of the following: Meeting Summary, Action Items, or Decisions before submitting for approval.",
           tone: "warning",
           confirmLabel: "Understood",
         });
@@ -885,7 +934,7 @@ export default function MeetingDetail() {
                 {canShowApproveButton && (
                   <Button
                     variant="primary"
-                    onClick={() => setIsApprovalModalOpen(true)}
+                    onClick={handleOpenApprovalModal}
                     className="bg-brand hover:bg-brand-dark text-white rounded-sm text-xs py-1.5 px-3.5 inline-flex items-center gap-1.5 font-semibold transition-all cursor-pointer border border-brand"
                   >
                     <ShieldCheck size={14} />
@@ -1249,7 +1298,7 @@ export default function MeetingDetail() {
           canManage={canManage && canEdit}
           onChange={load}
           canApprove={canApprove}
-          onApproveClick={() => setIsApprovalModalOpen(true)}
+          onApproveClick={handleOpenApprovalModal}
           onRequestSignaturesClick={handleRequestSignatures}
           requestingSignatures={requestingSignatures}
           onParticipantSignClick={() => setIsParticipantSignModalOpen(true)}
